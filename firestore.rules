@@ -1,0 +1,274 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================
+    // FONCTIONS UTILITAIRES
+    // =========================================================
+
+    // Vérifie que l'utilisateur est connecté
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    // Vérifie que l'utilisateur accède à ses propres données
+    function isOwner(userId) {
+      return isAuth() && request.auth.uid == userId;
+    }
+
+    // Vérifie le rôle via custom claims (défini côté serveur uniquement)
+    function hasRole(role) {
+      return isAuth() && request.auth.token.role == role;
+    }
+
+    function isAdmin() {
+      return hasRole('admin');
+    }
+
+    function isSeller() {
+      return hasRole('seller') || isAdmin();
+    }
+
+    function isDeliverer() {
+      return hasRole('deliverer') || isAdmin();
+    }
+
+    // Vérifie que les champs requis sont présents
+    function hasFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    // Vérifie qu'aucun champ interdit n'est modifié
+    function doesNotChange(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    // Vérifie que la requête ne dépasse pas X octets (anti-spam)
+    function isReasonableSize() {
+      return request.resource.size < 10240; // 10 KB max par document
+    }
+
+    // =========================================================
+    // UTILISATEURS
+    // =========================================================
+    match /users/{userId} {
+      // Lecture : soi-même ou admin
+      allow read: if isOwner(userId) || isAdmin();
+
+      // Création : uniquement son propre profil, juste après inscription
+      allow create: if isOwner(userId)
+        && hasFields(['email', 'createdAt', 'role'])
+        && request.resource.data.role == 'buyer'   // rôle forcé à buyer
+        && isReasonableSize();
+
+      // Mise à jour : soi-même, mais ne peut PAS changer son rôle ni son uid
+      allow update: if isOwner(userId)
+        && doesNotChange(['role', 'uid', 'email', 'createdAt'])
+        && isReasonableSize();
+
+      // Suppression : admin uniquement
+      allow delete: if isAdmin();
+
+      // Tokens FCM (sous-collection)
+      match /fcmTokens/{tokenId} {
+        allow read, write: if isOwner(userId);
+        allow delete: if isAdmin();
+      }
+    }
+
+    // =========================================================
+    // PRODUITS
+    // =========================================================
+    match /products/{productId} {
+      // Lecture publique
+      allow read: if true;
+
+      // Création : vendeur ou admin, avec validation des champs
+      allow create: if isSeller()
+        && hasFields(['name', 'price', 'sellerId', 'category', 'stock', 'createdAt'])
+        && request.resource.data.price is number
+        && request.resource.data.price > 0
+        && request.resource.data.price < 10000000       // max 10M FCFA
+        && request.resource.data.stock is int
+        && request.resource.data.stock >= 0
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 2
+        && request.resource.data.name.size() <= 100
+        && request.resource.data.sellerId == request.auth.uid  // ne peut créer que pour soi
+        && isReasonableSize();
+
+      // Mise à jour : le vendeur propriétaire ou l'admin
+      // Interdit de changer le sellerId après création
+      allow update: if (isSeller() && resource.data.sellerId == request.auth.uid
+                        && doesNotChange(['sellerId', 'createdAt']))
+                    || isAdmin();
+
+      // Suppression : admin uniquement (soft delete recommandé)
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================
+    // COMMANDES
+    // Aligné sur OfflineSyncManager : pendingOrders { id, order, timestamp, retryCount }
+    // =========================================================
+    match /orders/{orderId} {
+      // Lecture : l'acheteur, le vendeur concerné, ou l'admin
+      allow read: if isAdmin()
+                  || isOwner(resource.data.userId)
+                  || (isSeller() && resource.data.sellerId == request.auth.uid)
+                  || (isDeliverer() && resource.data.delivererId == request.auth.uid);
+
+      // Création : utilisateur connecté, commande pour soi-même
+      allow create: if isAuth()
+        && hasFields(['userId', 'items', 'total', 'status', 'createdAt', 'deliveryAddress'])
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.status == 'pending'       // statut forcé à pending
+        && request.resource.data.total is number
+        && request.resource.data.total > 0
+        && doesNotChange([])                               // tous les champs sont nouveaux
+        && isReasonableSize();
+
+      // Mise à jour : l'acheteur peut annuler, le vendeur/livreur peut changer le statut
+      // Interdit de modifier le total, l'userId ou les items après création
+      allow update: if doesNotChange(['userId', 'total', 'items', 'createdAt'])
+                    && (
+                      // L'acheteur peut seulement annuler une commande pending
+                      (isOwner(resource.data.userId)
+                        && resource.data.status == 'pending'
+                        && request.resource.data.status == 'cancelled')
+                      // Le vendeur peut faire avancer le statut
+                      || (isSeller() && resource.data.sellerId == request.auth.uid)
+                      // Le livreur peut mettre à jour la livraison
+                      || (isDeliverer() && resource.data.delivererId == request.auth.uid)
+                      // L'admin peut tout faire
+                      || isAdmin()
+                    );
+
+      // Suppression interdite (historique obligatoire)
+      allow delete: if false;
+    }
+
+    // =========================================================
+    // PAIEMENTS
+    // =========================================================
+    match /payments/{paymentId} {
+      // Lecture : l'utilisateur concerné ou l'admin
+      allow read: if isAdmin() || isOwner(resource.data.userId);
+
+      // Création : utilisateur connecté, pour soi-même
+      allow create: if isAuth()
+        && hasFields(['userId', 'orderId', 'amount', 'method', 'status', 'createdAt'])
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.amount is number
+        && request.resource.data.amount > 0
+        && isReasonableSize();
+
+      // Mise à jour et suppression : INTERDITES côté client
+      // Seules les Cloud Functions peuvent modifier les paiements
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // =========================================================
+    // PANIER
+    // Aligné sur OfflineSyncManager : pendingCart { id, cart, timestamp }
+    // =========================================================
+    match /carts/{userId} {
+      // Lecture et écriture : soi-même uniquement
+      allow read, write: if isOwner(userId) && isReasonableSize();
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // =========================================================
+    // LIVRAISONS
+    // =========================================================
+    match /deliveries/{deliveryId} {
+      allow read: if isAdmin()
+                  || isOwner(resource.data.userId)
+                  || (isDeliverer() && resource.data.delivererId == request.auth.uid);
+
+      allow create: if isAdmin();
+
+      // Le livreur peut mettre à jour la position et le statut
+      allow update: if isAdmin()
+                    || (isDeliverer()
+                        && resource.data.delivererId == request.auth.uid
+                        && doesNotChange(['userId', 'orderId', 'createdAt']));
+
+      allow delete: if false;
+    }
+
+    // =========================================================
+    // NOTIFICATIONS
+    // =========================================================
+    match /notifications/{userId}/items/{notifId} {
+      allow read: if isOwner(userId);
+      allow create: if isAdmin();  // Seul le serveur/admin crée des notifications
+      allow update: if isOwner(userId)
+                    && doesNotChange(['title', 'body', 'createdAt', 'type'])
+                    && request.resource.data.keys().hasOnly(['read', 'readAt']); // Peut seulement marquer comme lu
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // =========================================================
+    // FILE D'ATTENTE DE SYNC OFFLINE
+    // Aligné sur OfflineSyncManager : syncQueue { id, type, data, timestamp }
+    // =========================================================
+    match /syncQueue/{userId}/items/{itemId} {
+      allow read, create, delete: if isOwner(userId) && isReasonableSize();
+      allow update: if false; // On supprime et recrée, pas de mise à jour
+    }
+
+    // =========================================================
+    // ANALYTICS — admin uniquement
+    // =========================================================
+    match /analytics/{document=**} {
+      allow read, write: if isAdmin();
+    }
+
+    // =========================================================
+    // CONFIGURATION PUBLIQUE (prix livraison, zones, etc.)
+    // =========================================================
+    match /config/{document} {
+      allow read: if true;           // Lecture publique
+      allow write: if isAdmin();     // Écriture admin uniquement
+    }
+
+    // =========================================================
+    // VENDEURS (comptes publics)
+    // =========================================================
+    match /sellers/{sellerId} {
+      allow read: if true;
+      allow create: if isOwner(sellerId) && hasRole('seller')
+                    && hasFields(['name', 'phone', 'location', 'createdAt'])
+                    && isReasonableSize();
+      allow update: if (isOwner(sellerId) && doesNotChange(['createdAt', 'uid']))
+                    || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================
+    // AVIS / NOTES
+    // =========================================================
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow create: if isAuth()
+                    && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.rating is int
+                    && request.resource.data.rating >= 1
+                    && request.resource.data.rating <= 5
+                    && isReasonableSize();
+      allow update: if isOwner(resource.data.userId)
+                    && doesNotChange(['userId', 'productId', 'createdAt']);
+      allow delete: if isOwner(resource.data.userId) || isAdmin();
+    }
+
+    // =========================================================
+    // TOUT LE RESTE — INTERDIT PAR DÉFAUT
+    // =========================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

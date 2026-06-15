@@ -1,0 +1,136 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // =========================================================
+    // FONCTIONS UTILITAIRES
+    // =========================================================
+
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuth() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuth() && request.auth.token.role == 'admin';
+    }
+
+    function isSeller() {
+      return isAuth() && (request.auth.token.role == 'seller' || request.auth.token.role == 'admin');
+    }
+
+    // Vérifie que le fichier est bien une image
+    function isImage() {
+      return request.resource.contentType.matches('image/(jpeg|jpg|png|webp|gif)');
+    }
+
+    // Vérifie que le fichier est un PDF (pour les documents vendeurs)
+    function isPDF() {
+      return request.resource.contentType == 'application/pdf';
+    }
+
+    // Taille max image produit : 5 MB
+    function isValidProductImage() {
+      return isImage() && request.resource.size < 5 * 1024 * 1024;
+    }
+
+    // Taille max avatar : 2 MB
+    function isValidAvatar() {
+      return isImage() && request.resource.size < 2 * 1024 * 1024;
+    }
+
+    // Taille max document : 10 MB
+    function isValidDocument() {
+      return (isPDF() || isImage()) && request.resource.size < 10 * 1024 * 1024;
+    }
+
+    // =========================================================
+    // IMAGES PRODUITS
+    // Structure : /products/{sellerId}/{productId}/{fileName}
+    // =========================================================
+    match /products/{sellerId}/{productId}/{fileName} {
+      // Lecture publique (les images produits sont publiques)
+      allow read: if true;
+
+      // Upload : le vendeur pour ses propres produits uniquement
+      allow create: if isSeller()
+                    && request.auth.uid == sellerId
+                    && isValidProductImage();
+
+      // Remplacement : même règle
+      allow update: if isSeller()
+                    && request.auth.uid == sellerId
+                    && isValidProductImage();
+
+      // Suppression : le vendeur propriétaire ou l'admin
+      allow delete: if (isSeller() && request.auth.uid == sellerId) || isAdmin();
+    }
+
+    // =========================================================
+    // AVATARS UTILISATEURS
+    // Structure : /avatars/{userId}/{fileName}
+    // =========================================================
+    match /avatars/{userId}/{fileName} {
+      // Lecture publique
+      allow read: if true;
+
+      // Upload : soi-même uniquement
+      allow create, update: if isOwner(userId) && isValidAvatar();
+
+      // Suppression : soi-même ou admin
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // =========================================================
+    // DOCUMENTS VENDEURS (licences, certifications, etc.)
+    // Structure : /sellers/{sellerId}/documents/{fileName}
+    // =========================================================
+    match /sellers/{sellerId}/documents/{fileName} {
+      // Lecture : le vendeur lui-même ou l'admin
+      allow read: if isOwner(sellerId) || isAdmin();
+
+      // Upload : le vendeur pour ses propres documents
+      allow create, update: if isOwner(sellerId) && isValidDocument();
+
+      // Suppression : admin uniquement (documents légaux)
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================
+    // PREUVES DE LIVRAISON (photos)
+    // Structure : /deliveries/{deliveryId}/{fileName}
+    // =========================================================
+    match /deliveries/{deliveryId}/{fileName} {
+      // Lecture : admin uniquement (données sensibles)
+      allow read: if isAdmin();
+
+      // Upload : livreur authentifié
+      allow create: if isAuth()
+                    && request.auth.token.role == 'deliverer'
+                    && isValidProductImage();
+
+      allow update: if false;
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================
+    // EXPORTS ADMIN (CSV, PDF rapports)
+    // Structure : /exports/{adminId}/{fileName}
+    // =========================================================
+    match /exports/{adminId}/{fileName} {
+      allow read: if isAdmin() && request.auth.uid == adminId;
+      allow create, update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================
+    // TOUT LE RESTE — INTERDIT PAR DÉFAUT
+    // =========================================================
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

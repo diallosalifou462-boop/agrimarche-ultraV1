@@ -1,0 +1,45 @@
+{
+  "name": "agrimarche-ultra",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.5.2",
+    "express-validator": "^7.3.2",
+    "firebase": "^12.14.0",
+    "firebase-admin": "^14.0.0",
+    "helmet": "^8.2.0",
+    "leaflet": "^1.9.4",
+    "lucide-react": "^1.17.0",
+    "next": "^16.2.9",
+    "react": "^18",
+    "react-dom": "^18",
+    "react-is": "^19.2.7",
+    "react-leaflet": "^4.2.1",
+    "recharts": "^3.8.1",
+    "resend": "^6.12.4",
+    "sonner": "^2.0.7",
+    "workbox-window": "^7.4.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/helmet": "^0.0.48",
+    "@types/leaflet": "^1.9.21",
+    "@types/react": "19.2.17",
+    "@types/xlsx": "^0.0.35",
+    "autoprefixer": "^10.5.0",
+    "postcss": "^8.5.15",
+    "tailwindcss": "^3.4.19",
+    "typescript": "6.0.3"
+  }
+}

@@ -1,0 +1,74 @@
+╔══════════════════════════════════════════════════════════╗
+║          AGRIMARCHE ULTRA — Powered by Claude IA         ║
+║              Version 6.0 · Juin 2026                     ║
+╚══════════════════════════════════════════════════════════╝
+
+🚀 NOUVELLES FONCTIONNALITÉS IA :
+
+1. 🤖 AgriBot IA (bouton flottant sur toutes les pages)
+   - Chatbot propulsé par Claude (Anthropic)
+   - Comprend le français et le contexte sénégalais
+   - Conseils produits, commandes, prix, agriculture
+   - Suggestions rapides cliquables
+   - Historique de conversation en session
+
+2. 🔍 Recherche Intelligente
+   - Suggestions IA en temps réel pendant la frappe
+   - Auto-complétion contextuelle (produits locaux)
+   - Recherches populaires prédéfinies
+   - Interface fluide avec animations
+
+3. 💡 Recommandations IA (page produits)
+   - Analyse du panier actuel
+   - Recommandations personnalisées par IA
+   - Basé sur la catégorie et l'historique
+   - Mise à jour dynamique
+
+4. 📊 Insights IA Vendeur (dashboard)
+   - Score global de la boutique
+   - Opportunités, alertes, conseils, tendances
+   - Actions concrètes recommandées
+   - Analyse basée sur vos vraies données
+
+══════════════════════════════════════════════════════════
+📦 INSTALLATION :
+
+1. npm install
+2. Configurer .env.local :
+   - Firebase (comme avant)
+   - ANTHROPIC_API_KEY=sk-ant-... (NOUVEAU)
+     → Obtenir sur: console.anthropic.com
+
+3. npm run dev
+
+══════════════════════════════════════════════════════════
+🌐 DÉPLOIEMENT :
+
+Frontend: Vercel / Netlify
+→ Ajouter ANTHROPIC_API_KEY dans les variables d'env Vercel
+
+Backend: Render
+→ Même config Firebase qu'avant
+
+══════════════════════════════════════════════════════════
+📁 NOUVEAUX FICHIERS :
+
+src/components/AIChat/AgriBot.tsx     → Chatbot IA
+src/components/AIRecommendations.tsx  → Reco produits
+src/components/SellerAIInsights.tsx   → Analyse vendeur
+src/components/SmartSearch.tsx        → Recherche IA
+app/api/ai/agribot/route.ts          → API Claude
+app/api/ai/recommendations/route.ts  → API recos
+app/api/ai/seller-insights/route.ts  → API insights
+lib/ai/agent.ts                       → Agent IA revu
+
+══════════════════════════════════════════════════════════
+💡 COÛT IA ESTIMÉ :
+- AgriBot: ~$0.0001 par message (Claude Haiku)
+- Recommandations: ~$0.0001 par chargement
+- Insights vendeur: ~$0.0003 par visite dashboard
+→ Budget mensuel estimé: 3-10$ pour 1000 utilisateurs actifs
+
+╔══════════════════════════════════════════════════════════╗
+║  AgriMarché v6 · La marketplace IA du Sénégal           ║
+╚══════════════════════════════════════════════════════════╝
