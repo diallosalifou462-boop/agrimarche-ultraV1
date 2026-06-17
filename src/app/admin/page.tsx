@@ -491,7 +491,7 @@ const StatCard = ({ icon, label, value, change, color }: { icon: React.ReactNode
 
 export default function AdminDashboard() {
   const router = useRouter();
-  const { user: authUser } = useAuth();
+  const { user: authUser, loading: authLoading } = useAuth();
 
   // ── UI STATE ──────────────────────────────────────────────
   const [sidebarOpen, setSidebarOpen]       = useState(true);
@@ -648,13 +648,15 @@ export default function AdminDashboard() {
 
   // ── ROLE GUARD ────────────────────────────────────────────
   useEffect(() => {
+    if (authLoading) return; // attendre que Firebase Auth soit prêt
     if (!authUser) { router.replace('/auth/login'); return; }
     getDoc(doc(db, 'users', authUser.uid)).then(snap => {
       if (!snap.exists() || snap.data()?.role !== 'admin') {
-        router.replace('/');
+        router.replace('/'); // pas admin → page d'accueil
       }
+      // admin confirmé → déjà sur /admin, rien à faire
     });
-  }, [authUser, router]);
+  }, [authUser, authLoading, router]);
 
   // ── FIREBASE LISTENERS ────────────────────────────────────
   useEffect(() => {
