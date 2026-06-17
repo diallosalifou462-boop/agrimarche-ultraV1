@@ -648,13 +648,13 @@ export default function AdminDashboard() {
 
   // ── ROLE GUARD ────────────────────────────────────────────
   useEffect(() => {
-    if (authLoading) return; // attendre que Firebase Auth soit prêt
+    if (authLoading) return; // Firebase pas encore prêt → ne rien faire
     if (!authUser) { router.replace('/auth/login'); return; }
     getDoc(doc(db, 'users', authUser.uid)).then(snap => {
       if (!snap.exists() || snap.data()?.role !== 'admin') {
-        router.replace('/'); // pas admin → page d'accueil
+        router.replace('/auth/login');
       }
-      // admin confirmé → déjà sur /admin, rien à faire
+      // admin confirmé → on reste sur /admin, aucune redirection
     });
   }, [authUser, authLoading, router]);
 
@@ -1358,6 +1358,18 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
   }
 
   // ── RENDER ────────────────────────────────────────────────
+  // Bloque le rendu tant que Firebase Auth n'est pas prêt
+  if (authLoading) {
+    return (
+      <div style={{ minHeight:'100vh', background:'#0a0c10', display:'flex', alignItems:'center', justifyContent:'center' }}>
+        <div style={{ textAlign:'center' }}>
+          <div style={{ width:48, height:48, border:'3px solid #10b981', borderTopColor:'transparent', borderRadius:'50%', animation:'spin 1s linear infinite', margin:'0 auto 16px' }} />
+          <p style={{ color:'#6b7280', fontSize:14 }}>Chargement...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <AdminGuard>
       <style>{styles}</style>
