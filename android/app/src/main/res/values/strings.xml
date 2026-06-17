@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">AgriMarché</string>
+    <string name="title_activity_main">AgriMarché</string>
+    <string name="package_name">com.agrimarche.app</string>
+    <string name="custom_url_scheme">com.agrimarche.app</string>
+</resources>

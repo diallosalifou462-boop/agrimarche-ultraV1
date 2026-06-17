@@ -6,6 +6,7 @@ import { NotificationProvider } from '@/components/NotificationProvider';
 export const metadata: Metadata = {
   title: 'AgriMarché - Votre marché agricole',
   description: 'Achetez et vendez des produits agricoles frais au Sénégal',
+  manifest: '/manifest.json',
 };
 
 export default function RootLayout({
