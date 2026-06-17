@@ -9,26 +9,20 @@ export function AdminGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter();
 
   useEffect(() => {
-    // Attendre que le chargement soit fini
+    // Attendre que Firebase Auth ET le profil Firestore soient prêts
     if (loading) return;
-    
-    // Pas d'utilisateur connecté
-    if (!user) {
-      router.replace('/auth/login');
-      return;
-    }
-    
-    // Utilisateur connecté mais pas admin
+    if (!user) { router.replace('/auth/login'); return; }
+
+    // Attendre que profile soit chargé avant de juger le rôle
+    if (profile === null) return; // ← profil pas encore chargé, on attend
+
     if (profile?.role !== 'admin') {
       router.replace('/main/products');
-      return;
     }
-    
-    // Admin : on reste sur la page
   }, [user, profile, loading, router]);
 
-  // Pendant le chargement, afficher un loader
-  if (loading) {
+  // Pendant le chargement OU pendant que profile se charge → spinner
+  if (loading || (user && profile === null)) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#060e09]">
         <div className="relative w-12 h-12">
@@ -38,11 +32,11 @@ export function AdminGuard({ children }: { children: React.ReactNode }) {
     );
   }
 
-  // Si pas admin ou pas connecté, ne rien afficher (la redirection est en cours)
+  // Pas connecté ou pas admin → rien (redirection en cours)
   if (!user || profile?.role !== 'admin') {
     return null;
   }
 
-  // Admin autorisé
+  // Admin confirmé ✅
   return <>{children}</>;
 }
