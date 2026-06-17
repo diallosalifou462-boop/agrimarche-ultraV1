@@ -5,39 +5,32 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
-import { doc, getDoc } from 'firebase/firestore';
-import { db } from '@/lib/firebase/firebase';
+
+const FORCED_ADMIN_EMAIL = 'support@agrimarche.com';
+
+function getRedirectPath(email: string | null | undefined, role: string | undefined) {
+  if (email === FORCED_ADMIN_EMAIL) return '/admin';
+  if (role === 'admin') return '/admin';
+  if (role === 'seller') return '/seller/dashboard';
+  if (role === 'delivery') return '/delivery/dashboard';
+  return '/main/products';
+}
 
 export default function LoginPage() {
   const router = useRouter();
-  const { signIn, user, loading: authLoading } = useAuth();
+  const { signIn, user, profile, loading: authLoading } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
+  // Redirige automatiquement si une session est déjà active (ex: retour sur /auth/login alors que connecté)
   useEffect(() => {
-    const redirectBasedOnRole = async () => {
-      if (user && !authLoading) {
-        const userRef = doc(db, 'users', user.uid);
-        const userSnap = await getDoc(userRef);
-        const userData = userSnap.data();
-        const role = userData?.role || 'client';
-        
-        if (role === 'admin') {
-          router.push('/admin');
-        } else if (role === 'seller') {
-          router.push('/seller/dashboard');
-        } else if (role === 'delivery') {
-          router.push('/delivery/dashboard');
-        } else {
-          router.push('/main/products');
-        }
-      }
-    };
-    
-    redirectBasedOnRole();
-  }, [user, authLoading, router]);
+    if (authLoading) return; // attend la confirmation Firebase avant de juger
+    if (user) {
+      router.replace(getRedirectPath(user.email, profile?.role));
+    }
+  }, [user, profile, authLoading, router]);
 
   const handleLogin = async () => {
     setError('');
@@ -51,21 +44,14 @@ export default function LoginPage() {
 
     try {
       const result = await signIn(email, password);
-      
-      const userRef = doc(db, 'users', result.user.uid);
-      const userSnap = await getDoc(userRef);
-      const userData = userSnap.data();
-      const role = userData?.role || 'client';
-      
-      if (role === 'admin') {
-        router.push('/admin');
-      } else if (role === 'seller') {
-        router.push('/seller/dashboard');
-      } else if (role === 'delivery') {
-        router.push('/delivery/dashboard');
-      } else {
-        router.push('/main/products');
+      // profile peut ne pas être encore rafraîchi dans le contexte juste après signIn,
+      // donc on utilise directement l'email retourné pour le cas admin forcé.
+      if (result.user.email === FORCED_ADMIN_EMAIL) {
+        router.replace('/admin');
+        return;
       }
+      // Pour les autres rôles, on laisse le useEffect ci-dessus rediriger
+      // une fois que le AuthContext aura chargé le profil Firestore.
     } catch (error) {
       setError('Email ou mot de passe incorrect');
     } finally {
