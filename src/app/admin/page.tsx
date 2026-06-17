@@ -29,7 +29,7 @@ import {
 import {
   signOut
 } from "firebase/auth";
-import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import { getToken, onMessage } from "firebase/messaging";
 import {
   AreaChart, Area, BarChart, Bar, LineChart, Line,
@@ -526,6 +526,36 @@ export default function AdminDashboard() {
   const [ads, setAds] = useState<any[]>([]);
   const [adForm, setAdForm] = useState({ title: '', subtitle: '', badge: '', imageUrl: '', linkUrl: '', placement: 'banner', active: true, priority: 0 });
   const [adSaving, setAdSaving] = useState(false);
+  const [adsSubTab, setAdsSubTab] = useState<'promotions' | 'publicites'>('promotions');
+
+  // ── PROMOTION FORM (product-based, Jumia-style) ──
+  const [promoForm, setPromoForm] = useState({
+    productId: '',
+    discountPercent: 20,
+    badge: '🔥 PROMO',
+    placement: 'banner',
+    active: true,
+    priority: 0,
+  });
+  const [promoSaving, setPromoSaving] = useState(false);
+  const [editingPromoId, setEditingPromoId] = useState<string | null>(null);
+
+  // ── PUBLICITE FORM (image upload Firebase Storage) ──
+  const [pubForm, setPubForm] = useState({
+    title: '',
+    partnerName: '',
+    imageFile: null as File | null,
+    imagePreview: '',
+    imageUrl: '',
+    linkUrl: '',
+    placement: 'banner',
+    active: true,
+    priority: 0,
+  });
+  const [pubUploading, setPubUploading] = useState(false);
+  const [pubSaving, setPubSaving] = useState(false);
+  const [editingPubId, setEditingPubId] = useState<string | null>(null);
+  const [editingPubOldPath, setEditingPubOldPath] = useState<string | null>(null);
 
   const [broadcastForm, setBroadcastForm]   = useState<BroadcastForm>(defaultBroadcast);
   const [broadcastSending, setBroadcastSending] = useState(false);
@@ -1305,7 +1335,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
     { id:'regions',        label:'Régions',             icon:<Map size={18}/>,             badge:0 },
     { id:'weather',        label:'Météo Sénégal',        icon:<Cloud size={18}/>,            badge:0 },
     { id:'broadcast',      label:'Diffusion',           icon:<Send size={18}/>,            badge:0 },
-    { id:'ads',            label:'Publicités',          icon:<Megaphone size={18}/>,       badge:0 },
+    { id:'ads',            label:'Promos & Pubs',        icon:<Megaphone size={18}/>,       badge:0 },
     { id:'notifications',  label:'Notifications',       icon:<BellRing size={18}/>,        badge:unreadCount },
     { id:'delivery',       label:'Livraisons',          icon:<Truck size={18}/>,           badge:0 },
     { id:'settings',       label:'Paramètres',          icon:<Settings size={18}/>,        badge:0 },
@@ -3035,6 +3065,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
               </div>
             )}
 
+
             {/* ═══ PROMOTIONS & PUBLICITÉS ════════════════════ */}
             {activeTab === 'ads' && (
               <div className="animate-fadeIn" style={{ display:'grid', gap:24 }}>
@@ -3043,45 +3074,30 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                 <div style={{
                   position:'relative', overflow:'hidden', borderRadius:20, padding:'28px 24px',
                   background:'linear-gradient(135deg,#0a0f0d 0%,#16241c 55%,#0a0f0d 100%)',
-                  border:'1px solid rgba(212,175,55,0.35)',
-                  boxShadow:'0 20px 60px rgba(0,0,0,0.35)'
+                  border:'1px solid rgba(212,175,55,0.35)', boxShadow:'0 20px 60px rgba(0,0,0,0.35)'
                 }}>
-                  {/* orbe déco */}
-                  <div style={{ position:'absolute', top:-60, right:-60, width:220, height:220, borderRadius:'50%',
-                    background:'radial-gradient(circle,rgba(212,175,55,0.22),transparent 70%)', pointerEvents:'none' }}/>
-                  <div style={{ position:'absolute', bottom:-40, left:-40, width:150, height:150, borderRadius:'50%',
-                    background:'radial-gradient(circle,rgba(212,175,55,0.1),transparent 70%)', pointerEvents:'none' }}/>
-
+                  <div style={{ position:'absolute', top:-60, right:-60, width:220, height:220, borderRadius:'50%', background:'radial-gradient(circle,rgba(212,175,55,0.22),transparent 70%)', pointerEvents:'none' }}/>
                   <div style={{ display:'flex', alignItems:'center', gap:14, position:'relative', zIndex:1 }}>
-                    <div style={{
-                      width:52, height:52, borderRadius:15, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0,
-                      background:'linear-gradient(135deg,#D4AF37,#F5E1A4,#B8860B)', boxShadow:'0 8px 24px rgba(212,175,55,0.45)'
-                    }}>
+                    <div style={{ width:52, height:52, borderRadius:15, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, background:'linear-gradient(135deg,#D4AF37,#F5E1A4,#B8860B)', boxShadow:'0 8px 24px rgba(212,175,55,0.45)' }}>
                       <Megaphone size={26} color="#111"/>
                     </div>
                     <div>
-                      <h2 style={{
-                        fontSize:24, fontWeight:700, letterSpacing:0.4, margin:0,
-                        background:'linear-gradient(135deg,#F5E1A4 0%,#D4AF37 50%,#B8860B 100%)',
-                        WebkitBackgroundClip:'text', backgroundClip:'text', color:'transparent'
-                      }}>Promotions &amp; Publicités</h2>
+                      <h2 style={{ fontSize:24, fontWeight:700, letterSpacing:0.4, margin:0, background:'linear-gradient(135deg,#F5E1A4 0%,#D4AF37 50%,#B8860B 100%)', WebkitBackgroundClip:'text', backgroundClip:'text', color:'transparent' }}>
+                        Promotions &amp; Publicités
+                      </h2>
                       <p style={{ fontSize:11, color:'rgba(255,255,255,0.45)', marginTop:3, letterSpacing:1.2, textTransform:'uppercase' }}>
                         Sacré Terroir · Visibilité Premium · AgriMarché
                       </p>
                     </div>
                   </div>
-
-                  {/* Stats rapides */}
-                  <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:10, marginTop:22, position:'relative', zIndex:1 }}>
+                  <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:10, marginTop:22, position:'relative', zIndex:1 }}>
                     {[
-                      { label:'Actives',       value: ads.filter(a=>a.active).length,       icon:<Sparkles size={14}/>,  color:'#D4AF37' },
-                      { label:'Total créées',  value: ads.length,                            icon:<Gift size={14}/>,      color:'#F5E1A4' },
-                      { label:'En bannière',   value: ads.filter(a=>a.placement==='banner'||a.placement==='both').length, icon:<Star size={14}/>, color:'#B8860B' },
+                      { label:'Promos actives',  value: ads.filter(a=>a.active&&a.type==='promotion').length,  icon:<Sparkles size={14}/>, color:'#D4AF37' },
+                      { label:'Pubs actives',    value: ads.filter(a=>a.active&&a.type==='publicite').length,  icon:<Gift size={14}/>,     color:'#F5E1A4' },
+                      { label:'Total créées',    value: ads.length,                                             icon:<Star size={14}/>,     color:'#B8860B' },
+                      { label:'En bannière',     value: ads.filter(a=>a.placement==='banner'||a.placement==='both').length, icon:<Award size={14}/>, color:'#10b981' },
                     ].map((s,i)=>(
-                      <div key={i} style={{
-                        background:'rgba(255,255,255,0.04)', border:'1px solid rgba(212,175,55,0.18)',
-                        borderRadius:12, padding:'12px 14px', backdropFilter:'blur(6px)'
-                      }}>
+                      <div key={i} style={{ background:'rgba(255,255,255,0.04)', border:'1px solid rgba(212,175,55,0.18)', borderRadius:12, padding:'12px 14px', backdropFilter:'blur(6px)' }}>
                         <div style={{ display:'flex', alignItems:'center', gap:5, color:s.color, marginBottom:6 }}>
                           {s.icon}
                           <span style={{ fontSize:9, letterSpacing:1.2, textTransform:'uppercase', color:'rgba(255,255,255,0.4)' }}>{s.label}</span>
@@ -3092,288 +3108,625 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                   </div>
                 </div>
 
-                {/* ── Formulaire création ── */}
-                <div style={{
-                  borderRadius:20, padding:24,
-                  background:'linear-gradient(160deg,#0f1a14 0%,#1a2a20 100%)',
-                  border:'1px solid rgba(212,175,55,0.22)', boxShadow:'0 16px 48px rgba(0,0,0,0.22)'
-                }}>
-                  <h3 style={{
-                    fontSize:16, fontWeight:700, color:'#F5E1A4',
-                    display:'flex', alignItems:'center', gap:8, margin:0, marginBottom:20
-                  }}>
-                    <Sparkles size={17} color="#D4AF37"/> Créer une promotion exclusive
-                  </h3>
-
-                  <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:14 }}>
-
-                    {/* Titre */}
-                    <div style={{ gridColumn:'1/-1' }}>
-                      <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#D4AF37', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>Titre principal *</label>
-                      <input
-                        style={{ background:'rgba(255,255,255,0.05)', border:'1px solid rgba(212,175,55,0.25)', borderRadius:10, padding:12, color:'#fff', width:'100%', fontSize:13, outline:'none' }}
-                        placeholder="Ex : Récolte d'Or — Tomates -30%"
-                        value={adForm.title}
-                        onChange={e=>setAdForm({...adForm,title:e.target.value})}
-                      />
-                    </div>
-
-                    {/* Sous-titre */}
-                    <div style={{ gridColumn:'1/-1' }}>
-                      <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#D4AF37', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>Sous-titre / accroche</label>
-                      <input
-                        style={{ background:'rgba(255,255,255,0.05)', border:'1px solid rgba(212,175,55,0.25)', borderRadius:10, padding:12, color:'#fff', width:'100%', fontSize:13, outline:'none' }}
-                        placeholder="Ex : Offre limitée · Direct producteur · Dakar"
-                        value={adForm.subtitle}
-                        onChange={e=>setAdForm({...adForm,subtitle:e.target.value})}
-                      />
-                    </div>
-
-                    {/* Badge */}
-                    <div>
-                      <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#D4AF37', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>Badge / étiquette</label>
-                      <select
-                        style={{ background:'#111317', border:'1px solid rgba(212,175,55,0.25)', borderRadius:10, padding:12, color:'#fff', width:'100%', fontSize:13, outline:'none' }}
-                        value={adForm.badge}
-                        onChange={e=>setAdForm({...adForm,badge:e.target.value})}
-                      >
-                        <option value="">Aucun</option>
-                        <option value="🔥 PROMO">🔥 PROMO</option>
-                        <option value="✨ NOUVEAU">✨ NOUVEAU</option>
-                        <option value="💎 EXCLUSIF">💎 EXCLUSIF</option>
-                        <option value="⏳ LIMITÉ">⏳ LIMITÉ</option>
-                        <option value="⭐ TOP VENTE">⭐ TOP VENTE</option>
-                        <option value="🌱 BIO">🌱 BIO</option>
-                        <option value="📦 SOLDES">📦 SOLDES</option>
-                      </select>
-                    </div>
-
-                    {/* Priorité */}
-                    <div>
-                      <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#D4AF37', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>Priorité d'affichage</label>
-                      <select
-                        style={{ background:'#111317', border:'1px solid rgba(212,175,55,0.25)', borderRadius:10, padding:12, color:'#fff', width:'100%', fontSize:13, outline:'none' }}
-                        value={adForm.priority}
-                        onChange={e=>setAdForm({...adForm,priority:Number(e.target.value)})}
-                      >
-                        <option value={0}>Normale</option>
-                        <option value={1}>🥈 Élevée</option>
-                        <option value={2}>🥇 Maximale — en tête</option>
-                      </select>
-                    </div>
-
-                    {/* Image */}
-                    <div>
-                      <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#D4AF37', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>URL de l'image *</label>
-                      <input
-                        style={{ background:'rgba(255,255,255,0.05)', border:'1px solid rgba(212,175,55,0.25)', borderRadius:10, padding:12, color:'#fff', width:'100%', fontSize:13, outline:'none' }}
-                        placeholder="https://..."
-                        value={adForm.imageUrl}
-                        onChange={e=>setAdForm({...adForm,imageUrl:e.target.value})}
-                      />
-                    </div>
-
-                    {/* Lien */}
-                    <div>
-                      <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#D4AF37', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>Lien (au clic)</label>
-                      <input
-                        style={{ background:'rgba(255,255,255,0.05)', border:'1px solid rgba(212,175,55,0.25)', borderRadius:10, padding:12, color:'#fff', width:'100%', fontSize:13, outline:'none' }}
-                        placeholder="/main/products ou lien externe"
-                        value={adForm.linkUrl}
-                        onChange={e=>setAdForm({...adForm,linkUrl:e.target.value})}
-                      />
-                    </div>
-
-                    {/* Emplacement */}
-                    <div>
-                      <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#D4AF37', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>Emplacement</label>
-                      <select
-                        style={{ background:'#111317', border:'1px solid rgba(212,175,55,0.25)', borderRadius:10, padding:12, color:'#fff', width:'100%', fontSize:13, outline:'none' }}
-                        value={adForm.placement}
-                        onChange={e=>setAdForm({...adForm,placement:e.target.value})}
-                      >
-                        <option value="banner">📌 Bannière vedette (haut de page)</option>
-                        <option value="feed">🎞️ Carrousel dans le feed produits</option>
-                        <option value="both">📌🎞️ Les deux emplacements</option>
-                      </select>
-                    </div>
-
-                    {/* Actif */}
-                    <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-                      <input
-                        type="checkbox"
-                        id="adActive"
-                        checked={adForm.active}
-                        onChange={e=>setAdForm({...adForm,active:e.target.checked})}
-                        style={{ width:16, height:16, accentColor:'#D4AF37', cursor:'pointer' }}
-                      />
-                      <label htmlFor="adActive" style={{ fontSize:13, fontWeight:500, color:'rgba(255,255,255,0.85)', cursor:'pointer' }}>
-                        Publier immédiatement
-                      </label>
-                    </div>
-                  </div>
-
-                  {/* Aperçu live */}
-                  {(adForm.imageUrl || adForm.title) && (
-                    <div style={{ marginTop:20 }}>
-                      <div style={{ fontSize:10, color:'rgba(255,255,255,0.35)', letterSpacing:1.2, textTransform:'uppercase', marginBottom:8 }}>Aperçu temps réel</div>
-                      <div style={{
-                        position:'relative', borderRadius:16, overflow:'hidden', height:140,
-                        border:'1px solid rgba(212,175,55,0.28)', background:'#0a0f0d'
+                {/* ── Sous-onglets ── */}
+                <div style={{ display:'flex', gap:0, background:'rgba(255,255,255,0.03)', borderRadius:16, padding:5, border:'1px solid rgba(212,175,55,0.15)' }}>
+                  {([
+                    ['promotions', '🏷️ Promotions', 'Prix réduits sur produits existants'],
+                    ['publicites', '🖼️ Publicités', 'Bannières partenaires avec image'],
+                  ] as const).map(([key, label, sub])=>(
+                    <button key={key} onClick={()=>setAdsSubTab(key)}
+                      style={{
+                        flex:1, padding:'12px 16px', borderRadius:12, border:'none', cursor:'pointer', transition:'all .2s',
+                        background: adsSubTab===key ? 'linear-gradient(135deg,rgba(212,175,55,0.2),rgba(212,175,55,0.08))' : 'transparent',
+                        borderBottom: adsSubTab===key ? '2px solid #D4AF37' : '2px solid transparent',
                       }}>
-                        {adForm.imageUrl && (
-                          <img src={adForm.imageUrl} alt="preview" style={{ position:'absolute', inset:0, width:'100%', height:'100%', objectFit:'cover', opacity:0.5 }} loading="lazy"/>
-                        )}
-                        <div style={{ position:'absolute', inset:0, background:'linear-gradient(90deg,rgba(10,15,13,0.95) 10%,rgba(10,15,13,0.15) 100%)' }}/>
-                        <div style={{ position:'absolute', left:18, top:'50%', transform:'translateY(-50%)', maxWidth:'72%' }}>
-                          {adForm.badge && (
-                            <span style={{
-                              display:'inline-block', fontSize:10, fontWeight:700, letterSpacing:1.2, color:'#0a0f0d',
-                              background:'linear-gradient(135deg,#D4AF37,#F5E1A4)', borderRadius:6, padding:'3px 10px', marginBottom:8
-                            }}>{adForm.badge}</span>
-                          )}
-                          <div style={{ fontSize:19, fontWeight:700, color:'#fff', lineHeight:1.25 }}>
-                            {adForm.title || 'Titre de la promotion'}
+                      <div style={{ fontWeight:700, fontSize:14, color: adsSubTab===key ? '#F5E1A4' : '#6b7280' }}>{label}</div>
+                      <div style={{ fontSize:10, color: adsSubTab===key ? '#D4AF37' : '#4b5563', marginTop:2 }}>{sub}</div>
+                    </button>
+                  ))}
+                </div>
+
+                {/* ══════════════════════════════════════════════════
+                    SOUS-ONGLET : PROMOTIONS (sélection produit + %)
+                    ══════════════════════════════════════════════════ */}
+                {adsSubTab === 'promotions' && (() => {
+                  const selectedProduct = products.find(p=>p.id===promoForm.productId);
+                  const originalPrice   = selectedProduct?.price ?? 0;
+                  const discountedPrice = Math.round(originalPrice * (1 - promoForm.discountPercent / 100));
+                  const savings         = originalPrice - discountedPrice;
+
+                  return (
+                    <div style={{ display:'grid', gap:20 }}>
+                      {/* Formulaire */}
+                      <div style={{ borderRadius:20, padding:24, background:'linear-gradient(160deg,#0f1a14 0%,#1a2a20 100%)', border:'1px solid rgba(212,175,55,0.22)' }}>
+                        <h3 style={{ fontSize:16, fontWeight:700, color:'#F5E1A4', display:'flex', alignItems:'center', gap:8, margin:0, marginBottom:20 }}>
+                          <Sparkles size={17} color="#D4AF37"/> {editingPromoId ? 'Modifier la promotion' : 'Créer une promotion produit'}
+                        </h3>
+
+                        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:14 }}>
+
+                          {/* Sélection produit */}
+                          <div style={{ gridColumn:'1/-1' }}>
+                            <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#D4AF37', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>Produit concerné *</label>
+                            <select
+                              style={{ background:'#111317', border:'1px solid rgba(212,175,55,0.25)', borderRadius:10, padding:12, color:'#fff', width:'100%', fontSize:13, outline:'none' }}
+                              value={promoForm.productId}
+                              onChange={e=>setPromoForm({...promoForm, productId:e.target.value})}
+                            >
+                              <option value="">— Choisir un produit —</option>
+                              {products.map(p=>(
+                                <option key={p.id} value={p.id}>{p.name} · {p.category} · {p.price?.toLocaleString()} FCFA · Stock {p.stock}</option>
+                              ))}
+                            </select>
                           </div>
-                          {adForm.subtitle && (
-                            <div style={{ fontSize:11, color:'#D4AF37', marginTop:4, letterSpacing:0.4 }}>{adForm.subtitle}</div>
+
+                          {/* Aperçu prix Jumia-style */}
+                          {selectedProduct && (
+                            <div style={{ gridColumn:'1/-1', background:'rgba(212,175,55,0.06)', border:'1px solid rgba(212,175,55,0.2)', borderRadius:14, padding:18 }}>
+                              <div style={{ fontSize:11, color:'rgba(255,255,255,0.4)', letterSpacing:1, textTransform:'uppercase', marginBottom:10 }}>Aperçu prix — style Jumia</div>
+                              <div style={{ display:'flex', alignItems:'center', gap:16, flexWrap:'wrap' }}>
+                                {/* Image produit si disponible */}
+                                {selectedProduct.images?.[0] && (
+                                  <img src={selectedProduct.images[0]} alt={selectedProduct.name} style={{ width:64, height:64, objectFit:'cover', borderRadius:10, flexShrink:0 }} loading="lazy"/>
+                                )}
+                                <div>
+                                  <div style={{ fontWeight:700, fontSize:15, color:'#fff', marginBottom:4 }}>{selectedProduct.name}</div>
+                                  <div style={{ display:'flex', alignItems:'baseline', gap:10, flexWrap:'wrap' }}>
+                                    {/* Nouveau prix — vert vif */}
+                                    <span style={{ fontSize:26, fontWeight:800, color:'#10b981' }}>{discountedPrice.toLocaleString()} FCFA</span>
+                                    {/* Ancien prix barré */}
+                                    <span style={{ fontSize:16, color:'#6b7280', textDecoration:'line-through' }}>{originalPrice.toLocaleString()} FCFA</span>
+                                    {/* Badge % réduction */}
+                                    <span style={{ fontSize:13, fontWeight:700, color:'#fff', background:'#ef4444', borderRadius:6, padding:'3px 10px' }}>
+                                      -{promoForm.discountPercent}%
+                                    </span>
+                                  </div>
+                                  <div style={{ fontSize:12, color:'#f59e0b', marginTop:6 }}>
+                                    💰 Vous économisez {savings.toLocaleString()} FCFA
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
                           )}
+
+                          {/* % de réduction */}
+                          <div>
+                            <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#D4AF37', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>
+                              Réduction : <span style={{ color:'#ef4444', fontSize:14 }}>{promoForm.discountPercent}%</span>
+                            </label>
+                            <input
+                              type="range" min={5} max={80} step={5}
+                              value={promoForm.discountPercent}
+                              onChange={e=>setPromoForm({...promoForm, discountPercent:Number(e.target.value)})}
+                              style={{ width:'100%', accentColor:'#D4AF37', cursor:'pointer', background:'transparent', border:'none', padding:0, height:6 }}
+                            />
+                            <div style={{ display:'flex', justifyContent:'space-between', fontSize:10, color:'#6b7280', marginTop:4 }}>
+                              <span>5%</span><span>80%</span>
+                            </div>
+                          </div>
+
+                          {/* Badge */}
+                          <div>
+                            <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#D4AF37', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>Badge</label>
+                            <select
+                              style={{ background:'#111317', border:'1px solid rgba(212,175,55,0.25)', borderRadius:10, padding:12, color:'#fff', width:'100%', fontSize:13, outline:'none' }}
+                              value={promoForm.badge}
+                              onChange={e=>setPromoForm({...promoForm,badge:e.target.value})}
+                            >
+                              <option value="🔥 PROMO">🔥 PROMO</option>
+                              <option value="⏳ LIMITÉ">⏳ LIMITÉ</option>
+                              <option value="💎 EXCLUSIF">💎 EXCLUSIF</option>
+                              <option value="⭐ TOP VENTE">⭐ TOP VENTE</option>
+                              <option value="🌱 BIO">🌱 BIO</option>
+                              <option value="📦 SOLDES">📦 SOLDES</option>
+                            </select>
+                          </div>
+
+                          {/* Emplacement */}
+                          <div>
+                            <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#D4AF37', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>Emplacement</label>
+                            <select
+                              style={{ background:'#111317', border:'1px solid rgba(212,175,55,0.25)', borderRadius:10, padding:12, color:'#fff', width:'100%', fontSize:13, outline:'none' }}
+                              value={promoForm.placement}
+                              onChange={e=>setPromoForm({...promoForm,placement:e.target.value})}
+                            >
+                              <option value="banner">📌 Bannière vedette</option>
+                              <option value="feed">🎞️ Carrousel feed</option>
+                              <option value="both">📌🎞️ Les deux</option>
+                            </select>
+                          </div>
+
+                          {/* Priorité */}
+                          <div>
+                            <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#D4AF37', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>Priorité</label>
+                            <select
+                              style={{ background:'#111317', border:'1px solid rgba(212,175,55,0.25)', borderRadius:10, padding:12, color:'#fff', width:'100%', fontSize:13, outline:'none' }}
+                              value={promoForm.priority}
+                              onChange={e=>setPromoForm({...promoForm,priority:Number(e.target.value)})}
+                            >
+                              <option value={0}>Normale</option>
+                              <option value={1}>🥈 Élevée</option>
+                              <option value={2}>🥇 Maximale</option>
+                            </select>
+                          </div>
+
+                          {/* Actif */}
+                          <div style={{ display:'flex', alignItems:'center', gap:10, gridColumn:'1/-1' }}>
+                            <input type="checkbox" id="promoActive" checked={promoForm.active} onChange={e=>setPromoForm({...promoForm,active:e.target.checked})} style={{ width:16, height:16, accentColor:'#D4AF37', cursor:'pointer' }}/>
+                            <label htmlFor="promoActive" style={{ fontSize:13, fontWeight:500, color:'rgba(255,255,255,0.85)', cursor:'pointer' }}>Publier immédiatement</label>
+                          </div>
                         </div>
-                        <div style={{
-                          position:'absolute', bottom:10, right:14, fontSize:10, fontWeight:700, letterSpacing:0.8,
-                          color:'#0a0f0d', background:'linear-gradient(135deg,#D4AF37,#F5E1A4)', borderRadius:8, padding:'4px 10px'
-                        }}>DÉCOUVRIR ✦</div>
+
+                        <div style={{ display:'flex', gap:10, marginTop:20 }}>
+                          {editingPromoId && (
+                            <button
+                              onClick={()=>{
+                                setEditingPromoId(null);
+                                setPromoForm({ productId:'', discountPercent:20, badge:'🔥 PROMO', placement:'banner', active:true, priority:0 });
+                              }}
+                              style={{
+                                padding:'13px 18px', borderRadius:12, border:'1px solid rgba(255,255,255,0.15)',
+                                background:'rgba(255,255,255,0.05)', color:'#9ca3af', fontWeight:600, fontSize:14, cursor:'pointer',
+                              }}
+                            >Annuler</button>
+                          )}
+                          <button
+                            disabled={promoSaving || !promoForm.productId}
+                            onClick={async () => {
+                              if (!promoForm.productId || !selectedProduct) return;
+                              setPromoSaving(true);
+                              try {
+                                // Toujours recalculé depuis le prix ACTUEL du produit, jamais figé
+                                const payload = {
+                                  type: 'promotion',
+                                  productId: promoForm.productId,
+                                  title: selectedProduct.name,
+                                  subtitle: `${selectedProduct.category} · ${selectedProduct.region ?? ''}`,
+                                  badge: promoForm.badge,
+                                  imageUrl: selectedProduct.images?.[0] ?? '',
+                                  linkUrl: `/main/products?id=${promoForm.productId}`,
+                                  placement: promoForm.placement,
+                                  active: promoForm.active,
+                                  priority: promoForm.priority,
+                                  discountPercent: promoForm.discountPercent,
+                                  originalPrice,
+                                  discountedPrice,
+                                  savings,
+                                  updatedAt: serverTimestamp(),
+                                };
+                                if (editingPromoId) {
+                                  await updateDoc(doc(db,'ads',editingPromoId), payload);
+                                  toast.success('🔥 Promotion mise à jour');
+                                } else {
+                                  await addDoc(collection(db,'ads'), {
+                                    ...payload,
+                                    createdAt: serverTimestamp(),
+                                    createdBy: authUser?.uid,
+                                  });
+                                  toast.success('🔥 Promotion publiée avec succès');
+                                }
+                                setEditingPromoId(null);
+                                setPromoForm({ productId:'', discountPercent:20, badge:'🔥 PROMO', placement:'banner', active:true, priority:0 });
+                              } catch { toast.error('Erreur lors de la publication'); }
+                              finally { setPromoSaving(false); }
+                            }}
+                            style={{
+                              flex:1, padding:'13px 0',
+                              display:'flex', alignItems:'center', justifyContent:'center', gap:8,
+                              borderRadius:12, border:'none', fontWeight:700, fontSize:14,
+                              cursor: (promoSaving||!promoForm.productId) ? 'not-allowed' : 'pointer',
+                              opacity: (promoSaving||!promoForm.productId) ? 0.45 : 1,
+                              background:'linear-gradient(135deg,#D4AF37,#F5E1A4,#B8860B)', color:'#0a0f0d',
+                              boxShadow: (promoSaving||!promoForm.productId) ? 'none' : '0 10px 30px rgba(212,175,55,0.35)',
+                            }}
+                          >
+                            {promoSaving
+                              ? <><span style={{ width:16,height:16,border:'2px solid rgba(0,0,0,0.3)',borderTopColor:'#0a0f0d',borderRadius:'50%',display:'inline-block',animation:'spin 1s linear infinite' }}/> {editingPromoId ? 'Mise à jour…' : 'Publication…'}</>
+                              : <><Sparkles size={16}/> {editingPromoId ? 'Mettre à jour la promotion' : 'Publier la promotion'}</>
+                            }
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Liste des promotions */}
+                      <div className="glass-card" style={{ padding:24 }}>
+                        <h3 style={{ fontSize:16, fontWeight:700, marginBottom:18, display:'flex', alignItems:'center', gap:8 }}>
+                          <Award size={18} color="#D4AF37"/>
+                          <span>Promotions en cours</span>
+                          <span style={{ marginLeft:4, fontSize:12, fontWeight:700, color:'#0a0f0d', background:'linear-gradient(135deg,#D4AF37,#F5E1A4)', borderRadius:20, padding:'2px 10px' }}>
+                            {ads.filter(a=>a.type==='promotion'||!a.type).length}
+                          </span>
+                        </h3>
+
+                        {ads.filter(a=>a.type==='promotion'||!a.type).length === 0 ? (
+                          <div style={{ textAlign:'center', padding:'40px 0', color:'rgba(255,255,255,0.3)' }}>
+                            <Sparkles size={40} style={{ opacity:0.2, marginBottom:12 }}/>
+                            <p>Aucune promotion créée</p>
+                          </div>
+                        ) : (
+                          <div style={{ display:'grid', gap:12 }}>
+                            {[...ads].filter(a=>a.type==='promotion'||!a.type).sort((a,b)=>(b.priority||0)-(a.priority||0)).map(ad=>(
+                              <div key={ad.id} style={{
+                                display:'grid', gridTemplateColumns:'auto 1fr auto', gap:14, alignItems:'center',
+                                borderRadius:16, padding:14,
+                                background: ad.active ? 'linear-gradient(160deg,#0f1a14,#16241c)' : 'rgba(255,255,255,0.03)',
+                                border: ad.active ? '1px solid rgba(212,175,55,0.25)' : '1px solid rgba(255,255,255,0.07)',
+                              }}>
+                                {/* Vignette */}
+                                <div style={{ position:'relative', width:90, height:56, borderRadius:10, overflow:'hidden', flexShrink:0, background:'#0a0f0d' }}>
+                                  {ad.imageUrl
+                                    ? <img src={ad.imageUrl} alt={ad.title} style={{ width:'100%', height:'100%', objectFit:'cover' }} loading="lazy"/>
+                                    : <div style={{ width:'100%', height:'100%', display:'flex', alignItems:'center', justifyContent:'center', fontSize:22 }}>🌾</div>
+                                  }
+                                  {ad.badge && (
+                                    <span style={{ position:'absolute', top:3, left:3, fontSize:7, fontWeight:700, color:'#0a0f0d', background:'linear-gradient(135deg,#D4AF37,#F5E1A4)', borderRadius:4, padding:'2px 5px' }}>{ad.badge}</span>
+                                  )}
+                                </div>
+                                {/* Infos + prix barré */}
+                                <div style={{ minWidth:0 }}>
+                                  <div style={{ fontWeight:700, fontSize:14, color: ad.active ? '#F5E1A4' : '#9ca3af', marginBottom:3 }}>{ad.title}</div>
+                                  {ad.discountPercent && (
+                                    <div style={{ display:'flex', alignItems:'baseline', gap:8, flexWrap:'wrap' }}>
+                                      <span style={{ fontSize:15, fontWeight:800, color:'#10b981' }}>{(ad.discountedPrice??0).toLocaleString()} FCFA</span>
+                                      <span style={{ fontSize:12, color:'#6b7280', textDecoration:'line-through' }}>{(ad.originalPrice??0).toLocaleString()}</span>
+                                      <span style={{ fontSize:11, fontWeight:700, color:'#fff', background:'#ef4444', borderRadius:5, padding:'2px 7px' }}>-{ad.discountPercent}%</span>
+                                    </div>
+                                  )}
+                                  <div style={{ fontSize:10, color:'rgba(255,255,255,0.3)', marginTop:4 }}>
+                                    {ad.placement==='banner'?'📌 Bannière':ad.placement==='feed'?'🎞️ Feed':'📌🎞️ Les deux'}
+                                    {(ad.priority||0)>0 && <> · {ad.priority===2?'🥇 Max':'🥈 Élevée'}</>}
+                                  </div>
+                                </div>
+                                {/* Actions */}
+                                <div style={{ display:'flex', flexDirection:'column', gap:6, alignItems:'flex-end', flexShrink:0 }}>
+                                  <span style={{ fontSize:10, fontWeight:700, padding:'3px 9px', borderRadius:20, color: ad.active?'#0a0f0d':'#6b7280', background: ad.active?'linear-gradient(135deg,#D4AF37,#F5E1A4)':'rgba(255,255,255,0.07)' }}>
+                                    {ad.active ? '● Active' : '○ Inactive'}
+                                  </span>
+                                  <div style={{ display:'flex', gap:5 }}>
+                                    <button onClick={()=>{
+                                      setEditingPromoId(ad.id);
+                                      setPromoForm({
+                                        productId: ad.productId || '',
+                                        discountPercent: ad.discountPercent || 20,
+                                        badge: ad.badge || '🔥 PROMO',
+                                        placement: ad.placement || 'banner',
+                                        active: ad.active,
+                                        priority: ad.priority || 0,
+                                      });
+                                    }}
+                                      style={{ fontSize:11, padding:'4px 9px', borderRadius:7, cursor:'pointer', fontWeight:600, border:'1px solid rgba(96,165,250,0.4)', background:'rgba(96,165,250,0.1)', color:'#60a5fa' }}>
+                                      Modifier
+                                    </button>
+                                    <button onClick={()=>updateDoc(doc(db,'ads',ad.id),{active:!ad.active})}
+                                      style={{ fontSize:11, padding:'4px 9px', borderRadius:7, cursor:'pointer', fontWeight:600, border: ad.active?'1px solid rgba(212,175,55,0.4)':'1px solid rgba(255,255,255,0.12)', background: ad.active?'rgba(212,175,55,0.1)':'rgba(255,255,255,0.05)', color: ad.active?'#D4AF37':'#9ca3af' }}>
+                                      {ad.active ? 'Désactiver' : 'Activer'}
+                                    </button>
+                                    <button onClick={()=>{ if(confirm('Supprimer ?')) deleteDoc(doc(db,'ads',ad.id)); }}
+                                      style={{ fontSize:11, padding:'4px 9px', borderRadius:7, border:'1px solid rgba(239,68,68,0.35)', background:'rgba(239,68,68,0.08)', color:'#ef4444', cursor:'pointer', fontWeight:600 }}>
+                                      Supprimer
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </div>
-                  )}
+                  );
+                })()}
 
-                  {/* Bouton publier */}
-                  <button
-                    disabled={adSaving || !adForm.title || !adForm.imageUrl}
-                    onClick={async () => {
-                      if (!adForm.title || !adForm.imageUrl) return;
-                      setAdSaving(true);
-                      try {
-                        await addDoc(collection(db,'ads'), {
-                          ...adForm,
-                          createdAt: serverTimestamp(),
-                          createdBy: authUser?.uid
-                        });
-                        setAdForm({ title:'', subtitle:'', badge:'', imageUrl:'', linkUrl:'', placement:'banner', active:true, priority:0 });
-                        toast.success('✦ Promotion publiée avec succès');
-                      } catch { toast.error('Erreur lors de la publication'); }
-                      finally { setAdSaving(false); }
-                    }}
-                    style={{
-                      marginTop:20, width:'100%', padding:'13px 0',
-                      display:'flex', alignItems:'center', justifyContent:'center', gap:8,
-                      borderRadius:12, border:'none', fontWeight:700, fontSize:14, letterSpacing:0.4,
-                      cursor: (adSaving||!adForm.title||!adForm.imageUrl) ? 'not-allowed' : 'pointer',
-                      opacity: (adSaving||!adForm.title||!adForm.imageUrl) ? 0.45 : 1,
-                      background:'linear-gradient(135deg,#D4AF37,#F5E1A4,#B8860B)',
-                      color:'#0a0f0d',
-                      boxShadow: (adSaving||!adForm.title||!adForm.imageUrl) ? 'none' : '0 10px 30px rgba(212,175,55,0.35)',
-                      transition:'all .2s'
-                    }}
-                  >
-                    {adSaving
-                      ? <><span style={{ width:16, height:16, border:'2px solid rgba(0,0,0,0.3)', borderTopColor:'#0a0f0d', borderRadius:'50%', display:'inline-block', animation:'spin 1s linear infinite' }}/> Publication…</>
-                      : <><Plus size={16}/> Publier la promotion</>
-                    }
-                  </button>
-                </div>
+                {/* ══════════════════════════════════════════════════
+                    SOUS-ONGLET : PUBLICITÉS (upload image Firebase)
+                    ══════════════════════════════════════════════════ */}
+                {adsSubTab === 'publicites' && (
+                  <div style={{ display:'grid', gap:20 }}>
 
-                {/* ── Liste des promotions existantes ── */}
-                <div className="glass-card" style={{ padding:24 }}>
-                  <h3 style={{ fontSize:16, fontWeight:700, marginBottom:18, display:'flex', alignItems:'center', gap:8 }}>
-                    <Award size={18} color="#D4AF37"/>
-                    <span>Promotions en cours</span>
-                    <span style={{
-                      marginLeft:4, fontSize:12, fontWeight:700, color:'#0a0f0d',
-                      background:'linear-gradient(135deg,#D4AF37,#F5E1A4)', borderRadius:20, padding:'2px 10px'
-                    }}>{ads.length}</span>
-                  </h3>
+                    {/* Formulaire upload */}
+                    <div style={{ borderRadius:20, padding:24, background:'linear-gradient(160deg,#0f1318 0%,#1a1a2e 100%)', border:'1px solid rgba(139,92,246,0.25)' }}>
+                      <h3 style={{ fontSize:16, fontWeight:700, color:'#c4b5fd', display:'flex', alignItems:'center', gap:8, margin:0, marginBottom:20 }}>
+                        <Globe size={17} color="#8b5cf6"/> {editingPubId ? 'Modifier la bannière partenaire' : 'Publier une bannière partenaire'}
+                      </h3>
 
-                  {ads.length === 0 ? (
-                    <div style={{ textAlign:'center', padding:'40px 0', color:'rgba(255,255,255,0.3)' }}>
-                      <Megaphone size={40} style={{ opacity:0.2, marginBottom:12 }}/>
-                      <p>Aucune promotion créée pour le moment</p>
-                      <p style={{ fontSize:12, marginTop:6, color:'rgba(255,255,255,0.2)' }}>Créez votre première promotion ci-dessus</p>
-                    </div>
-                  ) : (
-                    <div style={{ display:'grid', gap:12 }}>
-                      {[...ads].sort((a,b)=>(b.priority||0)-(a.priority||0)).map(ad=>(
-                        <div key={ad.id} style={{
-                          display:'grid', gridTemplateColumns:'auto 1fr auto', gap:14, alignItems:'center',
-                          borderRadius:16, overflow:'hidden', padding:14,
-                          background: ad.active
-                            ? 'linear-gradient(160deg,#0f1a14,#16241c)'
-                            : 'rgba(255,255,255,0.03)',
-                          border: ad.active
-                            ? '1px solid rgba(212,175,55,0.25)'
-                            : '1px solid rgba(255,255,255,0.07)',
-                          transition:'all .2s'
-                        }}>
-                          {/* Vignette */}
-                          <div style={{ position:'relative', width:100, height:62, borderRadius:10, overflow:'hidden', flexShrink:0, background:'#0a0f0d' }}>
-                            {ad.imageUrl
-                              ? <img src={ad.imageUrl} alt={ad.title} style={{ width:'100%', height:'100%', objectFit:'cover' }} loading="lazy"/>
-                              : <div style={{ width:'100%', height:'100%', display:'flex', alignItems:'center', justifyContent:'center', fontSize:24 }}>🌾</div>
-                            }
-                            {ad.badge && (
-                              <span style={{
-                                position:'absolute', top:4, left:4, fontSize:8, fontWeight:700,
-                                letterSpacing:0.8, color:'#0a0f0d',
-                                background:'linear-gradient(135deg,#D4AF37,#F5E1A4)', borderRadius:5, padding:'2px 5px'
-                              }}>{ad.badge}</span>
-                            )}
-                          </div>
+                      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:14 }}>
 
-                          {/* Infos */}
-                          <div style={{ minWidth:0 }}>
-                            <div style={{ fontWeight:700, fontSize:14, color: ad.active ? '#F5E1A4' : '#9ca3af', marginBottom:2 }}>
-                              {ad.title}
-                            </div>
-                            {ad.subtitle && (
-                              <div style={{ fontSize:11, color: ad.active ? '#D4AF37' : '#6b7280', marginBottom:5 }}>{ad.subtitle}</div>
-                            )}
-                            <div style={{ display:'flex', gap:8, flexWrap:'wrap', fontSize:10, color:'rgba(255,255,255,0.35)' }}>
-                              <span>{ad.placement==='banner'?'📌 Bannière':ad.placement==='feed'?'🎞️ Feed':'📌🎞️ Les deux'}</span>
-                              {(ad.priority||0)>0 && <span>{ad.priority===2?'🥇 Priorité max':'🥈 Priorité élevée'}</span>}
-                              {ad.linkUrl && <span style={{ overflow:'hidden', textOverflow:'ellipsis', maxWidth:160, whiteSpace:'nowrap' }}>{ad.linkUrl}</span>}
-                            </div>
-                          </div>
-
-                          {/* Actions */}
-                          <div style={{ display:'flex', flexDirection:'column', gap:7, alignItems:'flex-end', flexShrink:0 }}>
-                            <span style={{
-                              fontSize:10, fontWeight:700, padding:'3px 10px', borderRadius:20,
-                              color: ad.active ? '#0a0f0d' : '#6b7280',
-                              background: ad.active ? 'linear-gradient(135deg,#D4AF37,#F5E1A4)' : 'rgba(255,255,255,0.07)'
-                            }}>
-                              {ad.active ? '● Active' : '○ Inactive'}
-                            </span>
-                            <div style={{ display:'flex', gap:6 }}>
-                              <button
-                                onClick={()=>updateDoc(doc(db,'ads',ad.id),{active:!ad.active})}
-                                style={{
-                                  fontSize:11, padding:'5px 10px', borderRadius:8, cursor:'pointer', fontWeight:600,
-                                  border: ad.active ? '1px solid rgba(212,175,55,0.4)' : '1px solid rgba(255,255,255,0.12)',
-                                  background: ad.active ? 'rgba(212,175,55,0.1)' : 'rgba(255,255,255,0.05)',
-                                  color: ad.active ? '#D4AF37' : '#9ca3af'
-                                }}
-                              >{ad.active ? 'Désactiver' : 'Activer'}</button>
-                              <button
-                                onClick={()=>{ if(confirm('Supprimer cette promotion ?')) deleteDoc(doc(db,'ads',ad.id)); }}
-                                style={{ fontSize:11, padding:'5px 10px', borderRadius:8, border:'1px solid rgba(239,68,68,0.35)', background:'rgba(239,68,68,0.08)', color:'#ef4444', cursor:'pointer', fontWeight:600 }}
-                              >Supprimer</button>
-                            </div>
-                          </div>
+                        {/* Nom partenaire */}
+                        <div>
+                          <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#8b5cf6', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>Partenaire / marque *</label>
+                          <input
+                            style={{ background:'rgba(255,255,255,0.05)', border:'1px solid rgba(139,92,246,0.25)', borderRadius:10, padding:12, color:'#fff', width:'100%', fontSize:13, outline:'none' }}
+                            placeholder="Ex : SENCHIM Engrais, SAED, IFFCO…"
+                            value={pubForm.partnerName}
+                            onChange={e=>setPubForm({...pubForm, partnerName:e.target.value})}
+                          />
                         </div>
-                      ))}
+
+                        {/* Titre bannière */}
+                        <div>
+                          <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#8b5cf6', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>Titre affiché</label>
+                          <input
+                            style={{ background:'rgba(255,255,255,0.05)', border:'1px solid rgba(139,92,246,0.25)', borderRadius:10, padding:12, color:'#fff', width:'100%', fontSize:13, outline:'none' }}
+                            placeholder="Ex : Engrais NPK — Saison des pluies"
+                            value={pubForm.title}
+                            onChange={e=>setPubForm({...pubForm, title:e.target.value})}
+                          />
+                        </div>
+
+                        {/* Upload image */}
+                        <div style={{ gridColumn:'1/-1' }}>
+                          <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#8b5cf6', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>Image de la bannière {editingPubId ? '(laisser pour conserver l\'actuelle)' : '*'} (JPEG/PNG, max 2 Mo)</label>
+                          <label htmlFor="pubImageInput" style={{
+                            display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:10,
+                            borderRadius:12, border:'2px dashed rgba(139,92,246,0.35)', padding:'28px 20px', cursor:'pointer',
+                            background: pubForm.imagePreview ? 'transparent' : 'rgba(139,92,246,0.04)',
+                            position:'relative', overflow:'hidden', minHeight:120,
+                          }}>
+                            {pubForm.imagePreview ? (
+                              <>
+                                <img src={pubForm.imagePreview} alt="preview" style={{ maxHeight:160, maxWidth:'100%', borderRadius:8, objectFit:'contain' }} loading="lazy"/>
+                                <span style={{ fontSize:11, color:'#8b5cf6' }}>Cliquer pour changer l'image</span>
+                              </>
+                            ) : (
+                              <>
+                                <div style={{ fontSize:36 }}>🖼️</div>
+                                <div style={{ fontSize:13, color:'#8b5cf6', fontWeight:600 }}>Glisser ou cliquer pour uploader</div>
+                                <div style={{ fontSize:11, color:'#6b7280' }}>JPEG · PNG · WebP — Max 2 Mo</div>
+                              </>
+                            )}
+                          </label>
+                          <input
+                            id="pubImageInput"
+                            type="file"
+                            accept="image/jpeg,image/png,image/webp"
+                            style={{ display:'none' }}
+                            onChange={e=>{
+                              const file = e.target.files?.[0];
+                              if (!file) return;
+                              if (file.size > 2 * 1024 * 1024) { toast.error('Image trop lourde (max 2 Mo)'); return; }
+                              const preview = URL.createObjectURL(file);
+                              setPubForm({...pubForm, imageFile:file, imagePreview:preview, imageUrl:''});
+                            }}
+                          />
+                        </div>
+
+                        {/* Lien au clic */}
+                        <div>
+                          <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#8b5cf6', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>Lien (au clic)</label>
+                          <input
+                            style={{ background:'rgba(255,255,255,0.05)', border:'1px solid rgba(139,92,246,0.25)', borderRadius:10, padding:12, color:'#fff', width:'100%', fontSize:13, outline:'none' }}
+                            placeholder="https://partenaire.com ou /main/products"
+                            value={pubForm.linkUrl}
+                            onChange={e=>setPubForm({...pubForm, linkUrl:e.target.value})}
+                          />
+                        </div>
+
+                        {/* Emplacement */}
+                        <div>
+                          <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#8b5cf6', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>Emplacement</label>
+                          <select
+                            style={{ background:'#111317', border:'1px solid rgba(139,92,246,0.25)', borderRadius:10, padding:12, color:'#fff', width:'100%', fontSize:13, outline:'none' }}
+                            value={pubForm.placement}
+                            onChange={e=>setPubForm({...pubForm, placement:e.target.value})}
+                          >
+                            <option value="banner">📌 Bannière vedette</option>
+                            <option value="feed">🎞️ Carrousel feed</option>
+                            <option value="both">📌🎞️ Les deux</option>
+                          </select>
+                        </div>
+
+                        {/* Priorité */}
+                        <div>
+                          <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#8b5cf6', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>Priorité</label>
+                          <select
+                            style={{ background:'#111317', border:'1px solid rgba(139,92,246,0.25)', borderRadius:10, padding:12, color:'#fff', width:'100%', fontSize:13, outline:'none' }}
+                            value={pubForm.priority}
+                            onChange={e=>setPubForm({...pubForm, priority:Number(e.target.value)})}
+                          >
+                            <option value={0}>Normale</option>
+                            <option value={1}>🥈 Élevée</option>
+                            <option value={2}>🥇 Maximale</option>
+                          </select>
+                        </div>
+
+                        {/* Actif */}
+                        <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                          <input type="checkbox" id="pubActive" checked={pubForm.active} onChange={e=>setPubForm({...pubForm,active:e.target.checked})} style={{ width:16, height:16, accentColor:'#8b5cf6', cursor:'pointer' }}/>
+                          <label htmlFor="pubActive" style={{ fontSize:13, color:'rgba(255,255,255,0.85)', cursor:'pointer' }}>Publier immédiatement</label>
+                        </div>
+                      </div>
+
+                      <div style={{ display:'flex', gap:10, marginTop:20 }}>
+                        {editingPubId && (
+                          <button
+                            onClick={()=>{
+                              setEditingPubId(null);
+                              setEditingPubOldPath(null);
+                              setPubForm({ title:'', partnerName:'', imageFile:null, imagePreview:'', imageUrl:'', linkUrl:'', placement:'banner', active:true, priority:0 });
+                            }}
+                            style={{
+                              padding:'13px 18px', borderRadius:12, border:'1px solid rgba(255,255,255,0.15)',
+                              background:'rgba(255,255,255,0.05)', color:'#9ca3af', fontWeight:600, fontSize:14, cursor:'pointer',
+                            }}
+                          >Annuler</button>
+                        )}
+                        <button
+                          disabled={pubSaving || pubUploading || !pubForm.partnerName || (!pubForm.imageFile && !editingPubId)}
+                          onClick={async () => {
+                            if (!pubForm.partnerName) return;
+                            if (!editingPubId && !pubForm.imageFile) return;
+                            try {
+                              let downloadURL = pubForm.imageUrl;
+                              let newPath: string | null = null;
+
+                              // Upload uniquement si une nouvelle image a été choisie
+                              if (pubForm.imageFile) {
+                                setPubUploading(true);
+                                const ext  = pubForm.imageFile.name.split('.').pop();
+                                newPath = `ads/publicites/${Date.now()}_${pubForm.partnerName.replace(/\s+/g,'_')}.${ext}`;
+                                const storageRef = ref(storage, newPath);
+                                await uploadBytes(storageRef, pubForm.imageFile);
+                                downloadURL = await getDownloadURL(storageRef);
+                                setPubUploading(false);
+                              }
+
+                              setPubSaving(true);
+                              const payload: any = {
+                                type: 'publicite',
+                                title: pubForm.title || pubForm.partnerName,
+                                partnerName: pubForm.partnerName,
+                                imageUrl: downloadURL,
+                                linkUrl: pubForm.linkUrl,
+                                placement: pubForm.placement,
+                                active: pubForm.active,
+                                priority: pubForm.priority,
+                                updatedAt: serverTimestamp(),
+                              };
+                              if (newPath) payload.storagePath = newPath;
+
+                              if (editingPubId) {
+                                await updateDoc(doc(db,'ads',editingPubId), payload);
+                                // Supprime l'ancienne image du Storage si elle a été remplacée
+                                if (newPath && editingPubOldPath) {
+                                  try { await deleteObject(ref(storage, editingPubOldPath)); } catch { /* fichier déjà absent, on ignore */ }
+                                }
+                                toast.success('🖼️ Bannière mise à jour');
+                              } else {
+                                await addDoc(collection(db,'ads'), {
+                                  ...payload,
+                                  createdAt: serverTimestamp(),
+                                  createdBy: authUser?.uid,
+                                });
+                                toast.success('🖼️ Bannière partenaire publiée !');
+                              }
+                              setEditingPubId(null);
+                              setEditingPubOldPath(null);
+                              setPubForm({ title:'', partnerName:'', imageFile:null, imagePreview:'', imageUrl:'', linkUrl:'', placement:'banner', active:true, priority:0 });
+                            } catch (err) {
+                              console.error(err);
+                              toast.error('Erreur lors de l\'upload');
+                            } finally {
+                              setPubUploading(false);
+                              setPubSaving(false);
+                            }
+                          }}
+                          style={{
+                            flex:1, padding:'13px 0',
+                            display:'flex', alignItems:'center', justifyContent:'center', gap:8,
+                            borderRadius:12, border:'none', fontWeight:700, fontSize:14,
+                            cursor: (pubSaving||pubUploading||!pubForm.partnerName||(!pubForm.imageFile&&!editingPubId)) ? 'not-allowed' : 'pointer',
+                            opacity: (pubSaving||pubUploading||!pubForm.partnerName||(!pubForm.imageFile&&!editingPubId)) ? 0.45 : 1,
+                            background:'linear-gradient(135deg,#8b5cf6,#6d28d9)', color:'#fff',
+                            boxShadow: (pubSaving||pubUploading||!pubForm.partnerName||(!pubForm.imageFile&&!editingPubId)) ? 'none' : '0 10px 30px rgba(139,92,246,0.35)',
+                          }}
+                        >
+                          {pubUploading
+                            ? <><span style={{ width:16,height:16,border:'2px solid rgba(255,255,255,0.3)',borderTopColor:'#fff',borderRadius:'50%',display:'inline-block',animation:'spin 1s linear infinite' }}/> Upload en cours…</>
+                            : pubSaving
+                            ? <><span style={{ width:16,height:16,border:'2px solid rgba(255,255,255,0.3)',borderTopColor:'#fff',borderRadius:'50%',display:'inline-block',animation:'spin 1s linear infinite' }}/> Enregistrement…</>
+                            : <><Globe size={16}/> {editingPubId ? 'Mettre à jour la bannière' : 'Publier la bannière'}</>
+                          }
+                        </button>
+                      </div>
                     </div>
-                  )}
-                </div>
+
+                    {/* Liste des publicités */}
+                    <div className="glass-card" style={{ padding:24 }}>
+                      <h3 style={{ fontSize:16, fontWeight:700, marginBottom:18, display:'flex', alignItems:'center', gap:8 }}>
+                        <Globe size={18} color="#8b5cf6"/>
+                        <span>Bannières partenaires</span>
+                        <span style={{ marginLeft:4, fontSize:12, fontWeight:700, color:'#fff', background:'rgba(139,92,246,0.5)', borderRadius:20, padding:'2px 10px' }}>
+                          {ads.filter(a=>a.type==='publicite').length}
+                        </span>
+                      </h3>
+
+                      {ads.filter(a=>a.type==='publicite').length === 0 ? (
+                        <div style={{ textAlign:'center', padding:'40px 0', color:'rgba(255,255,255,0.3)' }}>
+                          <Globe size={40} style={{ opacity:0.2, marginBottom:12 }}/>
+                          <p>Aucune bannière partenaire</p>
+                          <p style={{ fontSize:12, marginTop:6, color:'rgba(255,255,255,0.2)' }}>Uploadez votre première image ci-dessus</p>
+                        </div>
+                      ) : (
+                        <div style={{ display:'grid', gap:12 }}>
+                          {[...ads].filter(a=>a.type==='publicite').sort((a,b)=>(b.priority||0)-(a.priority||0)).map(ad=>(
+                            <div key={ad.id} style={{
+                              display:'grid', gridTemplateColumns:'auto 1fr auto', gap:14, alignItems:'center',
+                              borderRadius:16, padding:14,
+                              background: ad.active ? 'linear-gradient(160deg,#0f1318,#1a1a2e)' : 'rgba(255,255,255,0.03)',
+                              border: ad.active ? '1px solid rgba(139,92,246,0.3)' : '1px solid rgba(255,255,255,0.07)',
+                            }}>
+                              {/* Vignette */}
+                              <div style={{ width:110, height:62, borderRadius:10, overflow:'hidden', flexShrink:0, background:'#0a0f0d' }}>
+                                {ad.imageUrl
+                                  ? <img src={ad.imageUrl} alt={ad.partnerName} style={{ width:'100%', height:'100%', objectFit:'cover' }} loading="lazy"/>
+                                  : <div style={{ width:'100%', height:'100%', display:'flex', alignItems:'center', justifyContent:'center', fontSize:22 }}>🖼️</div>
+                                }
+                              </div>
+                              {/* Infos */}
+                              <div style={{ minWidth:0 }}>
+                                <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:3 }}>
+                                  <span style={{ fontSize:10, fontWeight:700, color:'#8b5cf6', background:'rgba(139,92,246,0.12)', borderRadius:6, padding:'2px 8px', letterSpacing:0.5 }}>PARTENAIRE</span>
+                                  <span style={{ fontWeight:700, fontSize:14, color: ad.active?'#c4b5fd':'#9ca3af' }}>{ad.partnerName}</span>
+                                </div>
+                                {ad.title && ad.title!==ad.partnerName && (
+                                  <div style={{ fontSize:12, color:'#6b7280', marginBottom:3 }}>{ad.title}</div>
+                                )}
+                                <div style={{ fontSize:10, color:'rgba(255,255,255,0.3)' }}>
+                                  {ad.placement==='banner'?'📌 Bannière':ad.placement==='feed'?'🎞️ Feed':'📌🎞️ Les deux'}
+                                  {(ad.priority||0)>0 && <> · {ad.priority===2?'🥇 Max':'🥈 Élevée'}</>}
+                                  {ad.linkUrl && <> · <span style={{ overflow:'hidden', textOverflow:'ellipsis' }}>{ad.linkUrl.slice(0,40)}</span></>}
+                                </div>
+                              </div>
+                              {/* Actions */}
+                              <div style={{ display:'flex', flexDirection:'column', gap:6, alignItems:'flex-end', flexShrink:0 }}>
+                                <span style={{ fontSize:10, fontWeight:700, padding:'3px 9px', borderRadius:20, color: ad.active?'#fff':'#6b7280', background: ad.active?'rgba(139,92,246,0.5)':'rgba(255,255,255,0.07)' }}>
+                                  {ad.active ? '● Active' : '○ Inactive'}
+                                </span>
+                                <div style={{ display:'flex', gap:5 }}>
+                                  <button onClick={()=>{
+                                    setEditingPubId(ad.id);
+                                    setEditingPubOldPath(ad.storagePath || null);
+                                    setPubForm({
+                                      title: ad.title || '',
+                                      partnerName: ad.partnerName || '',
+                                      imageFile: null,
+                                      imagePreview: ad.imageUrl || '',
+                                      imageUrl: ad.imageUrl || '',
+                                      linkUrl: ad.linkUrl || '',
+                                      placement: ad.placement || 'banner',
+                                      active: ad.active,
+                                      priority: ad.priority || 0,
+                                    });
+                                  }}
+                                    style={{ fontSize:11, padding:'4px 9px', borderRadius:7, cursor:'pointer', fontWeight:600, border:'1px solid rgba(96,165,250,0.4)', background:'rgba(96,165,250,0.1)', color:'#60a5fa' }}>
+                                    Modifier
+                                  </button>
+                                  <button onClick={()=>updateDoc(doc(db,'ads',ad.id),{active:!ad.active})}
+                                    style={{ fontSize:11, padding:'4px 9px', borderRadius:7, cursor:'pointer', fontWeight:600, border:'1px solid rgba(139,92,246,0.35)', background:'rgba(139,92,246,0.08)', color:'#8b5cf6' }}>
+                                    {ad.active ? 'Désactiver' : 'Activer'}
+                                  </button>
+                                  <button onClick={async ()=>{
+                                    if (!confirm('Supprimer cette bannière ?')) return;
+                                    try {
+                                      await deleteDoc(doc(db,'ads',ad.id));
+                                      if (ad.storagePath) {
+                                        try { await deleteObject(ref(storage, ad.storagePath)); } catch { /* fichier déjà absent */ }
+                                      }
+                                      toast.success('Bannière supprimée');
+                                    } catch { toast.error('Erreur lors de la suppression'); }
+                                  }}
+                                    style={{ fontSize:11, padding:'4px 9px', borderRadius:7, border:'1px solid rgba(239,68,68,0.35)', background:'rgba(239,68,68,0.08)', color:'#ef4444', cursor:'pointer', fontWeight:600 }}>
+                                    Supprimer
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                  </div>
+                )}
 
               </div>
             )}

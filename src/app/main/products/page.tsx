@@ -67,6 +67,8 @@ interface ProductData {
   lng?: number;
   sellerId?: string;
   originalPrice?: number;
+  promoBadge?: string;
+  promoPercent?: number;
 }
 
 interface SellerRating { sellerId: string; averageRating: number; reviewCount: number; }
@@ -150,6 +152,43 @@ export default function AgriMarket() {
     return () => { unsubAds(); unsubProducts(); };
   }, []);
 
+  // ✅ Fusionne les promotions actives (collection 'ads', type='promotion') avec les produits
+  // Sans jamais modifier la collection 'products' elle-même (lecture uniquement côté frontend)
+  const [productsWithPromos, setProductsWithPromos] = useState<ProductData[]>([]);
+
+  useEffect(() => {
+    if (!products.length) { setProductsWithPromos([]); return; }
+
+    const activePromosByProduct = new Map<string, any>();
+    ads.forEach((a: any) => {
+      if (a.type === 'promotion' && a.active && a.productId) {
+        // Si plusieurs promos actives pour un même produit, garder celle de plus haute priorité
+        const existing = activePromosByProduct.get(a.productId);
+        if (!existing || (a.priority||0) > (existing.priority||0)) {
+          activePromosByProduct.set(a.productId, a);
+        }
+      }
+    });
+
+    if (activePromosByProduct.size === 0) { setProductsWithPromos(products); return; }
+
+    const merged = products.map(p => {
+      const promo = activePromosByProduct.get(p.id);
+      if (!promo) return p;
+      const original = promo.originalPrice ?? p.price;
+      const discounted = promo.discountedPrice ?? Math.round(original * (1 - (promo.discountPercent||0)/100));
+      return {
+        ...p,
+        price: discounted,
+        originalPrice: original,
+        promoBadge: promo.badge as string | undefined,
+        promoPercent: promo.discountPercent as number | undefined,
+      };
+    });
+
+    setProductsWithPromos(merged);
+  }, [products, ads]);
+
   // ✅ CORRECTION ICI : Vérification que sid existe avant de l'utiliser dans la Map
   useEffect(() => {
     if (!products.length) return;
@@ -197,7 +236,7 @@ export default function AgriMarket() {
 
   // Moteur de recommandations : catégorie, région, historique de consultation, achats passés, wishlist
   useEffect(() => {
-    if (!selected || !products.length) { setRecs([]); return; }
+    if (!selected || !productsWithPromos.length) { setRecs([]); return; }
 
     let cancelled = false;
 
@@ -222,7 +261,7 @@ export default function AgriMarket() {
 
       const maxCatPurchases = Math.max(1, ...Array.from(purchasedCategories.values()));
 
-      const scored = products
+      const scored = productsWithPromos
         .filter(p => p.id !== selected.id)
         .map(p => {
           let score = 0;
@@ -260,7 +299,7 @@ export default function AgriMarket() {
 
       // Repli : si peu de recommandations pertinentes, compléter avec la même catégorie
       if (scored.length < 4) {
-        const fallback = products
+        const fallback = productsWithPromos
           .filter(p => p.id !== selected.id && p.category === selected.category && !scored.find(s => s.id === p.id))
           .slice(0, 6 - scored.length);
         scored.push(...fallback);
@@ -270,13 +309,13 @@ export default function AgriMarket() {
     })();
 
     return () => { cancelled = true; };
-  }, [selected, products, user?.uid, purchasedCategories, wishlist]);
+  }, [selected, productsWithPromos, user?.uid, purchasedCategories, wishlist]);
 
   useEffect(() => {
-    if (selected && products.length) {
-      setCategoryProducts(products.filter(p => p.category === selected.category && p.id !== selected.id).slice(0, 4));
+    if (selected && productsWithPromos.length) {
+      setCategoryProducts(productsWithPromos.filter(p => p.category === selected.category && p.id !== selected.id).slice(0, 4));
     }
-  }, [selected, products]);
+  }, [selected, productsWithPromos]);
 
   const getLocation = useCallback(() => {
     setLocStatus('searching'); setLocation(null);
@@ -366,13 +405,13 @@ export default function AgriMarket() {
   useEffect(() => { getLocation(); }, [getLocation]);
 
   useEffect(() => {
-    let r = [...products];
+    let r = [...productsWithPromos];
     if (search) r = r.filter(p => p.name?.toLowerCase().includes(search.toLowerCase()));
     if (cat !== 'Tous') r = r.filter(p => p.category === cat);
     if (sort === 'asc')  r.sort((a,b) => (a.price||0)-(b.price||0));
     if (sort === 'desc') r.sort((a,b) => (b.price||0)-(a.price||0));
     setFiltered(r);
-  }, [products, search, cat, sort]);
+  }, [productsWithPromos, search, cat, sort]);
 
   const open  = (p: ProductData) => { setSelected(p); setImgIdx(0); document.body.style.overflow = 'hidden'; };
   const close = () => { setSelected(null); document.body.style.overflow = ''; };
@@ -594,6 +633,11 @@ export default function AgriMarket() {
                     <div className="g-card-fog" />
 
                     {p.farmerVerified && <div className="g-verified">✓ VÉRIFIÉ</div>}
+                    {p.promoBadge && (
+                      <div style={{ position:'absolute', top: p.farmerVerified ? 30 : 8, left:8, background:'linear-gradient(135deg,#D4AF37,#F5E1A4)', color:'#0a0f0d', fontSize:8, fontWeight:800, borderRadius:5, padding:'2px 7px', letterSpacing:0.3, zIndex:2 }}>
+                        {p.promoBadge}
+                      </div>
+                    )}
 
                     <div className="g-card-price">
                       <div>
