@@ -9,9 +9,11 @@ import {
   query,
   where,
   orderBy,
+  limit,
   doc,
   updateDoc,
   onSnapshot,
+  getDocs,
   Timestamp,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
@@ -52,6 +54,8 @@ export default function AccountPage() {
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [orders, setOrders] = useState<any[]>([]);
   const [loadingOrders, setLoadingOrders] = useState(true);
+  const [ordersError, setOrdersError] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
   const [updating, setUpdating] = useState<string | null>(null);
   const [sellerRatings, setSellerRatings] = useState<Map<string, SellerRating>>(new Map());
   const [formData, setFormData] = useState<UserFormData>({
@@ -61,34 +65,50 @@ export default function AccountPage() {
   useEffect(() => {
     if (!user) return;
 
-    const sellers = [...new Set(orders.map(o => o.sellerId).filter(Boolean))];
-    
-    sellers.forEach(sellerId => {
-      const reviewsQuery = query(
-        collection(db, 'reviews'),
-        where('sellerId', '==', sellerId)
+    // Liste des vendeurs concernes, dont on n'a pas encore la note (evite de re-fetcher inutilement)
+    const sellerIds = [...new Set(orders.map(o => o.sellerId).filter(Boolean))];
+    const sellersToFetch = sellerIds.filter(id => !sellerRatings.has(id));
+    if (sellersToFetch.length === 0) return;
+
+    let cancelled = false;
+
+    (async () => {
+      // Lecture unique (pas de listener temps reel) : economise data et batterie sur mobile,
+      // une note moyenne n'a pas besoin d'etre mise a jour en direct sur cette page.
+      const results = await Promise.all(
+        sellersToFetch.map(async (sellerId) => {
+          try {
+            const reviewsQuery = query(
+              collection(db, 'reviews'),
+              where('sellerId', '==', sellerId)
+            );
+            const snapshot = await getDocs(reviewsQuery);
+            const reviews = snapshot.docs.map(d => d.data());
+            const count = reviews.length;
+            const average = count > 0
+              ? reviews.reduce((sum: number, review: any) => sum + (review.rating || 0), 0) / count
+              : 0;
+            return [sellerId, { averageRating: Number(average.toFixed(1)), reviewCount: count }] as const;
+          } catch (e) {
+            console.error('Erreur chargement note vendeur:', e);
+            return null;
+          }
+        })
       );
-      
-      const unsub = onSnapshot(reviewsQuery, (snapshot) => {
-        const reviews = snapshot.docs.map(doc => doc.data());
-        const count = reviews.length;
-        const average = count > 0
-          ? reviews.reduce((sum: number, review: any) => sum + (review.rating || 0), 0) / count
-          : 0;
-        
-        setSellerRatings(prev => {
-          const newMap = new Map(prev);
-          newMap.set(sellerId, {
-            averageRating: Number(average.toFixed(1)),
-            reviewCount: count
-          });
-          return newMap;
+
+      if (cancelled) return;
+
+      setSellerRatings(prev => {
+        const newMap = new Map(prev);
+        results.forEach((result) => {
+          if (result) newMap.set(result[0], result[1]);
         });
+        return newMap;
       });
-      
-      return () => unsub();
-    });
-  }, [orders, user]);
+    })();
+
+    return () => { cancelled = true; };
+  }, [orders, user, sellerRatings]);
 
   useEffect(() => {
     if (!user) { setLoadingOrders(false); return; }
@@ -97,15 +117,21 @@ export default function AccountPage() {
       collection(db, 'orders'),
       where('userId', '==', user.uid),
       orderBy('createdAt', 'desc'),
+      limit(20),
     );
 
     const unsub = onSnapshot(q, (snap) => {
       setOrders(snap.docs.map(d => ({ id: d.id, ...d.data(), total: d.data().total || d.data().amount || 0 })));
       setLoadingOrders(false);
-    }, (err) => { console.error(err); setLoadingOrders(false); });
+      setOrdersError(false);
+    }, (err) => {
+      console.error(err);
+      setLoadingOrders(false);
+      setOrdersError(true);
+    });
 
     return () => unsub();
-  }, [user]);
+  }, [user, retryKey]);
 
   // ✅ CORRECTION : Attendre que loading soit fini avant de rediriger
   useEffect(() => {
@@ -341,6 +367,22 @@ export default function AccountPage() {
               <div className="flex flex-col items-center py-10 gap-3">
                 <Loader2 size={28} className="animate-spin text-emerald-400" />
                 <p className="text-xs text-gray-400 font-medium">Chargement…</p>
+              </div>
+            ) : ordersError ? (
+              <div className="flex flex-col items-center py-10 gap-4 text-center">
+                <div className="w-16 h-16 rounded-2xl bg-rose-50 flex items-center justify-center">
+                  <AlertTriangle size={28} className="text-rose-300" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-gray-600">Connexion instable</p>
+                  <p className="text-xs text-gray-400 mt-1">Vérifiez votre connexion internet</p>
+                </div>
+                <button
+                  onClick={() => { setLoadingOrders(true); setOrdersError(false); setRetryKey(k => k + 1); }}
+                  className="flex items-center gap-2 bg-emerald-600 active:bg-emerald-700 text-white px-5 py-2.5 rounded-xl text-sm font-bold transition"
+                >
+                  Réessayer
+                </button>
               </div>
             ) : orders.length === 0 ? (
               <div className="flex flex-col items-center py-10 gap-4 text-center">

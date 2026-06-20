@@ -1098,6 +1098,7 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
           if (Array.isArray(u.fcmTokens)) allTokens.push(...u.fcmTokens.filter(Boolean));
         });
         const uniqueTokens = Array.from(new Set(allTokens));
+        const pushErrors: string[] = [];
         if (uniqueTokens.length > 0) {
           // FCM multicast limite à 500 tokens par requête
           for (let i = 0; i < uniqueTokens.length; i += 500) {
@@ -1119,10 +1120,15 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
                 pushCount += data?.successCount ?? chunk.length;
               } else {
                 const err = await res.json().catch(() => ({}));
+                pushErrors.push(err?.error ?? `HTTP ${res.status}`);
               }
             } catch (fetchErr: any) {
+              pushErrors.push(fetchErr?.message ?? 'Erreur réseau');
             }
           }
+        }
+        if (pushErrors.length > 0) {
+          toast.warning(`Push: ${pushCount} envoyé(s), ${pushErrors.length} lot(s) en erreur`);
         }
       }
 

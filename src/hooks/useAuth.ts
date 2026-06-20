@@ -61,7 +61,17 @@ export function useAuth() {
   };
 
   const resetPassword = async (email: string) => {
-    return sendPasswordResetEmail(auth, email);
+    // actionCodeSettings : le lien dans l'email redirige vers notre propre page
+    // /auth/reset-password (au lieu de la page générique Firebase), avec le code
+    // de réinitialisation (oobCode) passé automatiquement en query param par Firebase.
+    const actionCodeSettings = {
+      url:
+        typeof window !== 'undefined'
+          ? `${window.location.origin}/auth/reset-password`
+          : '/auth/reset-password',
+      handleCodeInApp: false,
+    };
+    return sendPasswordResetEmail(auth, email, actionCodeSettings);
   };
 
   useEffect(() => {
@@ -87,7 +97,12 @@ export function useAuth() {
     return result;
   };
 
-  const signUp = async (email: string, password: string, name: string) => {
+  const signUp = async (
+    email: string,
+    password: string,
+    name: string,
+    extra?: Record<string, any>
+  ) => {
     const result = await createUserWithEmailAndPassword(auth, email, password);
     
     await updateProfile(result.user, { displayName: name });
@@ -100,6 +115,7 @@ export function useAuth() {
       phone: '',
       role: 'client',
       createdAt: new Date().toISOString(),
+      ...extra,
     };
     await setDoc(userRef, userProfile);
     

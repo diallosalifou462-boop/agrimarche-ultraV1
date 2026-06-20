@@ -14,7 +14,41 @@ import {
   Leaf,
   Truck,
   Shield,
+  MapPin,
+  Map,
+  Home,
 } from 'lucide-react';
+
+// ============================================================
+// RÉGIONS & DÉPARTEMENTS DU SÉNÉGAL
+// (même liste de régions que le dashboard admin, pour cohérence
+// avec targetRegion dans les diffusions)
+// ============================================================
+
+const SENEGAL_REGIONS = [
+  "Dakar", "Thiès", "Saint-Louis", "Diourbel", "Louga", "Fatick",
+  "Kaolack", "Kaffrine", "Tambacounda", "Kédougou", "Ziguinchor",
+  "Sédhiou", "Kolda", "Matam"
+] as const;
+
+type SenegalRegion = typeof SENEGAL_REGIONS[number];
+
+const DEPARTMENTS_BY_REGION: Record<SenegalRegion, string[]> = {
+  "Dakar":        ["Dakar", "Guédiawaye", "Keur Massar", "Pikine", "Rufisque"],
+  "Thiès":        ["Mbour", "Thiès", "Tivaouane"],
+  "Saint-Louis":  ["Dagana", "Podor", "Saint-Louis"],
+  "Diourbel":     ["Bambey", "Diourbel", "Mbacké"],
+  "Louga":        ["Kébémer", "Linguère", "Louga"],
+  "Fatick":       ["Fatick", "Foundiougne", "Gossas"],
+  "Kaolack":      ["Guinguinéo", "Kaolack", "Nioro du Rip"],
+  "Kaffrine":     ["Birkilane", "Kaffrine", "Koungheul", "Malem-Hodar"],
+  "Tambacounda":  ["Bakel", "Goudiry", "Koumpentoum", "Tambacounda"],
+  "Kédougou":     ["Kédougou", "Salemata", "Saraya"],
+  "Ziguinchor":   ["Bignona", "Oussouye", "Ziguinchor"],
+  "Sédhiou":      ["Bounkiling", "Goudomp", "Sédhiou"],
+  "Kolda":        ["Kolda", "Médina Yoro Foulah", "Vélingara"],
+  "Matam":        ["Kanel", "Matam", "Ranérou Ferlo"],
+};
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -26,6 +60,10 @@ export default function RegisterPage() {
     phone: '',
     password: '',
     confirmPassword: '',
+    region: '' as SenegalRegion | '',
+    departement: '',
+    commune: '',
+    quartier: '',
   });
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
@@ -42,6 +80,11 @@ export default function RegisterPage() {
     }
   }, [user, authLoading, router, isClient]);
 
+  const handleRegionChange = (value: string) => {
+    // Le département dépend de la région : on réinitialise si la région change
+    setFormData({ ...formData, region: value as SenegalRegion, departement: '' });
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -56,6 +99,16 @@ export default function RegisterPage() {
       return;
     }
 
+    if (!formData.region || !formData.departement) {
+      setError('Veuillez sélectionner votre région et votre département');
+      return;
+    }
+
+    if (!formData.commune.trim()) {
+      setError('Veuillez indiquer votre commune');
+      return;
+    }
+
     if (!agreeTerms) {
       setError('Vous devez accepter les conditions générales');
       return;
@@ -64,7 +117,13 @@ export default function RegisterPage() {
     setLoading(true);
 
     try {
-      await signUp(formData.email, formData.password, formData.name);
+      await signUp(formData.email, formData.password, formData.name, {
+        phone: formData.phone,
+        region: formData.region,
+        departement: formData.departement,
+        commune: formData.commune.trim(),
+        quartier: formData.quartier.trim() || '',
+      });
       router.push('/auth/login');
     } catch (error) {
       setError("Erreur lors de l'inscription");
@@ -84,6 +143,8 @@ export default function RegisterPage() {
       </div>
     );
   }
+
+  const availableDepartments = formData.region ? DEPARTMENTS_BY_REGION[formData.region] : [];
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-green-50 via-white to-emerald-50 flex items-center justify-center p-4">
@@ -154,6 +215,86 @@ export default function RegisterPage() {
                   value={formData.phone}
                   onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
                   placeholder="77 000 00 00"
+                  className="w-full pl-10 pr-4 py-3 border border-gray-200 rounded-xl focus:border-green-500 focus:ring-2 focus:ring-green-200 outline-none"
+                />
+              </div>
+            </div>
+
+            {/* RÉGION */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Région
+              </label>
+              <div className="relative">
+                <MapPin size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                <select
+                  required
+                  value={formData.region}
+                  onChange={(e) => handleRegionChange(e.target.value)}
+                  className="w-full pl-10 pr-4 py-3 border border-gray-200 rounded-xl focus:border-green-500 focus:ring-2 focus:ring-green-200 outline-none appearance-none bg-white"
+                >
+                  <option value="">Sélectionnez une région</option>
+                  {SENEGAL_REGIONS.map((r) => (
+                    <option key={r} value={r}>{r}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* DÉPARTEMENT (dépend de la région) */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Département
+              </label>
+              <div className="relative">
+                <Map size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                <select
+                  required
+                  disabled={!formData.region}
+                  value={formData.departement}
+                  onChange={(e) => setFormData({ ...formData, departement: e.target.value })}
+                  className="w-full pl-10 pr-4 py-3 border border-gray-200 rounded-xl focus:border-green-500 focus:ring-2 focus:ring-green-200 outline-none appearance-none bg-white disabled:bg-gray-50 disabled:text-gray-400"
+                >
+                  <option value="">
+                    {formData.region ? 'Sélectionnez un département' : "Choisissez d'abord une région"}
+                  </option>
+                  {availableDepartments.map((d) => (
+                    <option key={d} value={d}>{d}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* COMMUNE */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Commune
+              </label>
+              <div className="relative">
+                <Home size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                <input
+                  type="text"
+                  required
+                  value={formData.commune}
+                  onChange={(e) => setFormData({ ...formData, commune: e.target.value })}
+                  placeholder="Ex : Sangalkam, Mbour, Mékhé..."
+                  className="w-full pl-10 pr-4 py-3 border border-gray-200 rounded-xl focus:border-green-500 focus:ring-2 focus:ring-green-200 outline-none"
+                />
+              </div>
+            </div>
+
+            {/* QUARTIER (optionnel) */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Quartier <span className="text-gray-400">(optionnel)</span>
+              </label>
+              <div className="relative">
+                <Home size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                <input
+                  type="text"
+                  value={formData.quartier}
+                  onChange={(e) => setFormData({ ...formData, quartier: e.target.value })}
+                  placeholder="Ex : Médina, Liberté 6..."
                   className="w-full pl-10 pr-4 py-3 border border-gray-200 rounded-xl focus:border-green-500 focus:ring-2 focus:ring-green-200 outline-none"
                 />
               </div>

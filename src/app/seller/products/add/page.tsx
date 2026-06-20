@@ -7,16 +7,90 @@ import { db, storage } from '@/lib/firebase/firebase';
 import { collection, addDoc, serverTimestamp, doc, getDoc } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import {
-  Package, Plus, Loader2, ArrowLeft, Upload, X,
+  Package, Plus, Loader2, ArrowLeft, X,
   Sparkles, Leaf, CheckCircle, AlertCircle, Image as ImageIcon,
-  Wand2, Trash2, Camera, Zap, Star, Heart, Shield,
-  Rocket, Gem, Crown
+  Wand2, Camera, Zap, Star, Heart, Shield,
+  Gem, Crown
 } from 'lucide-react';
 import Image from 'next/image';
 import Link from 'next/link';
 
 // Configuration API Remove.bg
 const REMOVE_BG_API_KEY = process.env.NEXT_PUBLIC_REMOVE_BG_API_KEY;
+const MAX_IMAGES = 5;
+const MAX_DIMENSION = 1280; // largeur/hauteur max apres compression
+const JPEG_QUALITY = 0.8;
+
+// Compresse et redimensionne une image cote client avant upload (accelere fortement l'envoi)
+const compressImage = (file: File): Promise<File> => {
+  return new Promise((resolve) => {
+    // On ne compresse pas les GIF (animations) pour ne pas casser l'animation
+    if (file.type === 'image/gif') {
+      resolve(file);
+      return;
+    }
+
+    const img = document.createElement('img');
+    const objectUrl = URL.createObjectURL(file);
+
+    img.onload = () => {
+      let { width, height } = img;
+
+      if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+        if (width > height) {
+          height = Math.round((height * MAX_DIMENSION) / width);
+          width = MAX_DIMENSION;
+        } else {
+          width = Math.round((width * MAX_DIMENSION) / height);
+          height = MAX_DIMENSION;
+        }
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+
+      if (!ctx) {
+        URL.revokeObjectURL(objectUrl);
+        resolve(file);
+        return;
+      }
+
+      ctx.drawImage(img, 0, 0, width, height);
+      URL.revokeObjectURL(objectUrl);
+
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) {
+            resolve(file);
+            return;
+          }
+          // Si la compression fait gonfler le fichier (rare), on garde l'original
+          if (blob.size >= file.size) {
+            resolve(file);
+            return;
+          }
+          const compressedFile = new File(
+            [blob],
+            file.name.replace(/\.(png|jpe?g|webp)$/i, '.jpg'),
+            { type: 'image/jpeg' }
+          );
+          resolve(compressedFile);
+        },
+        'image/jpeg',
+        JPEG_QUALITY
+      );
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(file);
+    };
+
+    img.src = objectUrl;
+  });
+};
 
 // Categories completes (sans emojis)
 const CATEGORIES = [
@@ -40,11 +114,13 @@ export default function AddProductPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   
   const [loading, setLoading] = useState(false);
-  const [uploadingImage, setUploadingImage] = useState(false);
-  const [cleaningImage, setCleaningImage] = useState(false);
-  const [imageFile, setImageFile] = useState<File | null>(null);
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [cleanedImageUrl, setCleanedImageUrl] = useState<string | null>(null);
+  // Une entree par photo (jusqu'a MAX_IMAGES). index 0 = photo principale (nettoyee par IA).
+  const [images, setImages] = useState<{
+    preview: string;
+    uploading: boolean;
+    cleaning: boolean;
+    cleanedUrl: string | null;
+  }[]>([]);
   const [aiConfidence, setAiConfidence] = useState(0);
   const [formData, setFormData] = useState({
     name: '',
@@ -86,19 +162,19 @@ export default function AddProductPage() {
     setTimeout(() => setToast(null), 4000);
   };
 
-  // Nettoyage image par IA
+  // Nettoyage image par IA (uniquement utilise pour la photo principale, index 0)
   const cleanImageWithAI = async (file: File): Promise<string | null> => {
     if (!REMOVE_BG_API_KEY) {
       showToast('error', 'Configuration API manquante');
       return null;
     }
 
-    setCleaningImage(true);
     const formData = new FormData();
     formData.append('image_file', file);
     formData.append('size', 'auto');
     formData.append('type', 'product');
 
+    const tStart = performance.now();
     try {
       const response = await fetch('https://api.remove.bg/v1.0/removebg', {
         method: 'POST',
@@ -107,85 +183,189 @@ export default function AddProductPage() {
         },
         body: formData,
       });
+      console.log(`[TIMING] Remove.bg reponse recue: ${(performance.now() - tStart).toFixed(0)}ms`);
 
       if (!response.ok) {
         const errorData = await response.json();
         throw new Error(errorData.errors?.[0]?.title || `Erreur ${response.status}`);
       }
 
+      const tBlob = performance.now();
       const blob = await response.blob();
+      console.log(`[TIMING] Remove.bg blob telecharge: ${(performance.now() - tBlob).toFixed(0)}ms`);
       const cleanedFile = new File([blob], `ai_cleaned_${Date.now()}.png`, { type: 'image/png' });
-      
+
+      const tUpload = performance.now();
       const storageRef = ref(storage, `products/${user?.uid}/cleaned/${Date.now()}.png`);
       await uploadBytes(storageRef, cleanedFile);
+      console.log(`[TIMING] Upload image nettoyee vers Storage: ${(performance.now() - tUpload).toFixed(0)}ms`);
+
+      const tUrl = performance.now();
       const downloadUrl = await getDownloadURL(storageRef);
-      
-      setCleanedImageUrl(downloadUrl);
+      console.log(`[TIMING] getDownloadURL (nettoyee): ${(performance.now() - tUrl).toFixed(0)}ms`);
+
+      console.log(`[TIMING] === Total cleanImageWithAI: ${(performance.now() - tStart).toFixed(0)}ms ===`);
       setAiConfidence(98);
-      showToast('success', 'IA : fond supprimé avec succès !');
       return downloadUrl;
     } catch (error: any) {
       console.error('Erreur API Remove.bg:', error);
+      console.log(`[TIMING] cleanImageWithAI a echoue apres: ${(performance.now() - tStart).toFixed(0)}ms`);
       showToast('error', `Nettoyage IA échoué: ${error.message}`);
       return null;
-    } finally {
-      setCleaningImage(false);
     }
   };
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
 
-    if (!file.type.startsWith('image/')) {
-      showToast('error', 'Format non supporté (JPG, PNG, WebP uniquement)');
+    const remainingSlots = MAX_IMAGES - images.length;
+    if (remainingSlots <= 0) {
+      showToast('error', `Maximum ${MAX_IMAGES} photos par produit`);
       return;
     }
 
-    if (file.size > 8 * 1024 * 1024) {
-      showToast('error', 'Image trop lourde (max 8 Mo)');
-      return;
+    const candidateFiles = files.slice(0, remainingSlots);
+    if (files.length > remainingSlots) {
+      showToast('error', `Seulement ${remainingSlots} photo(s) ajoutée(s), limite de ${MAX_IMAGES} atteinte`);
     }
 
-    setUploadingImage(true);
-    setImageFile(file);
-    
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setImagePreview(reader.result as string);
-    };
-    reader.readAsDataURL(file);
-
-    try {
-      const originalRef = ref(storage, `products/${user?.uid}/originals/${Date.now()}_${file.name}`);
-      await uploadBytes(originalRef, file);
-      const originalUrl = await getDownloadURL(originalRef);
-      
-      const cleanedUrl = await cleanImageWithAI(file);
-      
-      if (cleanedUrl) {
-        setImagePreview(cleanedUrl);
-        showToast('success', 'Photo professionnelle prête !');
-      } else {
-        setImagePreview(originalUrl);
+    // Validation rapide (format / taille) avant tout traitement
+    const validFiles = candidateFiles.filter((file) => {
+      if (!file.type.startsWith('image/')) {
+        showToast('error', 'Format non supporté (JPG, PNG, WebP uniquement)');
+        return false;
       }
-    } catch (error) {
-      console.error('Upload error:', error);
-      showToast('error', 'Erreur lors de l\'upload');
-      setImagePreview(null);
-    } finally {
-      setUploadingImage(false);
-    }
-  };
+      if (file.size > 8 * 1024 * 1024) {
+        showToast('error', 'Image trop lourde (max 8 Mo)');
+        return false;
+      }
+      return true;
+    });
 
-  const removeImage = () => {
-    setImageFile(null);
-    setImagePreview(null);
-    setCleanedImageUrl(null);
-    setAiConfidence(0);
+    if (validFiles.length === 0) {
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
+    const isFirstBatch = images.length === 0;
+
+    // Generer tous les apercus locaux d'abord, pour affichage immediat de la grille
+    const previews = await Promise.all(
+      validFiles.map(
+        (file) =>
+          new Promise<string>((resolve) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result as string);
+            reader.readAsDataURL(file);
+          })
+      )
+    );
+
+    setImages((prev) => [
+      ...prev,
+      ...previews.map((preview, i) => ({
+        preview,
+        uploading: true,
+        cleaning: isFirstBatch && i === 0,
+        cleanedUrl: null,
+      })),
+    ]);
+
+    // Traiter (compresser + uploader) toutes les photos en parallele
+    const tBatchStart = performance.now();
+    console.log(`[TIMING] === Debut traitement de ${validFiles.length} photo(s) en parallele ===`);
+
+    await Promise.all(
+      validFiles.map(async (file, i) => {
+        const localPreview = previews[i];
+        const isMainPhoto = isFirstBatch && i === 0;
+        const label = `photo${i + 1}${isMainPhoto ? ' (principale)' : ''}`;
+        const tPhotoStart = performance.now();
+        console.log(`[TIMING] ${label}: taille originale = ${(file.size / 1024).toFixed(0)} Ko`);
+
+        try {
+          const tCompress = performance.now();
+          const compressedFile = await compressImage(file);
+          console.log(
+            `[TIMING] ${label}: compression = ${(performance.now() - tCompress).toFixed(0)}ms (${(file.size / 1024).toFixed(0)} Ko -> ${(compressedFile.size / 1024).toFixed(0)} Ko)`
+          );
+
+          const tUpload = performance.now();
+          const originalRef = ref(
+            storage,
+            `products/${user?.uid}/originals/${Date.now()}_${compressedFile.name}`
+          );
+          await uploadBytes(originalRef, compressedFile);
+          console.log(`[TIMING] ${label}: uploadBytes (original) = ${(performance.now() - tUpload).toFixed(0)}ms`);
+
+          const tUrl = performance.now();
+          const originalUrl = await getDownloadURL(originalRef);
+          console.log(`[TIMING] ${label}: getDownloadURL (original) = ${(performance.now() - tUrl).toFixed(0)}ms`);
+
+          if (isMainPhoto) {
+            const tAi = performance.now();
+            const cleanedUrl = await cleanImageWithAI(compressedFile);
+            console.log(`[TIMING] ${label}: cleanImageWithAI total = ${(performance.now() - tAi).toFixed(0)}ms`);
+            setImages((prev) => {
+              const next = [...prev];
+              const idx = next.findIndex((img) => img.preview === localPreview);
+              if (idx !== -1) {
+                next[idx] = {
+                  ...next[idx],
+                  preview: cleanedUrl || originalUrl,
+                  uploading: false,
+                  cleaning: false,
+                  cleanedUrl: cleanedUrl,
+                };
+              }
+              return next;
+            });
+            if (cleanedUrl) {
+              showToast('success', 'Photo principale nettoyée par IA !');
+            }
+          } else {
+            setImages((prev) => {
+              const next = [...prev];
+              const idx = next.findIndex((img) => img.preview === localPreview);
+              if (idx !== -1) {
+                next[idx] = { ...next[idx], preview: originalUrl, uploading: false, cleaning: false };
+              }
+              return next;
+            });
+          }
+          console.log(`[TIMING] ${label}: TOTAL = ${(performance.now() - tPhotoStart).toFixed(0)}ms`);
+        } catch (error) {
+          console.error('Upload error:', error);
+          showToast('error', 'Erreur lors de l\'upload');
+          setImages((prev) => prev.filter((img) => img.preview !== localPreview));
+        }
+      })
+    );
+
+    console.log(`[TIMING] === Batch complet (${validFiles.length} photo(s)) en ${(performance.now() - tBatchStart).toFixed(0)}ms ===`);
+
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
+  };
+
+  const removeImage = (index: number) => {
+    setImages((prev) => prev.filter((_, i) => i !== index));
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  // Permet de promouvoir une photo existante en photo principale (reordonne le tableau)
+  const setMainImage = (index: number) => {
+    if (index === 0) return;
+    setImages((prev) => {
+      const next = [...prev];
+      const [chosen] = next.splice(index, 1);
+      next.unshift(chosen);
+      return next;
+    });
   };
 
   const validateForm = () => {
@@ -196,7 +376,7 @@ export default function AddProductPage() {
     if (!formData.price || Number(formData.price) <= 0) newErrors.price = 'Prix valide requis';
     if (Number(formData.price) > 1000000) newErrors.price = 'Prix maximum: 1 000 000 FCFA';
     if (formData.stock && Number(formData.stock) < 0) newErrors.stock = 'Stock invalide';
-    if (!imagePreview) newErrors.image = 'Ajoutez une photo du produit';
+    if (!images.length) newErrors.image = 'Ajoutez au moins une photo du produit';
     
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
@@ -213,8 +393,8 @@ export default function AddProductPage() {
 
     setLoading(true);
     try {
-      const finalImageUrl = cleanedImageUrl || imagePreview;
-      
+      const imageUrls = images.map((img) => img.cleanedUrl || img.preview);
+
       const productData = {
         sellerId: user.uid,
         name: formData.name.trim(),
@@ -227,8 +407,8 @@ export default function AddProductPage() {
         categoryLabel: CATEGORIES.find(c => c.id === formData.category)?.label || formData.category,
         status: 'active',
         sales: 0,
-        images: [finalImageUrl],
-        aiEnhanced: !!cleanedImageUrl,
+        images: imageUrls,
+        aiEnhanced: !!images[0]?.cleanedUrl,
         aiConfidence: aiConfidence,
         createdAt: serverTimestamp(),
         updatedAt: new Date().toISOString(),
@@ -318,90 +498,100 @@ export default function AddProductPage() {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-6">
-          {/* Upload Image */}
+          {/* Upload Images (jusqu'a 5 photos) */}
           <div className="bg-white/80 backdrop-blur-sm rounded-2xl p-6 shadow-xl border border-white/50">
             <label className="block font-bold text-gray-800 mb-3 flex items-center gap-2">
               <Camera size={18} className="text-emerald-500" />
-              Photo du produit
-              {cleaningImage && (
-                <span className="ml-2 text-xs text-emerald-600 flex items-center gap-1">
+              Photos du produit
+              <span className="text-xs font-normal text-gray-400">({images.length}/{MAX_IMAGES})</span>
+              {images.some((img) => img.cleaning) && (
+                <span className="ml-1 text-xs text-emerald-600 flex items-center gap-1">
                   <Loader2 size={12} className="animate-spin" />
                   IA en action...
                 </span>
               )}
             </label>
-            
-            {!imagePreview ? (
-              <div
-                onClick={() => fileInputRef.current?.click()}
-                className="relative border-2 border-dashed border-gray-200 rounded-xl p-8 text-center cursor-pointer hover:border-emerald-400 hover:bg-emerald-50/30 transition-all group"
-              >
-                <div className="w-20 h-20 bg-gradient-to-br from-emerald-100 to-teal-100 rounded-2xl flex items-center justify-center mx-auto mb-3 group-hover:scale-110 transition shadow-lg">
-                  <Rocket size={32} className="text-emerald-600" />
-                </div>
-                <p className="text-sm font-medium text-gray-700">Cliquez pour ajouter une photo</p>
-                <p className="text-xs text-gray-400 mt-1">JPG, PNG, WebP (max 8 Mo)</p>
-                <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-emerald-500 to-teal-500 text-white rounded-full text-xs font-bold shadow-md">
-                  <Wand2 size={14} />
-                  IA : Suppression fond automatique
-                </div>
-              </div>
-            ) : (
-              <div className="relative">
-                <div className="relative aspect-square w-full max-w-sm mx-auto rounded-xl overflow-hidden bg-gradient-to-br from-gray-100 to-gray-50 shadow-lg">
-                  <Image src={imagePreview} alt="Aperçu" fill className="object-contain" />
-                  {cleaningImage && (
-                    <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center">
-                      <div className="bg-white rounded-xl p-4 flex items-center gap-3 shadow-2xl">
-                        <Loader2 size={24} className="animate-spin text-emerald-500" />
-                        <div>
-                          <p className="font-bold text-gray-800">IA en action</p>
-                          <p className="text-xs text-gray-500">Suppression du fond...</p>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  {cleanedImageUrl && !cleaningImage && (
-                    <div className="absolute top-3 right-3 bg-gradient-to-r from-emerald-500 to-teal-500 text-white rounded-full p-1.5 shadow-lg">
-                      <CheckCircle size={14} />
-                    </div>
-                  )}
-                </div>
-                
-                <div className="flex justify-center gap-2 mt-3">
-                  <button
-                    type="button"
-                    onClick={removeImage}
-                    className="px-3 py-1.5 bg-rose-50 text-rose-600 rounded-lg text-xs font-medium hover:bg-rose-100 transition flex items-center gap-1"
-                  >
-                    <Trash2 size={12} />
-                    Supprimer
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg text-xs font-medium hover:bg-gray-200 transition flex items-center gap-1"
-                  >
-                    <Upload size={12} />
-                    Changer
-                  </button>
-                </div>
 
-                {cleanedImageUrl && (
-                  <div className="mt-2 text-center">
-                    <p className="text-xs text-emerald-600 font-medium flex items-center justify-center gap-1">
-                      <Star size={12} className="fill-emerald-500" />
-                      Nettoye par IA
-                      <Shield size={10} />
-                    </p>
+            <div className="grid grid-cols-3 gap-3">
+              {images.map((img, index) => (
+                <div key={index} className="relative">
+                  <div
+                    onClick={() => index !== 0 && setMainImage(index)}
+                    className={`relative aspect-square w-full rounded-xl overflow-hidden bg-gradient-to-br from-gray-100 to-gray-50 shadow-lg ${
+                      index !== 0 ? 'cursor-pointer' : ''
+                    }`}
+                  >
+                    <Image src={img.preview} alt={`Photo ${index + 1}`} fill className="object-contain" />
+                    {img.cleaning && (
+                      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center">
+                        <Loader2 size={20} className="animate-spin text-white" />
+                      </div>
+                    )}
+                    {img.cleanedUrl && !img.cleaning && (
+                      <div className="absolute top-1.5 right-1.5 bg-gradient-to-r from-emerald-500 to-teal-500 text-white rounded-full p-1 shadow-lg">
+                        <CheckCircle size={12} />
+                      </div>
+                    )}
+                    {index === 0 && (
+                      <div className="absolute top-1.5 left-1.5 bg-emerald-600 text-white rounded-md px-1.5 py-0.5 text-[9px] font-bold shadow">
+                        Principale
+                      </div>
+                    )}
                   </div>
-                )}
+                  <button
+                    type="button"
+                    onClick={() => removeImage(index)}
+                    className="absolute -top-2 -right-2 bg-rose-500 text-white rounded-full p-1 shadow-lg hover:bg-rose-600 transition"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              ))}
+
+              {images.length < MAX_IMAGES && (
+                <div
+                  onClick={() => fileInputRef.current?.click()}
+                  className="relative aspect-square w-full border-2 border-dashed border-gray-200 rounded-xl flex flex-col items-center justify-center cursor-pointer hover:border-emerald-400 hover:bg-emerald-50/30 transition-all group"
+                >
+                  <div className="w-10 h-10 bg-gradient-to-br from-emerald-100 to-teal-100 rounded-xl flex items-center justify-center mb-1 group-hover:scale-110 transition shadow">
+                    <Plus size={20} className="text-emerald-600" />
+                  </div>
+                  <p className="text-[10px] text-gray-400 text-center px-1">Ajouter</p>
+                </div>
+              )}
+            </div>
+
+            {images.length === 0 && (
+              <div className="mt-3 text-center">
+                <p className="text-xs text-gray-400">JPG, PNG, WebP (max 8 Mo par photo)</p>
+                <div className="mt-3 inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-emerald-500 to-teal-500 text-white rounded-full text-xs font-bold shadow-md">
+                  <Wand2 size={14} />
+                  IA : Suppression fond automatique sur la photo principale
+                </div>
               </div>
             )}
+
+            {images.length > 0 && (
+              <p className="text-[10px] text-gray-400 mt-3 text-center">
+                Astuce : touchez une photo pour la définir comme photo principale
+              </p>
+            )}
+
+            {images[0]?.cleanedUrl && !images[0]?.cleaning && (
+              <div className="mt-2 text-center">
+                <p className="text-xs text-emerald-600 font-medium flex items-center justify-center gap-1">
+                  <Star size={12} className="fill-emerald-500" />
+                  Photo principale nettoyée par IA
+                  <Shield size={10} />
+                </p>
+              </div>
+            )}
+
             <input
               ref={fileInputRef}
               type="file"
               accept="image/*"
+              multiple
               onChange={handleImageUpload}
               className="hidden"
             />
@@ -481,6 +671,7 @@ export default function AddProductPage() {
                   className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 outline-none"
                 >
                   <option value="kg">Kilogramme (kg)</option>
+                  <option value="tonne">Tonne (t)</option>
                   <option value="g">Gramme (g)</option>
                   <option value="l">Litre (L)</option>
                   <option value="unite">Piece (unite)</option>
@@ -536,15 +727,19 @@ export default function AddProductPage() {
           {/* Bouton submit */}
           <button
             type="submit"
-            disabled={loading || uploadingImage || cleaningImage}
+            disabled={loading || images.some((img) => img.uploading || img.cleaning)}
             className="relative w-full overflow-hidden group bg-gradient-to-r from-emerald-600 via-green-600 to-teal-600 text-white py-4 rounded-xl font-bold shadow-xl transition-all duration-300 hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <div className="absolute inset-0 bg-gradient-to-r from-emerald-400 via-green-400 to-teal-400 opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
             <span className="relative flex items-center justify-center gap-2">
-              {loading || uploadingImage || cleaningImage ? (
+              {loading || images.some((img) => img.uploading || img.cleaning) ? (
                 <>
                   <Loader2 size={20} className="animate-spin" />
-                  {cleaningImage ? 'IA nettoie la photo...' : uploadingImage ? 'Upload en cours...' : 'Ajout en cours...'}
+                  {images.some((img) => img.cleaning)
+                    ? 'IA nettoie la photo...'
+                    : images.some((img) => img.uploading)
+                    ? 'Upload en cours...'
+                    : 'Ajout en cours...'}
                 </>
               ) : (
                 <>
