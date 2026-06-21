@@ -158,6 +158,439 @@ interface ProductData {
 
 interface SellerRating { sellerId: string; averageRating: number; reviewCount: number; }
 
+
+// ─── GEOLOCALISATION ULTRA-PRÉCISE ───────────────────────────────────────────
+
+class KalmanFilter2D {
+  private Q: number[][] = [[0.001,0],[0,0.001]];
+  private R: number[][] = [[0.5,0],[0,0.5]];
+  private P: number[][] = [[1,0],[0,1]];
+  private x: number[] = [0,0];
+  private initialized = false;
+  update(m: number[]): number[] {
+    if (!this.initialized) { this.x = m; this.initialized = true; return this.x; }
+    const P_ = this.P.map((row,i) => row.map((v,j) => v + this.Q[i][j]));
+    const y = m.map((v,i) => v - this.x[i]);
+    const K = P_.map((row,i) => row.map((v,j) => v / (v + this.R[i][j])));
+    this.x = this.x.map((xi,i) => xi + K[i].reduce((s,k,j) => s + k*y[j], 0));
+    this.P = P_.map((row,i) => row.map((v,j) => v - K[i][j]*P_[j][i]));
+    return this.x;
+  }
+}
+
+const encodeGeohash = (lat: number, lng: number, precision = 12): string => {
+  const BASE32 = '0123456789bcdefghjkmnpqrstuvwxyz';
+  let hash = '', minLat=-90, maxLat=90, minLng=-180, maxLng=180;
+  for (let i=0; i<precision; i++) {
+    let ch=0;
+    for (let b=0; b<5; b++) {
+      if (i%2===0) { const mid=(minLng+maxLng)/2; if(lng>mid){ch|=1<<(4-b);minLng=mid;}else{maxLng=mid;} }
+      else { const mid=(minLat+maxLat)/2; if(lat>mid){ch|=1<<(4-b);minLat=mid;}else{maxLat=mid;} }
+    }
+    hash += BASE32[ch];
+  }
+  return hash;
+};
+
+const getUltimateGPS = (): Promise<{lat:number;lng:number;accuracy:number;heading:number;speed:number}> =>
+  new Promise((resolve, reject) => {
+    const kalman = new KalmanFilter2D();
+    let readings: any[] = [];
+    let bestAccuracy = Infinity, bestPos: any = null;
+    let watchId: number | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    watchId = navigator.geolocation.watchPosition(pos => {
+      const { latitude:lat, longitude:lng, accuracy, heading, speed } = pos.coords;
+      readings.push({ lat, lng, accuracy, heading:heading||0, speed:speed||0 });
+      readings.sort((a,b) => a.accuracy - b.accuracy);
+      if (readings.length > 30) readings = readings.slice(0,30);
+      const tw = readings.reduce((s,r) => s + 1/(r.accuracy+0.1), 0);
+      const avgLat = readings.reduce((s,r) => s + r.lat*(1/(r.accuracy+0.1))/tw, 0);
+      const avgLng = readings.reduce((s,r) => s + r.lng*(1/(r.accuracy+0.1))/tw, 0);
+      const [fLat, fLng] = kalman.update([avgLat, avgLng]);
+      if (accuracy < bestAccuracy) { bestAccuracy = accuracy; bestPos = { lat:fLat, lng:fLng, accuracy, heading:heading||0, speed:speed||0 }; }
+      if (accuracy < 5 || readings.length >= 30) {
+        if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+        if (timeoutId) { clearTimeout(timeoutId); timeoutId = null; }
+        const best5 = readings.slice(0,5);
+        const bw = best5.reduce((s,r) => s + 1/(r.accuracy+0.1), 0);
+        resolve({ lat: best5.reduce((s,r) => s + r.lat*(1/(r.accuracy+0.1))/bw, 0), lng: best5.reduce((s,r) => s + r.lng*(1/(r.accuracy+0.1))/bw, 0), accuracy:bestAccuracy, heading:bestPos.heading, speed:bestPos.speed });
+      }
+    }, err => {
+      if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+      if (timeoutId) { clearTimeout(timeoutId); timeoutId = null; }
+      reject(err);
+    }, { enableHighAccuracy:true, timeout:30000, maximumAge:0 });
+    timeoutId = setTimeout(() => {
+      if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+      if (bestPos) resolve(bestPos);
+      else if (readings.length > 0) { const l=readings[readings.length-1]; resolve({lat:l.lat,lng:l.lng,accuracy:l.accuracy,heading:l.heading,speed:l.speed}); }
+      else reject(new Error('GPS timeout'));
+    }, 25000);
+  });
+
+const getIPLocation = async (): Promise<{lat:number;lng:number;region:string}|null> => {
+  try {
+    const r = await fetch('https://ipapi.co/json/', { headers: {'Accept':'application/json'} });
+    if (!r.ok) return null;
+    const d = await r.json();
+    return d.latitude && d.longitude ? { lat:d.latitude, lng:d.longitude, region:d.region||'' } : null;
+  } catch { return null; }
+};
+
+const reverseGeocodeOSM = async (lat: number, lng: number) => {
+  try {
+    const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1&extratags=1&namedetails=1`, { headers:{'Accept-Language':'fr-FR','User-Agent':'AgriMarche/3.0'} });
+    if (!r.ok) return null;
+    const d = await r.json(); const a = d.address || {};
+    const amenity = d.extratags?.name || d.namedetails?.name || '';
+    const quarter = a.quarter || a.suburb || a.neighbourhood || a.city_district || '';
+    const locality = a.hamlet || a.village || a.town || a.city || a.municipality || a.county || '';
+    const street = a.road || a.pedestrian || a.footway || a.path || '';
+    const poi = amenity || a.university || a.school || a.amenity || '';
+    const stateRaw = a.state || '';
+    const detailedAddress = [poi||street, quarter, locality, a.state_district||'', stateRaw].filter(Boolean).join(', ') || 'Sénégal';
+    const address = [locality||a.state_district, stateRaw].filter(Boolean).join(', ') || 'Sénégal';
+    return { address, detailedAddress, quarter, commune:locality, dept:a.state_district||'', region:stateRaw };
+  } catch { return null; }
+};
+
+const reverseGeocodeBDC = async (lat: number, lng: number) => {
+  try {
+    const r = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=fr`);
+    if (!r.ok) return null;
+    const d = await r.json();
+    const locality = d.locality || d.city || '';
+    const region = d.principalSubdivision || '';
+    return { address:[locality,region].filter(Boolean).join(', ')||'Sénégal', detailedAddress:[d.streetNumber||'',d.street||'',locality,region].filter(Boolean).join(', ')||'Sénégal', quarter:locality, commune:d.city||locality, dept:region, region };
+  } catch { return null; }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RECONNAISSANCE VOCALE — filtre de bruit + détection de murmure + amplification
+// ─────────────────────────────────────────────────────────────────────────────
+
+class AdaptiveNoiseFilter {
+  private noiseProfile = new Float32Array(1024);
+  private smoothingFactor = 0.9;
+  private isTrained = false;
+
+  train(noiseSample: Float32Array): void {
+    for (let i = 0; i < noiseSample.length; i++) {
+      this.noiseProfile[i] = this.smoothingFactor * this.noiseProfile[i] + (1 - this.smoothingFactor) * noiseSample[i];
+    }
+    this.isTrained = true;
+  }
+
+  filter(signal: Float32Array): Float32Array {
+    if (!this.isTrained) return signal;
+    const result = new Float32Array(signal.length);
+    for (let i = 0; i < signal.length; i++) {
+      result[i] = Math.max(0, signal[i] - this.noiseProfile[i % this.noiseProfile.length]);
+    }
+    return result;
+  }
+}
+
+class WhisperDetector {
+  private minDecibels = -120;
+  private maxDecibels = 0;
+  private smoothing = new Array(20).fill(0);
+  private smoothingIndex = 0;
+
+  detect(audioData: Float32Array): { isWhisper: boolean; confidence: number; volume: number } {
+    let sum = 0;
+    for (let i = 0; i < audioData.length; i++) sum += audioData[i] * audioData[i];
+    const rms = Math.sqrt(sum / audioData.length);
+    const dB = 20 * Math.log10(Math.max(rms, 0.000001));
+
+    this.smoothing[this.smoothingIndex] = dB;
+    this.smoothingIndex = (this.smoothingIndex + 1) % this.smoothing.length;
+    const avgdB = this.smoothing.reduce((a, b) => a + b, 0) / this.smoothing.length;
+
+    const volume = Math.max(0, Math.min(100, ((avgdB - this.minDecibels) / (this.maxDecibels - this.minDecibels)) * 100));
+    const isWhisper = volume > 0 && volume < 15;
+    const confidence = isWhisper ? Math.min(100, (15 - volume) * 10) : 0;
+
+    return { isWhisper, confidence, volume };
+  }
+}
+
+class AdaptiveVoiceAmplifier {
+  private gain = 1.0;
+  private maxGain = 5.0;
+  private minGain = 0.5;
+  private smoothing = 0.85;
+
+  amplify(audioData: Float32Array, volume: number): Float32Array {
+    // Cible de gain selon le volume détecté, puis lissage réel vers cette cible
+    // (l'ancienne version mélangeait gain*s + gain*(1-s), ce qui s'annule toujours en gain — corrigé ici)
+    let targetGain = this.gain;
+    if (volume < 10) targetGain = Math.min(this.maxGain, this.gain + 0.1);
+    else if (volume > 50) targetGain = Math.max(this.minGain, this.gain - 0.05);
+
+    this.gain = this.gain * this.smoothing + targetGain * (1 - this.smoothing);
+
+    const result = new Float32Array(audioData.length);
+    for (let i = 0; i < audioData.length; i++) {
+      result[i] = Math.max(-1, Math.min(1, audioData[i] * this.gain));
+    }
+    return result;
+  }
+}
+
+class DivineVoiceRecognition {
+  private recognition: any = null;
+  private audioContext: AudioContext | null = null;
+  private analyser: AnalyserNode | null = null;
+  private mediaStream: MediaStream | null = null;
+  private scriptProcessor: ScriptProcessorNode | null = null;
+
+  private isListening = false;
+  private restartAttempts = 0;
+  private maxRestartAttempts = 6;
+  private continuousMode = false;
+  private silenceTimer: ReturnType<typeof setTimeout> | null = null;
+  private confidenceHistory: number[] = [];
+  private lastVolumeCallbackAt = 0;
+
+  private noiseFilter = new AdaptiveNoiseFilter();
+  private whisperDetector = new WhisperDetector();
+  private voiceAmplifier = new AdaptiveVoiceAmplifier();
+
+  private onResultCallback: ((text: string, isFinal: boolean, confidence: number) => void) | null = null;
+  private onVolumeCallback: ((volume: number, isWhisper: boolean) => void) | null = null;
+  private onErrorCallback: ((error: string) => void) | null = null;
+
+  // Vocabulaire métier (catégories + régions du Sénégal) pour corriger les transcriptions proches
+  private commonWords = new Set<string>();
+
+  constructor(extraVocabulary: string[] = []) {
+    [
+      'tomates', 'mil', 'oignons', 'mangues', 'bananes', 'ananas', 'papaye', 'orange', 'citron',
+      'maïs', 'riz', 'sorgho', 'fonio', 'arachide', 'niébé', 'patate', 'manioc', 'igname', 'taro',
+      'pomme de terre', 'poisson', 'thiof', 'sardinelle', 'yéboyé', 'soumbi', 'lait', 'yaourt',
+      'beurre', 'fromage', 'dégué', 'engrais', 'urée', 'super phos', 'compost', 'fumier',
+      ...extraVocabulary,
+    ].forEach(w => this.commonWords.add(w.toLowerCase()));
+
+    this.initRecognition();
+  }
+
+  private initRecognition(): void {
+    if (typeof window === 'undefined') return;
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    this.recognition = new SpeechRecognition();
+    this.recognition.lang = 'fr-FR';
+    this.recognition.continuous = true;
+    this.recognition.interimResults = true;
+    this.recognition.maxAlternatives = 5;
+
+    this.setupEventListeners();
+  }
+
+  private setupEventListeners(): void {
+    if (!this.recognition) return;
+
+    this.recognition.onresult = (event: any) => {
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        const alternatives: string[] = [];
+        let bestConfidence = 0;
+
+        for (let j = 0; j < result.length; j++) {
+          alternatives.push(this.cleanText(result[j].transcript));
+          bestConfidence = Math.max(bestConfidence, result[j].confidence || 0);
+        }
+
+        const text = this.enhanceTranscript(alternatives[0] || '', alternatives);
+        if (!text) continue;
+
+        if (result.isFinal) {
+          this.confidenceHistory.push(bestConfidence);
+          if (this.confidenceHistory.length > 10) this.confidenceHistory.shift();
+          this.onResultCallback?.(text, true, bestConfidence);
+          this.resetSilenceTimer();
+        } else {
+          this.onResultCallback?.(text, false, bestConfidence);
+        }
+      }
+    };
+
+    this.recognition.onerror = (event: any) => {
+      const messages: Record<string, string> = {
+        'not-allowed': '🔇 Permission microphone refusée',
+        'no-speech': '🤫 Aucune parole détectée',
+        'audio-capture': '🎤 Aucun microphone trouvé',
+        network: '📡 Erreur réseau, reconnexion…',
+        aborted: '⏹️ Écoute interrompue',
+        'language-not-supported': '🌍 Langue non supportée',
+        'service-not-allowed': '⛔ Service non autorisé',
+      };
+      this.onErrorCallback?.(messages[event.error] || `⚠️ Erreur : ${event.error}`);
+      if (event.error !== 'not-allowed' && event.error !== 'audio-capture') this.restartListening();
+      else this.stopListening();
+    };
+
+    this.recognition.onend = () => {
+      this.isListening = false;
+      if (this.continuousMode && this.restartAttempts < this.maxRestartAttempts) {
+        setTimeout(() => { if (this.continuousMode && !this.isListening) this.startListening(true).catch(() => {}); }, 150);
+      }
+    };
+
+    this.recognition.onstart = () => {
+      this.isListening = true;
+      this.restartAttempts = 0;
+      this.startAudioProcessing();
+    };
+  }
+
+  private enhanceTranscript(transcript: string, alternatives: string[]): string {
+    const words = transcript.split(' ');
+    const enhancedWords = words.map(word => {
+      if (this.commonWords.has(word.toLowerCase())) return word;
+      for (const alt of alternatives) {
+        for (const altWord of alt.split(' ')) {
+          if (this.commonWords.has(altWord.toLowerCase()) && this.levenshteinDistance(word.toLowerCase(), altWord.toLowerCase()) <= 2) {
+            return altWord;
+          }
+        }
+      }
+      return word;
+    });
+    return enhancedWords.join(' ');
+  }
+
+  private levenshteinDistance(a: string, b: string): number {
+    if (a.length === 0) return b.length;
+    if (b.length === 0) return a.length;
+    const matrix: number[][] = [];
+    for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+    for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+    for (let i = 1; i <= b.length; i++) {
+      for (let j = 1; j <= a.length; j++) {
+        matrix[i][j] = b[i - 1] === a[j - 1]
+          ? matrix[i - 1][j - 1]
+          : Math.min(matrix[i - 1][j - 1] + 1, matrix[i][j - 1] + 1, matrix[i - 1][j] + 1);
+      }
+    }
+    return matrix[b.length][a.length];
+  }
+
+  startListening(continuous: boolean): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (!this.recognition) { reject(new Error('Reconnaissance vocale non supportée sur ce navigateur')); return; }
+      if (this.isListening) { resolve(); return; }
+
+      this.continuousMode = continuous;
+      this.recognition.continuous = continuous;
+
+      this.requestMicrophonePermission()
+        .then(() => { this.recognition.start(); resolve(); })
+        .catch(reject);
+    });
+  }
+
+  stopListening(): void {
+    this.continuousMode = false;
+    if (this.recognition && this.isListening) {
+      try { this.recognition.stop(); } catch {}
+    }
+    this.isListening = false;
+    this.stopAudioProcessing();
+    if (this.silenceTimer) { clearTimeout(this.silenceTimer); this.silenceTimer = null; }
+  }
+
+  private restartListening(): void {
+    if (this.restartAttempts >= this.maxRestartAttempts) {
+      this.onErrorCallback?.('⚠️ Trop de tentatives de reconnexion');
+      this.stopListening();
+      return;
+    }
+    this.restartAttempts++;
+    const delay = Math.min(1000 * Math.pow(1.5, this.restartAttempts), 5000);
+    this.stopListening();
+    setTimeout(() => { if (!this.isListening) this.startListening(this.continuousMode).catch(() => {}); }, delay);
+  }
+
+  private resetSilenceTimer(): void {
+    if (this.silenceTimer) clearTimeout(this.silenceTimer);
+    this.silenceTimer = setTimeout(() => { if (this.isListening) this.restartListening(); }, 8000);
+  }
+
+  private requestMicrophonePermission(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (this.mediaStream) { resolve(); return; }
+      navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+        video: false,
+      }).then(stream => { this.mediaStream = stream; resolve(); })
+        .catch(error => reject(new Error('Permission microphone refusée : ' + error.message)));
+    });
+  }
+
+  // Le ScriptProcessorNode est déprécié (remplacé par AudioWorklet) mais reste largement
+  // supporté ; ici il ne sert qu'à la jauge de volume / détection de murmure, pas au flux
+  // envoyé à la reconnaissance, donc le coût est négligeable.
+  private startAudioProcessing(): void {
+    if (!this.mediaStream) return;
+    try {
+      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      this.analyser = this.audioContext.createAnalyser();
+      this.analyser.fftSize = 2048;
+      this.analyser.smoothingTimeConstant = 0.8;
+
+      const source = this.audioContext.createMediaStreamSource(this.mediaStream);
+      source.connect(this.analyser);
+
+      this.scriptProcessor = this.audioContext.createScriptProcessor(1024, 1, 1);
+      this.scriptProcessor.onaudioprocess = (event) => {
+        const inputData = event.inputBuffer.getChannelData(0);
+        const whisper = this.whisperDetector.detect(inputData);
+        const filtered = this.noiseFilter.filter(inputData);
+        this.voiceAmplifier.amplify(filtered, whisper.volume);
+
+        // Throttle : on ne pousse l'état React qu'~12x/s (et non à chaque bloc audio, ~47x/s)
+        // pour rester fluide sur les téléphones d'entrée de gamme.
+        const now = performance.now();
+        if (now - this.lastVolumeCallbackAt > 80) {
+          this.lastVolumeCallbackAt = now;
+          this.onVolumeCallback?.(whisper.volume, whisper.isWhisper);
+        }
+      };
+
+      this.analyser.connect(this.scriptProcessor);
+      this.scriptProcessor.connect(this.audioContext.destination);
+    } catch {
+      // Traitement audio avancé indisponible (ex. navigateur restrictif) : la reconnaissance
+      // de base continue de fonctionner sans jauge de volume / détection de murmure.
+    }
+  }
+
+  private stopAudioProcessing(): void {
+    if (this.scriptProcessor) { this.scriptProcessor.disconnect(); this.scriptProcessor = null; }
+    if (this.audioContext) { this.audioContext.close(); this.audioContext = null; }
+    if (this.mediaStream) { this.mediaStream.getTracks().forEach(t => t.stop()); this.mediaStream = null; }
+  }
+
+  private cleanText(text: string): string {
+    return text.trim().replace(/\s+/g, ' ').replace(/[^a-zA-ZÀ-ÿ0-9\s\-',.?!]/g, '').replace(/\s+([,.?!])/g, '$1');
+  }
+
+  onResult(cb: (text: string, isFinal: boolean, confidence: number) => void) { this.onResultCallback = cb; }
+  onVolume(cb: (volume: number, isWhisper: boolean) => void) { this.onVolumeCallback = cb; }
+  onError(cb: (error: string) => void) { this.onErrorCallback = cb; }
+
+  get isActive(): boolean { return this.isListening; }
+  get isSupported(): boolean { return !!this.recognition; }
+
+  destroy(): void { this.stopListening(); this.recognition = null; }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 export default function AgriMarket() {
   const router = useRouter();
   const { cart, addToCart } = useCart();
@@ -168,6 +601,11 @@ export default function AgriMarket() {
   const [filtered,           setFiltered]           = useState<ProductData[]>([]);
   const [search,             setSearch]             = useState('');
   const [listening,          setListening]          = useState(false);
+  const [voiceVolume,        setVoiceVolume]        = useState(0);
+  const [voiceWhisper,       setVoiceWhisper]       = useState(false);
+  const [voiceConfidence,    setVoiceConfidence]    = useState(0);
+  const [voiceError,         setVoiceError]         = useState<string|null>(null);
+  const [voiceSupported,     setVoiceSupported]     = useState(true);
   const [cat,                setCat]                = useState('Tous');
   const [sort,               setSort]               = useState<'default'|'asc'|'desc'>('default');
   const [wishlist,           setWishlist]           = useState<Set<string>>(new Set());
@@ -175,8 +613,6 @@ export default function AgriMarket() {
   const [showSort,           setShowSort]           = useState(false);
   const [location,           setLocation]           = useState<{address:string;lat:number;lng:number;precision:number;detailedAddress?:string;region?:string}|null>(null);
   const [locStatus,          setLocStatus]          = useState<'searching'|'found'|'error'>('searching');
-  const [selectedRegion,     setSelectedRegion]     = useState<string>('Tout le Sénégal');
-  const [showRegionMenu,     setShowRegionMenu]     = useState(false);
   const [showLocModal,       setShowLocModal]       = useState(false);
   const [manualRegion,       setManualRegion]       = useState('');
   const [manualDept,         setManualDept]         = useState('');
@@ -191,7 +627,7 @@ export default function AgriMarket() {
   const [categoryProducts,   setCategoryProducts]   = useState<ProductData[]>([]);
 
   const drawerRef = useRef<HTMLDivElement>(null);
-  const voiceRef  = useRef<any>(null);
+  const voiceRef  = useRef<DivineVoiceRecognition | null>(null);
 
   const cartCount = cart?.itemCount || 0;
 
@@ -203,19 +639,53 @@ export default function AgriMarket() {
   }, []);
 
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const SR = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
-    if (!SR) return;
-    voiceRef.current = new SR();
-    voiceRef.current.lang = 'fr-FR';
-    voiceRef.current.continuous = false;
-    voiceRef.current.interimResults = false;
-    voiceRef.current.onresult  = (e: any) => { setSearch(e.results[0][0].transcript); setListening(false); };
-    voiceRef.current.onerror   = () => setListening(false);
-    voiceRef.current.onend     = () => setListening(false);
+    const vocab = [...CATEGORIES.map(c => c.label), ...REGIONS_SENEGAL];
+    const engine = new DivineVoiceRecognition(vocab);
+    voiceRef.current = engine;
+    setVoiceSupported(engine.isSupported);
+
+    engine.onResult((text, isFinal, confidence) => {
+      setSearch(text);
+      setVoiceConfidence(confidence);
+      if (isFinal) {
+        // Une phrase suffit pour une recherche : on referme l'écoute proprement.
+        engine.stopListening();
+        setListening(false);
+        setVoiceVolume(0);
+        setVoiceWhisper(false);
+        if (navigator.vibrate) navigator.vibrate([10, 5, 10]);
+      }
+    });
+
+    engine.onVolume((volume, isWhisper) => {
+      setVoiceVolume(volume);
+      setVoiceWhisper(isWhisper);
+    });
+
+    engine.onError((message) => {
+      setVoiceError(message);
+      setListening(false);
+      setVoiceVolume(0);
+    });
+
+    return () => engine.destroy();
   }, []);
 
-  const startVoice = () => { if (voiceRef.current && !listening) { voiceRef.current.start(); setListening(true); } };
+  const startVoice = useCallback(() => {
+    if (!voiceRef.current) return;
+    setVoiceError(null);
+    voiceRef.current.startListening(true)
+      .then(() => setListening(true))
+      .catch((e: Error) => { setVoiceError(e.message); setListening(false); });
+  }, []);
+
+  const stopVoice = useCallback(() => {
+    voiceRef.current?.stopListening();
+    setListening(false);
+    setVoiceVolume(0);
+  }, []);
+
+  const toggleVoice = useCallback(() => { listening ? stopVoice() : startVoice(); }, [listening, startVoice, stopVoice]);
 
   useEffect(() => {
     const u = onSnapshot(collection(db, 'products'), snap => {
@@ -255,105 +725,106 @@ export default function AgriMarket() {
     }
   }, [selected, products]);
 
-  const getLocation = useCallback(() => {
-    setLocStatus('searching'); setLocation(null);
-    if (!navigator.geolocation) { setLocStatus('error'); return; }
-    navigator.geolocation.getCurrentPosition(async ({ coords: { latitude: lat, longitude: lng, accuracy } }) => {
-      let addr = '';
-      let detailedAddr = '';
+  const getDivineLocation = useCallback(async () => {
+    setLocStatus('searching');
+    setLocation(null);
+    try {
+      // 1. GPS ultra-précis (Kalman + moyenne pondérée)
+      let gpsData: {lat:number;lng:number;accuracy:number;heading:number;speed:number} | null = null;
       try {
-        const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1&extratags=1&namedetails=1`, { 
-          headers: { 'Accept-Language': 'fr-FR', 'User-Agent': 'AgriMarche/2.0' } 
-        });
-        const d = await r.json();
-        const a = d.address || {};
-        
-        // Extraction hiérarchique précise pour le Sénégal
-        const amenity    = d.extratags?.name || d.namedetails?.name || '';
-        const quarter    = a.quarter || '';
-        const suburb     = a.suburb || a.neighbourhood || a.city_district || '';
-        const hamlet     = a.hamlet || '';
-        const village    = a.village || '';
-        const commune    = a.municipality || a.county || '';
-        const town       = a.town || '';
-        const city       = a.city || '';
-        const dept       = a.state_district || '';  // département au Sénégal
-        const stateRaw   = a.state || '';
-        const region     = REGION_ALIASES[stateRaw] || stateRaw;
+        if (navigator.geolocation) gpsData = await getUltimateGPS();
+      } catch (e) { console.warn('GPS failed:', e); }
 
-        // Niveau 1 : lieu nommé (école, marché, mosquée...)
-        const poiName = amenity || a.university || a.school || a.amenity || '';
+      // 2. IP fallback
+      let ipData: {lat:number;lng:number;region:string} | null = null;
+      try { ipData = await getIPLocation(); } catch (e) { console.warn('IP failed:', e); }
 
-        // Niveau 2 : adresse de rue
-        const street = a.road || a.pedestrian || a.footway || a.path || '';
-
-        // Construire l'adresse détaillée du plus précis au moins précis
-        const microZone = quarter || suburb || hamlet || '';
-        const locality  = village || town || city || commune || '';
-
-        if (poiName && microZone) {
-          detailedAddr = `${poiName}, ${microZone}`;
-        } else if (poiName && locality) {
-          detailedAddr = `${poiName}, ${locality}`;
-        } else if (poiName) {
-          detailedAddr = poiName;
-        } else if (street && microZone) {
-          detailedAddr = `${street}, ${microZone}`;
-        } else if (microZone && locality) {
-          detailedAddr = `${microZone}, ${locality}`;
-        } else if (microZone) {
-          detailedAddr = microZone;
-        } else if (locality && dept) {
-          detailedAddr = `${locality}, ${dept}`;
-        } else if (locality) {
-          detailedAddr = locality;
-        } else if (dept) {
-          detailedAddr = dept;
-        } else if (region) {
-          detailedAddr = `Région de ${region}`;
-        } else {
-          detailedAddr = 'Sénégal';
-        }
-
-        // Adresse courte = ville + région
-        addr = [locality || dept, region].filter(Boolean).join(', ') || 'Sénégal';
-
-        setLocation({ address: addr, lat, lng, precision: accuracy, detailedAddress: detailedAddr, region });
-        // Auto-sélectionner la région détectée dans le filtre
-        if (region && REGIONS_SENEGAL.includes(region)) {
-          setSelectedRegion(region);
-        }
-        setLocStatus('found');
-      } catch (err) {
-        console.error('Geocoding error:', err);
-        setLocStatus('error'); 
-        setLocation({ address: 'Non disponible', lat: 14.7167, lng: -17.4677, precision: 0, detailedAddress: 'Non disponible' });
+      // 3. Fusion GPS + IP
+      // ✅ Correction : on ne mélange plus le GPS précis avec l'IP. La géolocalisation
+      //    IP (ipapi.co) est très grossière au Sénégal (souvent un point central de Dakar
+      //    quel que soit l'endroit réel de l'utilisateur), donc la pondérer avec un GPS
+      //    fiable faisait dériver la position (ex: Diamniadio affiché comme Dakar).
+      //    Désormais : GPS utilisé tel quel s'il est exploitable, IP seulement en dernier
+      //    recours si le GPS a échoué ou est trop imprécis pour être utile.
+      let finalLat = 14.7167, finalLng = -17.4677, finalAccuracy = 10000, confidence = 0;
+      if (gpsData && gpsData.accuracy <= 150) {
+        finalLat = gpsData.lat; finalLng = gpsData.lng; finalAccuracy = gpsData.accuracy;
+        confidence = Math.min(100, 1000 / (gpsData.accuracy + 1));
+      } else if (ipData) {
+        finalLat = ipData.lat; finalLng = ipData.lng; finalAccuracy = 5000; confidence = 10;
       }
-    }, 
-    () => { 
+
+      // 4. Reverse geocoding double (OSM + BigDataCloud)
+      const [osmAddr, bdcAddr] = await Promise.all([
+        reverseGeocodeOSM(finalLat, finalLng),
+        reverseGeocodeBDC(finalLat, finalLng)
+      ]);
+      let bestAddr = osmAddr || bdcAddr;
+      if (osmAddr && bdcAddr) {
+        bestAddr = osmAddr.detailedAddress.length >= bdcAddr.detailedAddress.length ? osmAddr : bdcAddr;
+      }
+
+      // ✅ Garde-fou : sur PC sans GPS, l'IP/WiFi peut renvoyer une position hors du
+      //    Sénégal (mauvaise base de géoloc IP locale). Plutôt que d'afficher une
+      //    fausse adresse avec confiance, on détecte ce cas et on demande une
+      //    correction manuelle au lieu d'inventer un lieu.
+      const inSenegal = finalLat >= 12.0 && finalLat <= 16.8 && finalLng >= -17.6 && finalLng <= -11.2;
+      if (!inSenegal) {
+        console.warn('🚫 Position hors Sénégal détectée, rejetée:', { finalLat, finalLng });
+        setLocStatus('error');
+        return;
+      }
+
+      const regionRaw = bestAddr?.region || ipData?.region || '';
+      const region = REGION_ALIASES[regionRaw] || regionRaw;
+
+      setLocation({
+        address: bestAddr?.address || 'Sénégal',
+        lat: finalLat, lng: finalLng,
+        precision: finalAccuracy,
+        detailedAddress: bestAddr?.detailedAddress || bestAddr?.address || 'Sénégal',
+        region
+      });
+      // La région détectée par GPS n'est plus utilisée pour filtrer les produits :
+      // la localisation est désormais purement informative.
+      setLocStatus('found');
+
+      console.log('🎯 LOCALISATION:', { précision:`${finalAccuracy.toFixed(1)}m`, confiance:`${confidence.toFixed(0)}%`, adresse:bestAddr?.detailedAddress, geohash: encodeGeohash(finalLat, finalLng, 9) });
+    } catch (error) {
+      console.error('Localisation error:', error);
       setLocStatus('error');
-      setLocation(null);
-      setShowLocModal(true); // Ouvre le modal de saisie manuelle
-    },
-    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+    }
   }, []);
 
-  useEffect(() => { getLocation(); }, [getLocation]);
+  useEffect(() => {
+    const tryLocate = async () => {
+      try {
+        if ('permissions' in navigator) {
+          const status = await navigator.permissions.query({ name: 'geolocation' });
+          if (status.state === 'granted' || status.state === 'prompt') {
+            setTimeout(() => getDivineLocation(), 300);
+            return;
+          }
+          // Permission explicitement refusée : on ne tente plus l'IP en silence
+          // (source de fausses positions). On laisse l'utilisateur l'activer.
+          setLocStatus('error');
+          return;
+        }
+        setTimeout(() => getDivineLocation(), 300);
+      } catch { setTimeout(() => getDivineLocation(), 300); }
+    };
+    tryLocate();
+  }, []);
+
 
   useEffect(() => {
     let r = [...products];
     if (search) r = r.filter(p => p.name?.toLowerCase().includes(search.toLowerCase()));
     if (cat !== 'Tous') r = r.filter(p => p.category === cat);
-    if (selectedRegion !== 'Tout le Sénégal') {
-      r = r.filter(p => {
-        const pr = p.region || p.exactLocation || '';
-        return pr.toLowerCase().includes(selectedRegion.toLowerCase());
-      });
-    }
     if (sort === 'asc')  r.sort((a,b) => (a.price||0)-(b.price||0));
     if (sort === 'desc') r.sort((a,b) => (b.price||0)-(a.price||0));
     setFiltered(r);
-  }, [products, search, cat, sort, selectedRegion]);
+  }, [products, search, cat, sort]);
 
   const open  = (p: ProductData) => { setSelected(p); setImgIdx(0); document.body.style.overflow = 'hidden'; };
   const close = () => { setSelected(null); document.body.style.overflow = ''; };
@@ -593,6 +1064,66 @@ export default function AgriMarket() {
           0%,100% { box-shadow:0 0 0 0 rgba(37,137,74,0.5); }
           50%      { box-shadow:0 0 0 12px rgba(37,137,74,0); }
         }
+        .g-mic-btn.whisper {
+          background:linear-gradient(135deg,#e67e22,#f39c12);
+          animation:g-ring-amber 1s ease-in-out infinite;
+        }
+        @keyframes g-ring-amber {
+          0%,100% { box-shadow:0 0 0 0 rgba(243,156,18,0.45); }
+          50%      { box-shadow:0 0 0 12px rgba(243,156,18,0); }
+        }
+
+        .g-voice-pop {
+          position:absolute;
+          right:10px; bottom:calc(100% + 10px);
+          background:var(--snow);
+          border:1px solid var(--border);
+          border-radius:16px;
+          padding:10px 14px;
+          display:flex; align-items:center; gap:10px;
+          box-shadow:var(--shadow-md);
+          animation:g-pop-in 0.25s cubic-bezier(.34,1.56,.64,1);
+          z-index:60;
+          white-space:nowrap;
+        }
+        .g-voice-pop.whisper { border-color:#f39c12; }
+        .g-voice-waves { display:flex; align-items:center; gap:3px; height:24px; }
+        .g-voice-wave {
+          width:3px; min-height:3px; border-radius:2px;
+          background:linear-gradient(to top,var(--jade),var(--emerald));
+          transition:height 0.08s ease;
+        }
+        .g-voice-pop.whisper .g-voice-wave { background:linear-gradient(to top,#f39c12,#e67e22); }
+        .g-voice-status { font-size:11px; font-weight:600; color:var(--mtext); }
+        .g-voice-conf {
+          font-size:10px; font-weight:800; color:var(--jade);
+          background:rgba(37,137,74,0.1); border-radius:8px; padding:2px 6px;
+        }
+        @keyframes g-pop-in {
+          from { opacity:0; transform:translateY(6px) scale(0.96); }
+          to   { opacity:1; transform:translateY(0) scale(1); }
+        }
+
+        .g-voice-toast {
+          margin-top:8px;
+          font-size:12px; font-weight:600;
+          color:#b9450a;
+          background:rgba(243,156,18,0.1);
+          border:1px solid rgba(243,156,18,0.25);
+          border-radius:10px;
+          padding:8px 12px;
+          animation:g-toast-life 4s ease forwards;
+        }
+        @keyframes g-toast-life {
+          0%   { opacity:0; transform:translateY(-4px); }
+          10%  { opacity:1; transform:translateY(0); }
+          85%  { opacity:1; }
+          100% { opacity:0; }
+        }
+
+        @media(max-width:480px) {
+          .g-voice-pop { right:0; left:0; justify-content:center; }
+        }
 
         .g-cats {
           position:sticky; top:118px; z-index:190;
@@ -664,13 +1195,6 @@ export default function AgriMarket() {
           font-size:11px; font-weight:600; color:var(--emerald);
           white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px;
         }
-
-        .g-count {
-          font-family:'Cormorant Garamond', serif;
-          font-size:14px; font-style:italic;
-          color:var(--mtext); white-space:nowrap;
-        }
-        .g-count b { font-style:normal; color:var(--emerald); font-weight:700; }
 
         .g-sort-trigger {
           display:flex; align-items:center; gap:6px; padding:7px 14px;
@@ -941,6 +1465,9 @@ export default function AgriMarket() {
           font-family:'DM Sans', sans-serif;
           font-size:7px; font-weight:700; letter-spacing:0.12em;
         }
+        .g-nav-ia .g-nav-ic { color:#8e44ad; }
+        .g-nav-ia .g-nav-lbl { color:#8e44ad; }
+        .g-nav-ia:hover { color:#8e44ad; }
 
         .g-nav-cta {
           display:flex; flex-direction:column; align-items:center; gap:4px;
@@ -1293,10 +1820,45 @@ export default function AgriMarket() {
                 placeholder="Tomates Casamance, mil Thiès, oignons Potou…"
                 className="g-search-input"
               />
-              <button onClick={startVoice} className={`g-mic-btn ${listening ? 'on' : ''}`}>
-                {listening ? '🎤' : '🎙'}
-              </button>
+              {voiceSupported && (
+                <button
+                  onClick={toggleVoice}
+                  className={`g-mic-btn ${listening ? 'on' : ''} ${voiceWhisper ? 'whisper' : ''}`}
+                  title={listening ? 'Arrêter l\'écoute' : 'Recherche vocale'}
+                >
+                  {listening ? (voiceWhisper ? '🤫' : '🎤') : '🎙'}
+                </button>
+              )}
+
+              {listening && (
+                <div className={`g-voice-pop ${voiceWhisper ? 'whisper' : ''}`}>
+                  <div className="g-voice-waves">
+                    {[...Array(10)].map((_, i) => (
+                      <span
+                        key={i}
+                        className="g-voice-wave"
+                        style={{
+                          height: `${Math.max(3, (voiceVolume / 100) * 22 * (0.4 + ((i % 5) / 5)))}px`,
+                          animationDelay: `${i * 0.04}s`,
+                        }}
+                      />
+                    ))}
+                  </div>
+                  <span className="g-voice-status">
+                    {voiceWhisper ? 'Murmure amplifié…' : voiceVolume > 4 ? 'Je vous écoute…' : 'En attente…'}
+                  </span>
+                  {voiceConfidence > 0.5 && (
+                    <span className="g-voice-conf">{Math.round(voiceConfidence * 100)}%</span>
+                  )}
+                </div>
+              )}
             </div>
+
+            {voiceError && (
+              <div className="g-voice-toast" onAnimationEnd={() => setVoiceError(null)}>
+                {voiceError}
+              </div>
+            )}
           </div>
         </div>
       </header>
@@ -1321,68 +1883,29 @@ export default function AgriMarket() {
           {/* Bouton localisation GPS */}
           <button
             className="g-loc-chip"
-            onClick={() => locStatus === 'error' ? setShowLocModal(true) : getLocation()}
+            onClick={() => getDivineLocation()}
             style={{ minWidth: 0, flexShrink: 0 }}
-            title={locStatus === 'error' ? 'Définir ma position manuellement' : 'Actualiser ma position GPS'}
+            title="Détecter ma position GPS"
           >
             <div className={`g-loc-pulse ${locStatus}`} />
             <span className="g-loc-text" style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {locStatus === 'searching' ? 'Localisation...' :
-               locStatus === 'error'     ? '📍 Définir ma position' :
+               locStatus === 'error'     ? '📍 Activer la localisation' :
                location?.detailedAddress || location?.address || 'Sénégal'}
             </span>
           </button>
 
-          {/* Dropdown filtre région */}
-          <div style={{ position: 'relative' }}>
-            <button
-              onClick={() => setShowRegionMenu(v => !v)}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 6,
-                padding: '6px 12px', borderRadius: 20,
-                background: selectedRegion !== 'Tout le Sénégal' ? 'var(--jade)' : 'rgba(255,255,255,0.08)',
-                color: selectedRegion !== 'Tout le Sénégal' ? '#060e09' : 'var(--text)',
-                border: `1px solid ${selectedRegion !== 'Tout le Sénégal' ? 'var(--jade)' : 'rgba(255,255,255,0.15)'}`,
-                fontSize: 12, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
-                transition: 'all 0.2s',
-              }}
-            >
-              📍 {selectedRegion === 'Tout le Sénégal' ? 'Région' : selectedRegion}
-              <span style={{ fontSize: 10, opacity: 0.7 }}>{showRegionMenu ? '▲' : '▼'}</span>
-            </button>
+          {/* ✅ Lien séparé pour corriger manuellement (région/département/commune),
+              utile si la détection automatique échoue ou se trompe */}
+          <button
+            onClick={() => setShowLocModal(true)}
+            style={{ background: 'none', border: 'none', padding: 0, flexShrink: 0, fontSize: 11, color: 'rgba(255,255,255,0.45)', textDecoration: 'underline', cursor: 'pointer' }}
+            title="Corriger ma localisation manuellement"
+          >
+            modifier
+          </button>
 
-            {showRegionMenu && (
-              <div style={{
-                position: 'absolute', top: '110%', left: 0, zIndex: 200,
-                background: '#0f1a12', border: '1px solid rgba(255,255,255,0.12)',
-                borderRadius: 12, padding: 6, minWidth: 200,
-                boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-                maxHeight: 320, overflowY: 'auto',
-              }}>
-                {REGIONS_SENEGAL.map(reg => (
-                  <button
-                    key={reg}
-                    onClick={() => { setSelectedRegion(reg); setShowRegionMenu(false); }}
-                    style={{
-                      display: 'block', width: '100%', textAlign: 'left',
-                      padding: '9px 14px', borderRadius: 8, border: 'none',
-                      background: selectedRegion === reg ? 'rgba(0,255,135,0.15)' : 'transparent',
-                      color: selectedRegion === reg ? 'var(--jade)' : 'var(--text)',
-                      fontSize: 13, fontWeight: selectedRegion === reg ? 700 : 400,
-                      cursor: 'pointer', transition: 'background 0.15s',
-                    }}
-                    onMouseEnter={e => { if (selectedRegion !== reg) (e.target as HTMLElement).style.background = 'rgba(255,255,255,0.06)'; }}
-                    onMouseLeave={e => { if (selectedRegion !== reg) (e.target as HTMLElement).style.background = 'transparent'; }}
-                  >
-                    {reg === 'Tout le Sénégal' ? '🇸🇳 ' : '📍 '}{reg}
-                    {selectedRegion === reg && <span style={{ float: 'right' }}>✓</span>}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <span className="g-count"><b>{filtered.length}</b> produits</span>
+          {/* Dropdown filtre région et compteur de produits retirés — la localisation suffit */}
         </div>
 
         <div style={{ position: 'relative', flexShrink: 0 }}>
@@ -1624,7 +2147,6 @@ export default function AgriMarket() {
                     region: manualRegion,
                   });
                   setLocStatus('found');
-                  setSelectedRegion(manualRegion);
                   setShowLocModal(false);
                 }}
                 style={{
@@ -1641,7 +2163,7 @@ export default function AgriMarket() {
 
             {/* Bouton réessayer GPS */}
             <button
-              onClick={() => { setShowLocModal(false); getLocation(); }}
+              onClick={() => { setShowLocModal(false); getDivineLocation(); }}
               style={{
                 width: '100%', padding: '12px', borderRadius: 14, border: '1px solid rgba(255,255,255,0.12)',
                 background: 'transparent', color: 'rgba(255,255,255,0.5)',
@@ -1677,9 +2199,9 @@ export default function AgriMarket() {
             <span className="g-nav-ic">◻</span>
             <span className="g-nav-lbl">PANIER</span>
           </Link>
-          <Link href="/account" className="g-nav-btn">
-            <span className="g-nav-ic">◎</span>
-            <span className="g-nav-lbl">COMPTE</span>
+          <Link href="/main/unlock-ia" className="g-nav-btn g-nav-ia">
+            <span className="g-nav-ic">🤖</span>
+            <span className="g-nav-lbl">IA</span>
           </Link>
         </div>
       </nav>
