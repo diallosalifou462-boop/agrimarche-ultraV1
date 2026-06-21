@@ -9,11 +9,9 @@ import {
   query,
   where,
   orderBy,
-  limit,
   doc,
   updateDoc,
   onSnapshot,
-  getDocs,
   Timestamp,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
@@ -35,12 +33,13 @@ interface SellerRating {
   reviewCount: number;
 }
 
+// ─── Statuts ────────────────────────────────────────────────────────────────
 const statusConfig: Record<string, { label: string; dot: string; pill: string }> = {
   en_attente:     { label: 'En attente',     dot: 'bg-amber-400',   pill: 'bg-amber-50 text-amber-700 ring-amber-200' },
-  en_preparation: { label: 'En preparation', dot: 'bg-sky-400',     pill: 'bg-sky-50 text-sky-700 ring-sky-200' },
-  expediee:       { label: 'Expediee',       dot: 'bg-violet-400',  pill: 'bg-violet-50 text-violet-700 ring-violet-200' },
-  livree:         { label: 'Livree',         dot: 'bg-emerald-400', pill: 'bg-emerald-50 text-emerald-700 ring-emerald-200' },
-  annulee:        { label: 'Annulee',        dot: 'bg-rose-400',    pill: 'bg-rose-50 text-rose-700 ring-rose-200' },
+  en_preparation: { label: 'En préparation', dot: 'bg-sky-400',     pill: 'bg-sky-50 text-sky-700 ring-sky-200' },
+  expediee:       { label: 'Expédiée',       dot: 'bg-violet-400',  pill: 'bg-violet-50 text-violet-700 ring-violet-200' },
+  livree:         { label: 'Livrée',         dot: 'bg-emerald-400', pill: 'bg-emerald-50 text-emerald-700 ring-emerald-200' },
+  annulee:        { label: 'Annulée',        dot: 'bg-rose-400',    pill: 'bg-rose-50 text-rose-700 ring-rose-200' },
 };
 const getStatus = (s: string) =>
   statusConfig[s] || { label: s, dot: 'bg-gray-400', pill: 'bg-gray-50 text-gray-700 ring-gray-200' };
@@ -54,62 +53,49 @@ export default function AccountPage() {
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [orders, setOrders] = useState<any[]>([]);
   const [loadingOrders, setLoadingOrders] = useState(true);
-  const [ordersError, setOrdersError] = useState(false);
-  const [retryKey, setRetryKey] = useState(0);
   const [updating, setUpdating] = useState<string | null>(null);
   const [sellerRatings, setSellerRatings] = useState<Map<string, SellerRating>>(new Map());
   const [formData, setFormData] = useState<UserFormData>({
     displayName: '', phone: '', city: '', address: '',
   });
 
+  // ── Récupération des notes des vendeurs ─────────────────────────────────
   useEffect(() => {
     if (!user) return;
 
-    // Liste des vendeurs concernes, dont on n'a pas encore la note (evite de re-fetcher inutilement)
-    const sellerIds = [...new Set(orders.map(o => o.sellerId).filter(Boolean))];
-    const sellersToFetch = sellerIds.filter(id => !sellerRatings.has(id));
-    if (sellersToFetch.length === 0) return;
+    const sellers = [...new Set(orders.map(o => o.sellerId).filter(Boolean))];
 
-    let cancelled = false;
-
-    (async () => {
-      // Lecture unique (pas de listener temps reel) : economise data et batterie sur mobile,
-      // une note moyenne n'a pas besoin d'etre mise a jour en direct sur cette page.
-      const results = await Promise.all(
-        sellersToFetch.map(async (sellerId) => {
-          try {
-            const reviewsQuery = query(
-              collection(db, 'reviews'),
-              where('sellerId', '==', sellerId)
-            );
-            const snapshot = await getDocs(reviewsQuery);
-            const reviews = snapshot.docs.map(d => d.data());
-            const count = reviews.length;
-            const average = count > 0
-              ? reviews.reduce((sum: number, review: any) => sum + (review.rating || 0), 0) / count
-              : 0;
-            return [sellerId, { averageRating: Number(average.toFixed(1)), reviewCount: count }] as const;
-          } catch (e) {
-            console.error('Erreur chargement note vendeur:', e);
-            return null;
-          }
-        })
+    // ✅ on garde toutes les fonctions de désabonnement pour les nettoyer
+    //    correctement — avant, le `return` était piégé dans le forEach et
+    //    n'était jamais appelé, ce qui accumulait les listeners Firestore.
+    const unsubs: Array<() => void> = sellers.map(sellerId => {
+      const reviewsQuery = query(
+        collection(db, 'reviews'),
+        where('sellerId', '==', sellerId)
       );
 
-      if (cancelled) return;
+      return onSnapshot(reviewsQuery, (snapshot) => {
+        const reviews = snapshot.docs.map(doc => doc.data());
+        const count = reviews.length;
+        const average = count > 0
+          ? reviews.reduce((sum: number, review: any) => sum + (review.rating || 0), 0) / count
+          : 0;
 
-      setSellerRatings(prev => {
-        const newMap = new Map(prev);
-        results.forEach((result) => {
-          if (result) newMap.set(result[0], result[1]);
+        setSellerRatings(prev => {
+          const newMap = new Map(prev);
+          newMap.set(sellerId, {
+            averageRating: Number(average.toFixed(1)),
+            reviewCount: count
+          });
+          return newMap;
         });
-        return newMap;
       });
-    })();
+    });
 
-    return () => { cancelled = true; };
-  }, [orders, user, sellerRatings]);
+    return () => unsubs.forEach(unsub => unsub());
+  }, [orders, user]);
 
+  // ── Sync temps réel des commandes ──────────────────────────────────────
   useEffect(() => {
     if (!user) { setLoadingOrders(false); return; }
 
@@ -117,28 +103,17 @@ export default function AccountPage() {
       collection(db, 'orders'),
       where('userId', '==', user.uid),
       orderBy('createdAt', 'desc'),
-      limit(20),
     );
 
     const unsub = onSnapshot(q, (snap) => {
       setOrders(snap.docs.map(d => ({ id: d.id, ...d.data(), total: d.data().total || d.data().amount || 0 })));
       setLoadingOrders(false);
-      setOrdersError(false);
-    }, (err) => {
-      console.error(err);
-      setLoadingOrders(false);
-      setOrdersError(true);
-    });
+    }, (err) => { console.error(err); setLoadingOrders(false); });
 
     return () => unsub();
-  }, [user, retryKey]);
+  }, [user]);
 
-  // ✅ CORRECTION : Attendre que loading soit fini avant de rediriger
-  useEffect(() => {
-    if (!loading && !user) {
-      router.push('/auth/login?redirect=/account');
-    }
-  }, [loading, user, router]);
+  useEffect(() => { if (!loading && !user) router.push('/auth/login'); }, [loading, user, router]);
 
   useEffect(() => {
     if (profile) {
@@ -151,32 +126,34 @@ export default function AccountPage() {
     }
   }, [profile]);
 
+  // ── Annulation CLIENT → updateDoc ──────────────────────────────────────
   const handleCancelOrder = async (orderId: string) => {
-    if (!confirm('Annuler cette commande ?')) return;
+    if (!confirm('⚠️ Annuler cette commande ?')) return;
     setUpdating(orderId);
     try {
       await updateDoc(doc(db, 'orders', orderId), {
         status: 'annulee',
-        statusLabel: 'Annulee par le client',
+        statusLabel: 'Annulée par le client',
         cancelledBy: 'client',
         cancelledAt: Timestamp.now(),
         updatedAt: new Date().toISOString(),
       });
     } catch (e) {
       console.error(e);
-      alert('Erreur lors de l annulation.');
+      alert('Erreur lors de l\'annulation.');
     } finally {
       setUpdating(null);
     }
   };
 
+  // ── Confirmation réception ─────────────────────────────────────────────
   const handleConfirmOrder = async (orderId: string) => {
-    if (!confirm('Confirmez-vous avoir recu cette commande ?')) return;
+    if (!confirm('✅ Confirmez-vous avoir reçu cette commande ?')) return;
     setUpdating(orderId);
     try {
       await updateDoc(doc(db, 'orders', orderId), {
         status: 'livree',
-        statusLabel: 'Livree – confirmee par le client',
+        statusLabel: 'Livrée – confirmée par le client',
         updatedAt: new Date().toISOString(),
       });
     } catch (e) {
@@ -214,7 +191,6 @@ export default function AccountPage() {
   const userRole = profile?.role || 'client';
   const isSeller = ['seller', 'both', 'admin'].includes(userRole);
 
-  // ✅ Afficher un spinner pendant le chargement
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center bg-[#f0faf4]">
       <div className="flex flex-col items-center gap-3">
@@ -227,6 +203,7 @@ export default function AccountPage() {
   if (!user) return null;
   const initial = user.email?.charAt(0).toUpperCase() ?? '?';
 
+  // Fonction pour afficher les étoiles
   const renderStars = (rating: number) => {
     const fullStars = Math.floor(rating);
     const hasHalfStar = rating % 1 >= 0.5;
@@ -248,7 +225,9 @@ export default function AccountPage() {
   };
 
   return (
-    <div className="min-h-screen bg-[#f0faf4]">
+    <div className="min-h-screen bg-[#f0faf4]" style={{ fontFamily: "'DM Sans', system-ui, sans-serif" }}>
+
+      {/* HERO */}
       <div className="relative bg-gradient-to-br from-emerald-600 via-green-600 to-teal-500 pt-14 pb-20 px-5 overflow-hidden">
         <div className="absolute -top-10 -right-10 w-52 h-52 rounded-full bg-white/10 blur-3xl pointer-events-none" />
         <div className="absolute bottom-0 left-0 w-40 h-40 rounded-full bg-teal-300/20 blur-2xl pointer-events-none" />
@@ -273,13 +252,14 @@ export default function AccountPage() {
         </div>
       </div>
 
+      {/* STATS */}
       <div className="mx-4 -mt-10 relative z-10">
         <div className="bg-white rounded-2xl shadow-lg shadow-emerald-100 grid grid-cols-4 divide-x divide-gray-100 overflow-hidden">
           {[
             { val: stats.total,    label: 'Total',    color: 'text-gray-800' },
             { val: stats.enCours,  label: 'En cours', color: 'text-amber-600' },
-            { val: stats.livrees,  label: 'Livrees',  color: 'text-emerald-600' },
-            { val: stats.annulees, label: 'Annulees', color: 'text-rose-500' },
+            { val: stats.livrees,  label: 'Livrées',  color: 'text-emerald-600' },
+            { val: stats.annulees, label: 'Annulées', color: 'text-rose-500' },
           ].map(({ val, label, color }) => (
             <div key={label} className="flex flex-col items-center py-4 px-1">
               <span className={`text-2xl font-black ${color}`}>{val}</span>
@@ -289,14 +269,17 @@ export default function AccountPage() {
         </div>
       </div>
 
+      {/* MAIN */}
       <div className="px-4 mt-5 pb-10 space-y-4">
+
         {saveSuccess && (
           <div className="flex items-center gap-3 bg-emerald-600 text-white px-4 py-3 rounded-2xl shadow-lg shadow-emerald-200">
             <CheckCircle size={18} className="shrink-0" />
-            <span className="text-sm font-semibold">Profil mis a jour</span>
+            <span className="text-sm font-semibold">Profil mis à jour ✦</span>
           </div>
         )}
 
+        {/* PROFIL */}
         <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
           <div className="flex items-center justify-between px-5 pt-5 pb-3">
             <h2 className="text-sm font-bold text-gray-700 uppercase tracking-widest">Profil</h2>
@@ -312,7 +295,7 @@ export default function AccountPage() {
               {(['displayName', 'phone'] as const).map((field) => (
                 <div key={field} className="space-y-2.5">
                   <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider">
-                    {field === 'displayName' ? 'Nom complet' : 'Telephone'}
+                    {field === 'displayName' ? 'Nom complet' : 'Téléphone'}
                   </label>
                   <input
                     type={field === 'phone' ? 'tel' : 'text'}
@@ -337,8 +320,8 @@ export default function AccountPage() {
               {[
                 { icon: User,   val: formData.displayName || '—', label: 'Nom' },
                 { icon: Mail,   val: user.email || '—',           label: 'Email' },
-                { icon: Phone,  val: formData.phone || '—',       label: 'Telephone' },
-                { icon: Shield, val: userRole,                    label: 'Role' },
+                { icon: Phone,  val: formData.phone || '—',       label: 'Téléphone' },
+                { icon: Shield, val: userRole,                    label: 'Rôle' },
               ].map(({ icon: Icon, val, label }) => (
                 <div key={label} className="flex items-center gap-3 bg-gray-50 rounded-xl px-4 py-3">
                   <Icon size={16} className="text-emerald-500 shrink-0" />
@@ -352,6 +335,7 @@ export default function AccountPage() {
           )}
         </div>
 
+        {/* COMMANDES AVEC NOTE DU VENDEUR */}
         <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
           <div className="flex items-center justify-between px-5 pt-5 pb-3">
             <h2 className="text-sm font-bold text-gray-700 uppercase tracking-widest flex items-center gap-2">
@@ -368,22 +352,6 @@ export default function AccountPage() {
                 <Loader2 size={28} className="animate-spin text-emerald-400" />
                 <p className="text-xs text-gray-400 font-medium">Chargement…</p>
               </div>
-            ) : ordersError ? (
-              <div className="flex flex-col items-center py-10 gap-4 text-center">
-                <div className="w-16 h-16 rounded-2xl bg-rose-50 flex items-center justify-center">
-                  <AlertTriangle size={28} className="text-rose-300" />
-                </div>
-                <div>
-                  <p className="text-sm font-semibold text-gray-600">Connexion instable</p>
-                  <p className="text-xs text-gray-400 mt-1">Vérifiez votre connexion internet</p>
-                </div>
-                <button
-                  onClick={() => { setLoadingOrders(true); setOrdersError(false); setRetryKey(k => k + 1); }}
-                  className="flex items-center gap-2 bg-emerald-600 active:bg-emerald-700 text-white px-5 py-2.5 rounded-xl text-sm font-bold transition"
-                >
-                  Réessayer
-                </button>
-              </div>
             ) : orders.length === 0 ? (
               <div className="flex flex-col items-center py-10 gap-4 text-center">
                 <div className="w-16 h-16 rounded-2xl bg-gray-50 flex items-center justify-center">
@@ -391,10 +359,10 @@ export default function AccountPage() {
                 </div>
                 <div>
                   <p className="text-sm font-semibold text-gray-600">Aucune commande</p>
-                  <p className="text-xs text-gray-400 mt-1">Vos achats apparaitront ici</p>
+                  <p className="text-xs text-gray-400 mt-1">Vos achats apparaîtront ici</p>
                 </div>
                 <Link href="/main/products" className="flex items-center gap-2 bg-emerald-600 text-white px-5 py-2.5 rounded-xl text-sm font-bold">
-                  <Sparkles size={14} />Decouvrir les produits
+                  <Sparkles size={14} />Découvrir les produits
                 </Link>
               </div>
             ) : (
@@ -419,6 +387,7 @@ export default function AccountPage() {
                           <p className="text-base font-black text-emerald-700 mt-1">
                             {(order.total || order.amount || 0).toLocaleString()} <span className="text-xs font-semibold">FCFA</span>
                           </p>
+                          {/* ⭐ Affichage de la note du vendeur */}
                           {sellerRating && sellerRating.reviewCount > 0 && (
                             <div className="flex items-center gap-1 mt-1">
                               {renderStars(sellerRating.averageRating)}
@@ -433,12 +402,13 @@ export default function AccountPage() {
                         </span>
                       </div>
 
+                      {/* ── Annulée par le VENDEUR → message d'alerte ── */}
                       {cancelledBySeller && (
                         <div className="mx-4 mb-3 bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 flex items-start gap-2">
                           <AlertTriangle size={15} className="text-rose-500 shrink-0 mt-0.5" />
                           <div>
-                            <p className="text-xs font-bold text-rose-700">Commande refuse par le vendeur</p>
-                            <p className="text-[11px] text-rose-500 mt-0.5">Le vendeur n a pas pu traiter votre commande.</p>
+                            <p className="text-xs font-bold text-rose-700">Commande refusée par le vendeur</p>
+                            <p className="text-[11px] text-rose-500 mt-0.5">Le vendeur n'a pas pu traiter votre commande.</p>
                           </div>
                         </div>
                       )}
@@ -452,7 +422,7 @@ export default function AccountPage() {
                               className="flex-1 bg-emerald-600 active:bg-emerald-700 text-white py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 disabled:opacity-50 transition"
                             >
                               {isUpdating ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle size={12} />}
-                              Confirmer reception
+                              Confirmer réception
                             </button>
                           )}
                           {canCancel && (
@@ -473,7 +443,7 @@ export default function AccountPage() {
                           <div className="bg-emerald-50 rounded-xl px-4 py-2.5 flex items-center gap-2">
                             <CheckCircle size={14} className="text-emerald-500 shrink-0" />
                             <span className="text-xs text-emerald-700 font-semibold">
-                              Livree avec succes
+                              Livrée avec succès
                             </span>
                           </div>
 
@@ -481,7 +451,7 @@ export default function AccountPage() {
                             onClick={() => router.push(`/review/${order.id}`)}
                             className="w-full bg-yellow-400 hover:bg-yellow-500 text-black py-2 rounded-xl text-sm font-bold"
                           >
-                            Noter le vendeur
+                            ⭐ Noter le vendeur
                           </button>
                         </div>
                       )}
@@ -489,7 +459,7 @@ export default function AccountPage() {
                       {order.status === 'annulee' && (
                         <div className="px-4 pb-4">
                           <Link href="/main/products" className="flex items-center justify-center gap-2 border-2 border-emerald-500 text-emerald-600 py-2.5 rounded-xl text-xs font-bold">
-                            Commander a nouveau <ArrowRight size={12} />
+                            Commander à nouveau <ArrowRight size={12} />
                           </Link>
                         </div>
                       )}
@@ -507,6 +477,7 @@ export default function AccountPage() {
           </div>
         </div>
 
+        {/* ACTIONS */}
         <div className="space-y-3">
           {!isSeller ? (
             <Link href="/seller/register" className="flex items-center justify-between bg-gradient-to-r from-emerald-600 to-teal-500 text-white px-5 py-4 rounded-2xl shadow-md shadow-emerald-200 font-bold text-sm active:opacity-90 transition">
@@ -529,7 +500,7 @@ export default function AccountPage() {
           <button onClick={handleLogout} className="w-full flex items-center justify-between bg-white border border-rose-100 text-rose-500 px-5 py-4 rounded-2xl text-sm font-semibold active:bg-rose-50 transition">
             <div className="flex items-center gap-3">
               <div className="w-8 h-8 rounded-xl bg-rose-50 flex items-center justify-center"><LogOut size={16} /></div>
-              Deconnexion
+              Déconnexion
             </div>
             <ChevronRight size={18} className="opacity-40" />
           </button>

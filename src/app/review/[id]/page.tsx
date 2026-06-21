@@ -83,8 +83,11 @@ export default function ReviewPage() {
       return;
     }
 
-    if (comment.trim().length < 5) {
-      alert('Veuillez écrire un commentaire (minimum 5 caractères)');
+    // ✅ Le champ est annoncé comme "optionnel" dans le formulaire — la
+    //    validation doit donc le rester. On bloque seulement les
+    //    commentaires renseignés mais trop courts pour être utiles.
+    if (comment.trim().length > 0 && comment.trim().length < 5) {
+      alert('Votre commentaire est un peu court (minimum 5 caractères), ou laissez-le vide');
       return;
     }
 
@@ -116,6 +119,7 @@ export default function ReviewPage() {
             link: '/seller/dashboard',
           }),
         });
+        console.log('✅ Notification vendeur avis envoyée');
       } catch (notifError) {
         console.error('Erreur envoi notification avis:', notifError);
       }

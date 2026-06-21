@@ -1,8 +1,7 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import Link from 'next/link';
-import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
@@ -10,306 +9,380 @@ import { useCart } from '@/hooks/useCart';
 import { useAuth } from '@/hooks/useAuth';
 
 const CATEGORIES = [
-  { label: 'Tous', icon: '✦', color: '#C9A84C' },
-  { label: 'Fruits', icon: '', color: '#E8703A' },
-  { label: 'Légumes', icon: '', color: '#3D9A5C' },
-  { label: 'Céréales', icon: '', color: '#C9A84C' },
-  { label: 'Tubercules', icon: '', color: '#8B6914' },
-  { label: 'Machines agricoles', icon: '', color: '#607080' },
-  { label: 'Condiments', icon: '', color: '#C0392B' },
-  { label: 'Poissons', icon: '', color: '#2980B9' },
+  { label: 'Tous',              icon: '✦',  color: '#C9A84C' },
+  { label: 'Fruits',            icon: '', color: '#E8703A' },
+  { label: 'Légumes',           icon: '', color: '#3D9A5C' },
+  { label: 'Céréales',          icon: '', color: '#C9A84C' },
+  { label: 'Tubercules',        icon: '', color: '#8B6914' },
+  { label: 'Machines agricoles',icon: '', color: '#607080' },
+  { label: 'Condiments',        icon: '', color: '#C0392B' },
+  { label: 'Poissons',          icon: '', color: '#2980B9' },
   { label: 'Produits laitiers', icon: '', color: '#B0A090' },
-  { label: 'Légumineuses', icon: '', color: '#7D6A3E' },
-  { label: 'Engrais', icon: '', color: '#2ECC71' },
-  { label: 'Boissons locales', icon: '', color: '#E74C3C' },
+  { label: 'Légumineuses',      icon: '', color: '#7D6A3E' },
+  { label: 'Engrais',           icon: '', color: '#2ECC71' },
+  { label: 'Boissons locales',  icon: '', color: '#E74C3C' },
 ];
 
-const WA_NUMBER = '221779747073';
+const REGIONS_SENEGAL = [
+  'Tout le Sénégal',
+  'Dakar', 'Thiès', 'Diourbel', 'Fatick', 'Kaolack',
+  'Kaffrine', 'Ziguinchor', 'Sédhiou', 'Kolda',
+  'Tambacounda', 'Kédougou', 'Louga', 'Matam', 'Saint-Louis',
+];
 
-// Sanitize and validate an image URL before handing it to next/image.
-// Some product photo URLs stored in Firestore have been seen with stray
-// quotes/commas/whitespace from copy-paste, which makes `next/image`
-// throw "Failed to parse src" / "Invalid URL" at runtime. This strips
-// that junk and falls back to null (placeholder) if the result still
-// isn't a usable absolute URL or root-relative path.
-function safeImageSrc(url?: string | null): string | null {
-  if (!url) return null;
-  let s = url.trim();
-  s = s.replace(/^["']+|["']+$/g, '').trim();
-  s = s.replace(/[,;]+$/g, '').trim();
-  if (!s) return null;
-  if (s.startsWith('/')) return s;
-  try {
-    // eslint-disable-next-line no-new
-    new URL(s);
-    return s;
-  } catch {
-    return null;
-  }
-}
+// Données géographiques complètes Sénégal : Région → Département → Communes
+const GEO_SENEGAL: Record<string, Record<string, string[]>> = {
+  'Dakar': {
+    'Dakar': ['Dakar Plateau', 'Médina', 'Gueule Tapée-Fass-Colobane', 'Grand Dakar', 'Biscuiterie', 'HLM', 'Sicap Liberté', 'Parcelles Assainies', 'Patte d\'Oie', 'Ouakam', 'Yoff', 'Ngor', 'Almadies', 'Mermoz-Sacré-Cœur', 'Fann-Point E-Amitié', 'Cambérène'],
+    'Guédiawaye': ['Golf Sud', 'Médina Gounass', 'Ndiarème Limamoulaye', 'Sam Notaire', 'Wakhinane Nimzatt'],
+    'Pikine': ['Pikine Est', 'Pikine Nord', 'Pikine Ouest', 'Dalifort', 'Djidah Thiaroye Kao', 'Guinaw Rails Nord', 'Guinaw Rails Sud', 'Thiaroye-sur-Mer', 'Thiaroye Kao', 'Yeumbeul Nord', 'Yeumbeul Sud', 'Mbao', 'Tivaouane Diacksao', 'Diamaguène Sicap Mbao'],
+    'Rufisque': ['Rufisque Est', 'Rufisque Nord', 'Rufisque Ouest', 'Bargny', 'Diamniadio', 'Sébikotane', 'Sangalkam', 'Yène'],
+  },
+  'Thiès': {
+    'Thiès': ['Thiès Nord', 'Thiès Est', 'Thiès Ouest', 'Fandène', 'Keur Mousseu', 'Ndieyène Sirakh', 'Notto Gouye Diama', 'Pout', 'Thiadiaye'],
+    'Mbour': ['Mbour', 'Joal-Fadiouth', 'Malicounda', 'Nguékhokh', 'Poponguine-Ndayane', 'Sindia', 'Somone', 'Warang'],
+    'Tivaouane': ['Tivaouane', 'Méouane', 'Mont Rolland', 'Mérina Dakhar', 'Pambal', 'Pékesse', 'Pire Goureye', 'Taïba Ndiaye', 'Thilmakha'],
+  },
+  'Diourbel': {
+    'Diourbel': ['Diourbel', 'Ndindy', 'Tocky Gare'],
+    'Bambey': ['Bambey', 'Baba Garage', 'Gawane', 'Lambaye', 'Ngoye', 'Ndangalma', 'Patar', 'Réfane', 'Thiakhar', 'Touba Toul'],
+    'Mbacké': ['Mbacké', 'Touba', 'Ndoulo', 'Sadio'],
+  },
+  'Fatick': {
+    'Fatick': ['Fatick', 'Diakhao', 'Diarrère', 'Fimela', 'Gossas', 'Ndiop', 'Niodior', 'Palmarin Facao', 'Tattaguine', 'Toubacouta'],
+    'Foundiougne': ['Foundiougne', 'Djilor', 'Karang Poste', 'Keur Samba Guèye', 'Loul Sessène', 'Sokone', 'Toubacouta'],
+    'Gossas': ['Gossas', 'Colobane', 'Mbaouane', 'Ndièye Coumba Wade'],
+  },
+  'Kaolack': {
+    'Kaolack': ['Kaolack', 'Gandiaye', 'Kahone', 'Kalom', 'Ngathie Naoudé', 'Ndiébel', 'Ndoffane', 'Ngoloféf', 'Niani'],
+    'Guinguinéo': ['Guinguinéo', 'Dianké Souf', 'Keur Baka', 'Mbadakhoune', 'Mboss', 'Ndiaffate', 'Ngélou', 'Passy', 'Sibassor'],
+    'Nioro du Rip': ['Nioro du Rip', 'Darou Salam', 'Keur Madiabel', 'Médina Sabakh', 'Paoskoto', 'Porokhane', 'Taïba Niassène', 'Wack Ngouna'],
+  },
+  'Kaffrine': {
+    'Kaffrine': ['Kaffrine', 'Diaoubé-Kilé', 'Gniby', 'Kathiote', 'Koungheul', 'Mabo', 'Malème Hodar', 'Nganda'],
+    'Birkilane': ['Birkilane', 'Lour Escale', 'Ndiognick', 'Niaméne', 'Diamal'],
+    'Koungheul': ['Koungheul', 'Darou Minam', 'Fass', 'Ida Mouride', 'Lour Escale', 'Missirah Wadène', 'Mbili', 'Nguer Malal', 'Touba Mbella'],
+    'Malem Hodar': ['Malem Hodar', 'Kahi', 'Ndiognick', 'Sido'],
+  },
+  'Ziguinchor': {
+    'Ziguinchor': ['Ziguinchor', 'Adéane', 'Boutoupa-Camaracounda', 'Enampore', 'Niaguis', 'Nyassia', 'Oulampane', 'Niaguis'],
+    'Bignona': ['Bignona', 'Balingore', 'Diouloulou', 'Djibidione', 'Kafountine', 'Kartiack', 'Kataba 1', 'Mangagoulack', 'Mlomp', 'Niamone', 'Oulampane', 'Tendimane', 'Thionck Essyl'],
+    'Oussouye': ['Oussouye', 'Cabrousse', 'Diembéring', 'Loudia-Ouolof', 'Mlomp', 'Oukout', 'Santhiaba Manjaque'],
+  },
+  'Sédhiou': {
+    'Sédhiou': ['Sédhiou', 'Bambali', 'Boghal', 'Djiredji', 'Djibanar', 'Kabrousse', 'Kolibantang', 'Marsassoum', 'Oudoucar', 'Sama Kanta Peulh', 'Tanaff'],
+    'Bounkiling': ['Bounkiling', 'Bona', 'Diana Malari', 'Karantaba', 'Konkia', 'Mangaroungou Santo', 'Niamone', 'Simbandi Balante', 'Simbandi Brassou', 'Tankanto Escale', 'Tenghory'],
+    'Goudomp': ['Goudomp', 'Diattacounda', 'Diégoune', 'Kaïlou', 'Kéréwane', 'Koubalan', 'Samine', 'Saré Bidji', 'Simbandi Balante'],
+  },
+  'Kolda': {
+    'Kolda': ['Kolda', 'Bagadadji', 'Coumbacara', 'Dioulacolon', 'Dabo', 'Guimara', 'Médina Cherif', 'Médina El Hadj', 'Saré Yoba Diéga', 'Ouassadou', 'Pata'],
+    'Vélingara': ['Vélingara', 'Bonconto', 'Diaobé-Kabendou', 'Fafacourou', 'Kandia', 'Médina Gounass', 'Ndorna', 'Pakour', 'Saré Coly Sallé', 'Sinthiang Koundara'],
+    'Médina Yoro Foulah': ['Médina Yoro Foulah', 'Badion', 'Bignarabé', 'Fanda', 'Ndorna', 'Niaming', 'Saré Moussa', 'Thiétty', 'Touba VK'],
+  },
+  'Tambacounda': {
+    'Tambacounda': ['Tambacounda', 'Koumpentoum', 'Malem Niani', 'Missirah', 'Niani Toucouleur', 'Sinthiou Malème'],
+    'Bakel': ['Bakel', 'Bélé', 'Boynguel Bamba', 'Diawara', 'Gathiary', 'Kéniéba', 'Kidira', 'Moudéry', 'Sinthiou Fissa', 'Tomboronkoto'],
+    'Goudiry': ['Goudiry', 'Bala', 'Gabou', 'Kénioto', 'Koulor', 'Ndoga Babacar', 'Sinthiou Fissa'],
+    'Koumpentoum': ['Koumpentoum', 'Kahène', 'Kouthiaba Wolof', 'Malem Niani', 'Payar', 'Sokorone'],
+  },
+  'Kédougou': {
+    'Kédougou': ['Kédougou', 'Bandafassi', 'Fongolimbi', 'Ninéfecha', 'Salemata', 'Salémata'],
+    'Salemata': ['Salemata', 'Dakatéli', 'Ethiolo', 'Kéwoye', 'Oubadji'],
+    'Saraya': ['Saraya', 'Bembou', 'Dialakoto', 'Kéméto', 'Khossanto', 'Médina Baffé', 'Nétéboulou'],
+  },
+  'Louga': {
+    'Louga': ['Louga', 'Coki', 'Guéoul', 'Kébémer', 'Keur Momar Sarr', 'Léona', 'Mbédiène', 'Nguer Malal', 'Niomré', 'Sakal', 'Thiamène'],
+    'Kébémer': ['Kébémer', 'Darou Marnane', 'Guéoul', 'Kanène Dji', 'Ndande', 'Thiès Thiouthioune'],
+    'Linguère': ['Linguère', 'Barkedji', 'Dahra', 'Dodji', 'Kamb', 'Ouarkhokh', 'Ranérou', 'Yang Yang'],
+  },
+  'Matam': {
+    'Matam': ['Matam', 'Agnam Civol', 'Bokidiawé', 'Dabia', 'Ganguel Souleymane', 'Nabadji Civol', 'Nguidjilone', 'Oréfondé', 'Ogo', 'Ourossogui', 'Thilogne'],
+    'Kanel': ['Kanel', 'Aouré', 'Hamady Hounaré', 'Linguékoto', 'Orkadiéré', 'Semmé', 'Thilogne', 'Ogo'],
+    'Ranérou Ferlo': ['Ranérou', 'Lougré Thioly', 'Vélingara Ferlo'],
+  },
+  'Saint-Louis': {
+    'Saint-Louis': ['Saint-Louis', 'Fass Ngom', 'Gandon', 'Léona', 'Mpal', 'Ndiébène Gandiol', 'Rao', 'Ronkh', 'Sakal', 'Taredji'],
+    'Dagana': ['Dagana', 'Bokhol', 'Diama', 'Mboumba', 'Mbane', 'Ngnith', 'Richard Toll', 'Rosso-Sénégal', 'Syer', 'Thiago'],
+    'Podor': ['Podor', 'Aéré Lao', 'Boké Dialloubé', 'Cas-Cas', 'Demette', 'Dimat', 'Fanaye', 'Guédé Village', 'Guédé Chantier', 'Médina Ndiathbé', 'Mbolo Birane', 'Ndiayène Pendao', 'Nétté', 'Pete', 'Thillé Boubacar', 'Walaldé', 'Wouro Madiu'],
+  },
+};
+
+// Mapping pour normaliser les noms de régions retournés par Nominatim
+const REGION_ALIASES: Record<string, string> = {
+  'Région de Dakar': 'Dakar', 'Dakar Region': 'Dakar',
+  'Région de Thiès': 'Thiès', 'Thies': 'Thiès',
+  'Région de Diourbel': 'Diourbel',
+  'Région de Fatick': 'Fatick',
+  'Région de Kaolack': 'Kaolack',
+  'Région de Kaffrine': 'Kaffrine',
+  'Région de Ziguinchor': 'Ziguinchor',
+  'Région de Sédhiou': 'Sédhiou', 'Sedhiou': 'Sédhiou',
+  'Région de Kolda': 'Kolda',
+  'Région de Tambacounda': 'Tambacounda',
+  'Région de Kédougou': 'Kédougou', 'Kedougou': 'Kédougou',
+  'Région de Louga': 'Louga',
+  'Région de Matam': 'Matam',
+  'Région de Saint-Louis': 'Saint-Louis', 'Saint Louis': 'Saint-Louis',
+};
+
+const WA_NUMBER = '221779747073';
 
 function WaIcon({ s = 16 }: { s?: number }) {
   return (
     <svg width={s} height={s} viewBox="0 0 24 24" fill="currentColor">
-      <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.149-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.095 3.2 5.076 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z" />
-      <path d="M12 0C5.373 0 0 5.373 0 12c0 2.125.558 4.121 1.531 5.856L.073 23.27a.75.75 0 00.918.882l5.57-1.461A11.944 11.944 0 0012 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 21.75a9.73 9.73 0 01-4.964-1.363l-.355-.212-3.676.965.978-3.576-.232-.368A9.713 9.713 0 012.25 12C2.25 6.615 6.615 2.25 12 2.25S21.75 6.615 21.75 12 17.385 21.75 12 21.75z" />
+      <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.149-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.095 3.2 5.076 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/>
+      <path d="M12 0C5.373 0 0 5.373 0 12c0 2.125.558 4.121 1.531 5.856L.073 23.27a.75.75 0 00.918.882l5.57-1.461A11.944 11.944 0 0012 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 21.75a9.73 9.73 0 01-4.964-1.363l-.355-.212-3.676.965.978-3.576-.232-.368A9.713 9.713 0 012.25 12C2.25 6.615 6.615 2.25 12 2.25S21.75 6.615 21.75 12 17.385 21.75 12 21.75z"/>
     </svg>
   );
 }
 
-type Product = {
+// ✅ Type Product simplifié et compatible
+interface ProductData {
   id: string;
-  name?: string;
-  price?: number;
-  unit?: string;
-  category?: string;
-  images?: string[];
+  name: string;
+  description?: string;
+  price: number;
+  unit: string;
+  category: string;
   farmer?: string;
   farmerPhone?: string;
   farmerVerified?: boolean;
-  region?: string;
-  exactLocation?: string;
-  description?: string;
+  images?: string[];
   stock?: number;
+  exactLocation?: string;
+  region?: string;
+  lat?: number;
+  lng?: number;
   sellerId?: string;
-};
+}
 
-type LocStatus = 'searching' | 'found' | 'error' | 'unavailable';
-
-type LocationInfo = {
-  address: string;
-  lat: number;
-  lng: number;
-  precision: number;
-  detailedAddress: string;
-};
+interface SellerRating { sellerId: string; averageRating: number; reviewCount: number; }
 
 export default function AgriMarket() {
   const router = useRouter();
   const { cart, addToCart } = useCart();
   const { user, logout } = useAuth();
 
-  const [mounted, setMounted] = useState(false);
-  const [products, setProducts] = useState<Product[]>([]);
-  const [filtered, setFiltered] = useState<Product[]>([]);
-  const [search, setSearch] = useState('');
-  const [listening, setListening] = useState(false);
-  const [cat, setCat] = useState('Tous');
-  const [sort, setSort] = useState('default');
-  const [wishlist, setWishlist] = useState(new Set<string>());
-  const [showUserMenu, setShowUserMenu] = useState(false);
-  const [showSort, setShowSort] = useState(false);
-  const [location, setLocation] = useState<LocationInfo | null>(null);
-  const [locStatus, setLocStatus] = useState<LocStatus>('searching');
-  const [addedIds, setAddedIds] = useState(new Set<string>());
-  const [selected, setSelected] = useState<Product | null>(null);
-  const [imgIdx, setImgIdx] = useState(0);
-  const [scrolled, setScrolled] = useState(false);
-  const [recs, setRecs] = useState<Product[]>([]);
-  const [ratings, setRatings] = useState(new Map<string, { sellerId: string; averageRating: number; reviewCount: number }>());
-  const [heroVisible, setHeroVisible] = useState(false);
-  const [categoryProducts, setCategoryProducts] = useState<Product[]>([]);
+  const [mounted,            setMounted]            = useState(false);
+  const [products,           setProducts]           = useState<ProductData[]>([]);
+  const [filtered,           setFiltered]           = useState<ProductData[]>([]);
+  const [search,             setSearch]             = useState('');
+  const [listening,          setListening]          = useState(false);
+  const [cat,                setCat]                = useState('Tous');
+  const [sort,               setSort]               = useState<'default'|'asc'|'desc'>('default');
+  const [wishlist,           setWishlist]           = useState<Set<string>>(new Set());
+  const [showUserMenu,       setShowUserMenu]       = useState(false);
+  const [showSort,           setShowSort]           = useState(false);
+  const [location,           setLocation]           = useState<{address:string;lat:number;lng:number;precision:number;detailedAddress?:string;region?:string}|null>(null);
+  const [locStatus,          setLocStatus]          = useState<'searching'|'found'|'error'>('searching');
+  const [selectedRegion,     setSelectedRegion]     = useState<string>('Tout le Sénégal');
+  const [showRegionMenu,     setShowRegionMenu]     = useState(false);
+  const [showLocModal,       setShowLocModal]       = useState(false);
+  const [manualRegion,       setManualRegion]       = useState('');
+  const [manualDept,         setManualDept]         = useState('');
+  const [manualCommune,      setManualCommune]      = useState('');
+  const [addedIds,           setAddedIds]           = useState<Set<string>>(new Set());
+  const [selected,           setSelected]           = useState<ProductData|null>(null);
+  const [imgIdx,             setImgIdx]             = useState(0);
+  const [scrolled,           setScrolled]           = useState(false);
+  const [recs,               setRecs]               = useState<ProductData[]>([]);
+  const [ratings,            setRatings]            = useState<Map<string,SellerRating>>(new Map());
+  const [heroVisible,        setHeroVisible]        = useState(false);
+  const [categoryProducts,   setCategoryProducts]   = useState<ProductData[]>([]);
 
   const drawerRef = useRef<HTMLDivElement>(null);
-  const voiceRef = useRef<any>(null);
+  const voiceRef  = useRef<any>(null);
 
   const cartCount = cart?.itemCount || 0;
 
-  // ── Mount + hero animation
-  useEffect(() => {
-    setMounted(true);
-    setTimeout(() => setHeroVisible(true), 100);
-  }, []);
-
-  // ── Scroll listener
+  useEffect(() => { setMounted(true); setTimeout(() => setHeroVisible(true), 100); }, []);
   useEffect(() => {
     const fn = () => setScrolled(window.scrollY > 8);
     window.addEventListener('scroll', fn, { passive: true });
     return () => window.removeEventListener('scroll', fn);
   }, []);
 
-  // ── Voice recognition (web only, silently skip on APK)
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    try {
-      const SR = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
-      if (!SR) return;
-      voiceRef.current = new SR();
-      voiceRef.current.lang = 'fr-FR';
-      voiceRef.current.continuous = false;
-      voiceRef.current.interimResults = false;
-      voiceRef.current.onresult = (e: any) => { setSearch(e.results[0][0].transcript); setListening(false); };
-      voiceRef.current.onerror = () => setListening(false);
-      voiceRef.current.onend = () => setListening(false);
-    } catch {
-      // Silently ignore — pas disponible en WebView/APK
-    }
+    const SR = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
+    if (!SR) return;
+    voiceRef.current = new SR();
+    voiceRef.current.lang = 'fr-FR';
+    voiceRef.current.continuous = false;
+    voiceRef.current.interimResults = false;
+    voiceRef.current.onresult  = (e: any) => { setSearch(e.results[0][0].transcript); setListening(false); };
+    voiceRef.current.onerror   = () => setListening(false);
+    voiceRef.current.onend     = () => setListening(false);
   }, []);
 
-  const startVoice = () => {
-    if (voiceRef.current && !listening) {
-      try { voiceRef.current.start(); setListening(true); } catch { setListening(false); }
-    }
-  };
+  const startVoice = () => { if (voiceRef.current && !listening) { voiceRef.current.start(); setListening(true); } };
 
-  // ── Firestore products
   useEffect(() => {
     const u = onSnapshot(collection(db, 'products'), snap => {
-      const d = snap.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Product[];
-      setProducts(d);
-      setFiltered(d);
+      const d = snap.docs.map(doc => ({ id: doc.id, ...doc.data() })) as ProductData[];
+      setProducts(d); setFiltered(d);
     });
     return () => u();
   }, []);
 
-  // ── Ratings
   useEffect(() => {
     if (!products.length) return;
-    [...new Set(products.map(p => p.sellerId).filter(Boolean))].forEach(sid => {
+
+    // ✅ on garde les fonctions de désabonnement et on les appelle au
+    //    nettoyage de l'effet — avant, aucun `unsub` n'était même conservé,
+    //    donc les listeners Firestore s'accumulaient à chaque changement
+    //    de la liste de produits, sans jamais se fermer.
+    const unsubs = [...new Set(products.map(p => p.sellerId).filter((sid): sid is string => !!sid))].map(sid =>
       onSnapshot(query(collection(db, 'reviews'), where('sellerId', '==', sid)), snap => {
         const revs = snap.docs.map(d => d.data());
         const cnt = revs.length;
-        const avg = cnt ? revs.reduce((s, r) => s + (r.rating || 0), 0) / cnt : 0;
-        setRatings(prev => {
-          const m = new Map(prev);
-          m.set(sid!, { sellerId: sid!, averageRating: +avg.toFixed(1), reviewCount: cnt });
-          return m;
-        });
-      });
-    });
+        const avg = cnt ? revs.reduce((s: number, r: any) => s + (r.rating || 0), 0) / cnt : 0;
+        setRatings(prev => { const m = new Map(prev); m.set(sid, { sellerId: sid, averageRating: +avg.toFixed(1), reviewCount: cnt }); return m; });
+      })
+    );
+
+    return () => unsubs.forEach(unsub => unsub());
   }, [products]);
 
-  // ── Recs + category products
   useEffect(() => {
-    if (selected && products.length) setRecs(products.filter(p => p.category === selected.category && p.id !== selected.id).slice(0, 6));
+    if (selected && products.length)
+      setRecs(products.filter(p => p.category === selected.category && p.id !== selected.id).slice(0, 6));
   }, [selected, products]);
 
   useEffect(() => {
-    if (selected && products.length) setCategoryProducts(products.filter(p => p.category === selected.category && p.id !== selected.id).slice(0, 4));
-  }, [selected, products]);
-
-  // ── Géolocalisation — APK-safe avec fallbacks multiples
-  const locate = useCallback((highAccuracy: boolean, triedFallback: boolean) => {
-    // Fallback immédiat si API absente (WebView Android sans permission)
-    if (typeof window === 'undefined' || !('geolocation' in navigator)) {
-      setLocStatus('unavailable');
-      setLocation({ address: 'Sénégal', lat: 14.7167, lng: -17.4677, precision: 0, detailedAddress: 'Sénégal' });
-      return;
+    if (selected && products.length) {
+      setCategoryProducts(products.filter(p => p.category === selected.category && p.id !== selected.id).slice(0, 4));
     }
-
-    navigator.geolocation.getCurrentPosition(
-      async ({ coords: { latitude: lat, longitude: lng, accuracy } }) => {
-        try {
-          const r = await fetch(
-            `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=19&addressdetails=1&extratags=1&namedetails=1`,
-            { headers: { 'Accept-Language': 'fr-FR', 'User-Agent': 'AgriMarche/2.0' } }
-          );
-          const d = await r.json();
-          const a = d.address || {};
-          const amenity = d.extratags?.name || d.namedetails?.name || '';
-          const university = a.university || '';
-          const school = a.school || '';
-          const college = a.college || '';
-          const institution = a.institution || '';
-          const road = a.road || '';
-          const pedestrian = a.pedestrian || '';
-          const footway = a.footway || '';
-          const path = a.path || '';
-          const street = road || pedestrian || footway || path;
-          const suburb = a.suburb || a.neighbourhood || a.quarter || a.residential || a.city_district || a.borough || '';
-          const hamlet = a.hamlet || '';
-          const village = a.village || '';
-          const town = a.town || '';
-          const city = a.city || '';
-          const state = a.state || '';
-
-          let locationName = '';
-          if (university) locationName = university;
-          else if (school) locationName = school;
-          else if (college) locationName = college;
-          else if (institution) locationName = institution;
-          else if (amenity) locationName = amenity;
-
-          let detailedAddr = '';
-          if (locationName) {
-            detailedAddr = street ? `${locationName}, ${street}` : suburb ? `${locationName}, ${suburb}` : locationName;
-          } else if (street && suburb) {
-            detailedAddr = `${street}, ${suburb}`;
-          } else if (street) {
-            detailedAddr = street;
-          } else if (suburb) {
-            detailedAddr = suburb;
-          } else if (hamlet) {
-            detailedAddr = hamlet;
-          } else if (village || town || city) {
-            detailedAddr = village || town || city;
-          } else {
-            detailedAddr = 'Sénégal';
-          }
-
-          const addr = [city, state].filter(Boolean).join(', ') || 'Sénégal';
-          setLocation({ address: addr, lat, lng, precision: accuracy, detailedAddress: detailedAddr });
-          setLocStatus('found');
-        } catch {
-          setLocStatus('error');
-          setLocation({ address: 'Non disponible', lat: 14.7167, lng: -17.4677, precision: 0, detailedAddress: 'Non disponible' });
-        }
-      },
-      (err) => {
-        // PERMISSION_DENIED (1) ou POSITION_UNAVAILABLE (2) ou TIMEOUT (3)
-        if (err.code === 1) {
-          // Permission refusée — fréquent sur APK sans manifest correct
-          setLocStatus('unavailable');
-          setLocation({ address: 'Sénégal', lat: 14.7167, lng: -17.4677, precision: 0, detailedAddress: 'Sénégal' });
-        } else if (!triedFallback) {
-          // GPS haute précision indisponible/trop lent (fréquent sur PC/laptop sans puce GPS,
-          // qui ne dispose que de la géoloc réseau/Wi-Fi) → on retente en accuracy réseau.
-          locate(false, true);
-        } else {
-          setLocStatus('error');
-          setLocation({ address: 'Non disponible', lat: 14.7167, lng: -17.4677, precision: 0, detailedAddress: 'Non disponible' });
-        }
-      },
-      { enableHighAccuracy: highAccuracy, timeout: highAccuracy ? 8000 : 12000, maximumAge: 60000 }
-    );
-  }, []);
+  }, [selected, products]);
 
   const getLocation = useCallback(() => {
-    setLocStatus('searching');
-    setLocation(null);
-    locate(true, false);
-  }, [locate]);
+    setLocStatus('searching'); setLocation(null);
+    if (!navigator.geolocation) { setLocStatus('error'); return; }
+    navigator.geolocation.getCurrentPosition(async ({ coords: { latitude: lat, longitude: lng, accuracy } }) => {
+      let addr = '';
+      let detailedAddr = '';
+      try {
+        const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1&extratags=1&namedetails=1`, { 
+          headers: { 'Accept-Language': 'fr-FR', 'User-Agent': 'AgriMarche/2.0' } 
+        });
+        const d = await r.json();
+        const a = d.address || {};
+        
+        // Extraction hiérarchique précise pour le Sénégal
+        const amenity    = d.extratags?.name || d.namedetails?.name || '';
+        const quarter    = a.quarter || '';
+        const suburb     = a.suburb || a.neighbourhood || a.city_district || '';
+        const hamlet     = a.hamlet || '';
+        const village    = a.village || '';
+        const commune    = a.municipality || a.county || '';
+        const town       = a.town || '';
+        const city       = a.city || '';
+        const dept       = a.state_district || '';  // département au Sénégal
+        const stateRaw   = a.state || '';
+        const region     = REGION_ALIASES[stateRaw] || stateRaw;
+
+        // Niveau 1 : lieu nommé (école, marché, mosquée...)
+        const poiName = amenity || a.university || a.school || a.amenity || '';
+
+        // Niveau 2 : adresse de rue
+        const street = a.road || a.pedestrian || a.footway || a.path || '';
+
+        // Construire l'adresse détaillée du plus précis au moins précis
+        const microZone = quarter || suburb || hamlet || '';
+        const locality  = village || town || city || commune || '';
+
+        if (poiName && microZone) {
+          detailedAddr = `${poiName}, ${microZone}`;
+        } else if (poiName && locality) {
+          detailedAddr = `${poiName}, ${locality}`;
+        } else if (poiName) {
+          detailedAddr = poiName;
+        } else if (street && microZone) {
+          detailedAddr = `${street}, ${microZone}`;
+        } else if (microZone && locality) {
+          detailedAddr = `${microZone}, ${locality}`;
+        } else if (microZone) {
+          detailedAddr = microZone;
+        } else if (locality && dept) {
+          detailedAddr = `${locality}, ${dept}`;
+        } else if (locality) {
+          detailedAddr = locality;
+        } else if (dept) {
+          detailedAddr = dept;
+        } else if (region) {
+          detailedAddr = `Région de ${region}`;
+        } else {
+          detailedAddr = 'Sénégal';
+        }
+
+        // Adresse courte = ville + région
+        addr = [locality || dept, region].filter(Boolean).join(', ') || 'Sénégal';
+
+        setLocation({ address: addr, lat, lng, precision: accuracy, detailedAddress: detailedAddr, region });
+        // Auto-sélectionner la région détectée dans le filtre
+        if (region && REGIONS_SENEGAL.includes(region)) {
+          setSelectedRegion(region);
+        }
+        setLocStatus('found');
+      } catch (err) {
+        console.error('Geocoding error:', err);
+        setLocStatus('error'); 
+        setLocation({ address: 'Non disponible', lat: 14.7167, lng: -17.4677, precision: 0, detailedAddress: 'Non disponible' });
+      }
+    }, 
+    () => { 
+      setLocStatus('error');
+      setLocation(null);
+      setShowLocModal(true); // Ouvre le modal de saisie manuelle
+    },
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+  }, []);
 
   useEffect(() => { getLocation(); }, [getLocation]);
 
-  // ── Filtre + tri
   useEffect(() => {
     let r = [...products];
     if (search) r = r.filter(p => p.name?.toLowerCase().includes(search.toLowerCase()));
     if (cat !== 'Tous') r = r.filter(p => p.category === cat);
-    if (sort === 'asc') r.sort((a, b) => (a.price || 0) - (b.price || 0));
-    if (sort === 'desc') r.sort((a, b) => (b.price || 0) - (a.price || 0));
+    if (selectedRegion !== 'Tout le Sénégal') {
+      r = r.filter(p => {
+        const pr = p.region || p.exactLocation || '';
+        return pr.toLowerCase().includes(selectedRegion.toLowerCase());
+      });
+    }
+    if (sort === 'asc')  r.sort((a,b) => (a.price||0)-(b.price||0));
+    if (sort === 'desc') r.sort((a,b) => (b.price||0)-(a.price||0));
     setFiltered(r);
-  }, [products, search, cat, sort]);
+  }, [products, search, cat, sort, selectedRegion]);
 
-  const open = (p: Product) => { setSelected(p); setImgIdx(0); document.body.style.overflow = 'hidden'; };
+  const open  = (p: ProductData) => { setSelected(p); setImgIdx(0); document.body.style.overflow = 'hidden'; };
   const close = () => { setSelected(null); document.body.style.overflow = ''; };
-
-  const addCart = (p: Product, e?: React.MouseEvent) => {
+  
+  // ✅ Correction : conversion explicite pour addToCart
+  const addCart = (p: ProductData, e?: React.MouseEvent) => {
     e?.stopPropagation();
-    addToCart({ id: p.id, name: p.name, price: p.price, unit: p.unit, category: p.category, images: p.images || [], stock: p.stock || 999 } as any, 1);
+    const productForCart = {
+      id: p.id,
+      name: p.name,
+      price: p.price,
+      unit: p.unit,
+      category: p.category,
+      images: p.images || [],
+      stock: p.stock || 999,
+    };
+    addToCart(productForCart as any, 1);
     setAddedIds(prev => new Set(prev).add(p.id));
     setTimeout(() => setAddedIds(prev => { const s = new Set(prev); s.delete(p.id); return s; }), 2200);
   };
-
+  
   const toggleWish = (id: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
     setWishlist(prev => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s; });
   };
-
-  const wa = (name?: string, phone?: string, e?: React.MouseEvent) => {
+  
+  const wa = (name: string, phone?: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
-    window.open(`https://wa.me/${phone?.replace(/\D/g, '') || WA_NUMBER}?text=${encodeURIComponent(`Bonjour, je suis intéressé par "${name}".`)}`, '_blank');
+    window.open(`https://wa.me/${phone?.replace(/\D/g,'') || WA_NUMBER}?text=${encodeURIComponent(`Bonjour, je suis intéressé par "${name}".`)}`, '_blank');
   };
 
   if (!mounted) return null;
@@ -395,7 +468,9 @@ export default function AgriMarket() {
           backdrop-filter:blur(32px) saturate(1.8);
           -webkit-backdrop-filter:blur(32px) saturate(1.8);
           border-bottom-color:var(--border2);
-          box-shadow: 0 1px 0 rgba(255,255,255,0.9), var(--shadow-md);
+          box-shadow:
+            0 1px 0 rgba(255,255,255,0.9),
+            var(--shadow-md);
         }
 
         .g-header-inner {
@@ -404,7 +479,9 @@ export default function AgriMarket() {
           position:relative; z-index:1;
         }
 
-        .g-logo-row { display:flex; align-items:center; justify-content:space-between; }
+        .g-logo-row {
+          display:flex; align-items:center; justify-content:space-between;
+        }
         .g-logo-link { display:flex; align-items:center; gap:14px; text-decoration:none; }
 
         .g-wordmark { display:flex; flex-direction:column; gap:0; }
@@ -448,28 +525,46 @@ export default function AgriMarket() {
           transform:translateY(-1px);
           box-shadow:var(--shadow-md);
         }
+        
         .cart-badge {
-          position:absolute; top:-6px; right:-6px;
+          position:absolute;
+          top:-6px;
+          right:-6px;
           background:linear-gradient(135deg, var(--emerald), var(--jade));
-          color:white; font-size:9px; font-weight:700;
-          min-width:18px; height:18px; border-radius:50%;
-          display:flex; align-items:center; justify-content:center;
-          padding:0 4px; box-shadow:0 2px 6px rgba(0,0,0,0.2);
+          color:white;
+          font-size:9px;
+          font-weight:700;
+          min-width:18px;
+          height:18px;
+          border-radius:50%;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          padding:0 4px;
+          box-shadow:0 2px 6px rgba(0,0,0,0.2);
         }
 
         .g-search-row { padding:14px 0 16px; }
         .g-search-box {
-          position:relative; background:var(--snow);
-          border:1.5px solid var(--border); border-radius:100px;
+          position:relative;
+          background:var(--snow);
+          border:1.5px solid var(--border);
+          border-radius:100px;
           display:flex; align-items:center;
           transition:all 0.35s cubic-bezier(.16,1,.3,1);
-          overflow:hidden; box-shadow:var(--shadow-sm);
+          overflow:hidden;
+          box-shadow:var(--shadow-sm);
         }
         .g-search-box:focus-within {
-          background:var(--snow); border-color:var(--jade);
+          background:var(--snow);
+          border-color:var(--jade);
           box-shadow:0 0 0 4px rgba(37,137,74,0.1), var(--shadow-md);
         }
-        .g-search-ic { padding:0 14px 0 20px; color:var(--sage); font-size:15px; flex-shrink:0; pointer-events:none; }
+        .g-search-ic {
+          padding:0 14px 0 20px;
+          color:var(--sage);
+          font-size:15px; flex-shrink:0; pointer-events:none;
+        }
         .g-search-input {
           flex:1; height:50px;
           background:transparent; border:none; outline:none;
@@ -480,9 +575,13 @@ export default function AgriMarket() {
         .g-search-input::placeholder { color:var(--dtext); }
         .g-mic-btn {
           margin:5px; width:40px; height:40px;
-          background:var(--alabaster); border:1px solid var(--border);
-          border-radius:100px; display:flex; align-items:center; justify-content:center;
-          cursor:pointer; font-size:16px; transition:all 0.3s ease; flex-shrink:0; color:var(--mtext);
+          background:var(--alabaster);
+          border:1px solid var(--border);
+          border-radius:100px;
+          display:flex; align-items:center; justify-content:center;
+          cursor:pointer; font-size:16px;
+          transition:all 0.3s ease; flex-shrink:0;
+          color:var(--mtext);
         }
         .g-mic-btn:hover { background:var(--mist); color:var(--jade); border-color:var(--border2); }
         .g-mic-btn.on {
@@ -497,26 +596,37 @@ export default function AgriMarket() {
 
         .g-cats {
           position:sticky; top:118px; z-index:190;
-          background:rgba(248,250,248,0.95); backdrop-filter:blur(20px);
+          background:rgba(248,250,248,0.95);
+          backdrop-filter:blur(20px);
           border-bottom:1px solid var(--border);
           overflow-x:auto; scrollbar-width:none;
         }
         .g-cats::-webkit-scrollbar { display:none; }
-        .g-cats-inner { display:flex; gap:5px; padding:10px 16px; min-width:max-content; }
+        .g-cats-inner {
+          display:flex; gap:5px; padding:10px 16px; min-width:max-content;
+        }
 
         .g-cat {
           display:inline-flex; align-items:center; gap:6px;
           padding:8px 16px; border-radius:100px;
-          border:1.5px solid transparent; background:transparent;
+          border:1.5px solid transparent;
+          background:transparent;
           font-family:'DM Sans', sans-serif;
           font-size:11px; font-weight:500;
           color:var(--mtext); cursor:pointer; white-space:nowrap;
-          transition:all 0.22s cubic-bezier(.34,1.56,.64,1); letter-spacing:0.01em;
+          transition:all 0.22s cubic-bezier(.34,1.56,.64,1);
+          letter-spacing:0.01em;
         }
-        .g-cat:hover { background:var(--mist); color:var(--emerald); border-color:var(--border2); box-shadow:var(--shadow-sm); }
+        .g-cat:hover {
+          background:var(--mist);
+          color:var(--emerald);
+          border-color:var(--border2);
+          box-shadow:var(--shadow-sm);
+        }
         .g-cat.on {
           background:linear-gradient(135deg,var(--emerald),var(--jade));
-          color:#fff; border-color:transparent; font-weight:700;
+          color:#fff; border-color:transparent;
+          font-weight:700;
           box-shadow:0 4px 18px rgba(37,137,74,0.3), inset 0 1px 0 rgba(255,255,255,0.2);
           transform:scale(1.04);
         }
@@ -524,7 +634,8 @@ export default function AgriMarket() {
 
         .g-toolbar {
           position:sticky; top:172px; z-index:180;
-          background:rgba(248,250,248,0.96); backdrop-filter:blur(16px);
+          background:rgba(248,250,248,0.96);
+          backdrop-filter:blur(16px);
           border-bottom:1px solid var(--border);
           padding:10px 20px;
           display:flex; align-items:center; justify-content:space-between; gap:12px;
@@ -533,42 +644,57 @@ export default function AgriMarket() {
         .g-loc-chip {
           display:flex; align-items:center; gap:8px;
           padding:7px 14px;
-          background:var(--mist); border:1.5px solid var(--border2);
+          background:var(--mist);
+          border:1.5px solid var(--border2);
           border-radius:100px; cursor:pointer;
-          transition:all 0.25s ease; min-width:0; box-shadow:var(--shadow-sm);
+          transition:all 0.25s ease; min-width:0;
+          box-shadow:var(--shadow-sm);
         }
         .g-loc-chip:hover { background:var(--silk); border-color:var(--jade); box-shadow:var(--shadow-md); }
         .g-loc-pulse {
           width:8px; height:8px; border-radius:50%;
           background:var(--jade); flex-shrink:0;
-          box-shadow:0 0 0 3px rgba(37,137,74,0.2); transition:background 0.3s;
+          box-shadow:0 0 0 3px rgba(37,137,74,0.2);
+          transition:background 0.3s;
         }
-        .g-loc-pulse.searching  { background:#F59E0B; animation:g-blink 1s ease-in-out infinite; }
-        .g-loc-pulse.error      { background:#EF4444; }
-        .g-loc-pulse.unavailable{ background:#94A3B8; }
+        .g-loc-pulse.searching { background:#F59E0B; animation:g-blink 1s ease-in-out infinite; }
+        .g-loc-pulse.error     { background:#EF4444; }
         @keyframes g-blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
         .g-loc-text {
           font-size:11px; font-weight:600; color:var(--emerald);
           white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px;
         }
 
+        .g-count {
+          font-family:'Cormorant Garamond', serif;
+          font-size:14px; font-style:italic;
+          color:var(--mtext); white-space:nowrap;
+        }
+        .g-count b { font-style:normal; color:var(--emerald); font-weight:700; }
+
         .g-sort-trigger {
           display:flex; align-items:center; gap:6px; padding:7px 14px;
-          background:var(--snow); border:1.5px solid var(--border); border-radius:100px;
+          background:var(--snow);
+          border:1.5px solid var(--border);
+          border-radius:100px;
           font-family:'DM Sans', sans-serif;
           font-size:11px; font-weight:600; color:var(--mtext);
           cursor:pointer; white-space:nowrap;
-          transition:all 0.25s ease; letter-spacing:0.03em; flex-shrink:0; box-shadow:var(--shadow-sm);
+          transition:all 0.25s ease; letter-spacing:0.03em; flex-shrink:0;
+          box-shadow:var(--shadow-sm);
         }
         .g-sort-trigger:hover { background:var(--mist); color:var(--emerald); border-color:var(--border2); }
         .g-sort-trigger.on    { background:var(--mist); color:var(--emerald); border-color:var(--jade); }
 
         .g-sort-menu {
           position:absolute; right:0; top:calc(100%+8px);
-          background:var(--snow); border:1.5px solid var(--border2);
-          border-radius:18px; overflow:hidden; min-width:190px;
+          background:var(--snow);
+          border:1.5px solid var(--border2);
+          border-radius:18px; overflow:hidden;
+          min-width:190px;
           box-shadow:var(--shadow-lg), 0 0 0 1px rgba(255,255,255,0.8) inset;
-          animation:g-pop 0.2s cubic-bezier(.34,1.56,.64,1); z-index:9;
+          animation:g-pop 0.2s cubic-bezier(.34,1.56,.64,1);
+          z-index:9;
         }
         @keyframes g-pop {
           from { opacity:0; transform:translateY(-10px) scale(0.95); }
@@ -591,47 +717,74 @@ export default function AgriMarket() {
         }
         .g-section-title {
           font-family:'Cormorant Garamond', serif;
-          font-size:26px; font-weight:600; font-style:italic; color:var(--forest);
+          font-size:26px; font-weight:600; font-style:italic;
+          color:var(--forest);
         }
         .g-section-line {
           flex:1; height:1px;
-          background:linear-gradient(90deg, var(--sage) 0%, transparent 100%); opacity:0.5;
+          background:linear-gradient(90deg, var(--sage) 0%, transparent 100%);
+          opacity:0.5;
         }
         .g-section-badge {
           font-family:'DM Sans', sans-serif;
-          font-size:9px; font-weight:700; letter-spacing:0.15em; color:var(--sage);
+          font-size:9px; font-weight:700;
+          letter-spacing:0.15em; color:var(--sage);
         }
 
-        .g-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:12px; }
+        .g-grid {
+          display:grid; grid-template-columns:repeat(2,1fr); gap:12px;
+        }
         @media(min-width:600px)  { .g-grid { grid-template-columns:repeat(3,1fr); } }
         @media(min-width:900px)  { .g-grid { grid-template-columns:repeat(4,1fr); gap:16px; } }
         @media(min-width:1200px) { .g-grid { grid-template-columns:repeat(5,1fr); } }
 
         .g-card {
-          background:var(--snow); border:1.5px solid var(--border);
-          border-radius:22px; overflow:hidden; cursor:pointer; position:relative;
-          opacity:0; animation:g-rise 0.6s cubic-bezier(.16,1,.3,1) forwards;
-          transition: transform 0.45s cubic-bezier(.34,1.4,.64,1), border-color 0.3s, box-shadow 0.45s;
-          will-change:transform; box-shadow:var(--shadow-sm);
+          background:var(--snow);
+          border:1.5px solid var(--border);
+          border-radius:22px;
+          overflow:hidden; cursor:pointer; position:relative;
+          opacity:0;
+          animation:g-rise 0.6s cubic-bezier(.16,1,.3,1) forwards;
+          transition:
+            transform 0.45s cubic-bezier(.34,1.4,.64,1),
+            border-color 0.3s,
+            box-shadow 0.45s;
+          will-change:transform;
+          box-shadow:var(--shadow-sm);
         }
         @keyframes g-rise {
           from { opacity:0; transform:translateY(36px) scale(0.96); }
           to   { opacity:1; transform:translateY(0) scale(1); }
         }
         .g-card:hover {
-          transform:translateY(-12px) scale(1.02); border-color:var(--jade);
-          box-shadow: var(--shadow-xl), 0 0 0 1px rgba(37,137,74,0.2), inset 0 1px 0 rgba(255,255,255,0.8);
+          transform:translateY(-12px) scale(1.02);
+          border-color:var(--jade);
+          box-shadow:
+            var(--shadow-xl),
+            0 0 0 1px rgba(37,137,74,0.2),
+            inset 0 1px 0 rgba(255,255,255,0.8);
         }
+
         .g-card.hero { grid-column:span 2; }
         .g-card.hero .g-card-visual { aspect-ratio:16/9; }
 
-        .g-card-visual { aspect-ratio:1; position:relative; overflow:hidden; background:var(--alabaster); }
-        .g-card-visual > span { transition:transform 0.65s cubic-bezier(.16,1,.3,1); }
+        .g-card-visual {
+          aspect-ratio:1; position:relative; overflow:hidden;
+          background:var(--alabaster);
+        }
+        .g-card-visual > span {
+          transition:transform 0.65s cubic-bezier(.16,1,.3,1);
+        }
         .g-card:hover .g-card-visual > span { transform:scale(1.09); }
 
         .g-card-fog {
           position:absolute; inset:0;
-          background:linear-gradient(to top, rgba(13,74,31,0.75) 0%, rgba(13,74,31,0.2) 40%, transparent 70%);
+          background:linear-gradient(
+            to top,
+            rgba(13,74,31,0.75) 0%,
+            rgba(13,74,31,0.2) 40%,
+            transparent 70%
+          );
           transition:opacity 0.35s;
         }
         .g-card:hover .g-card-fog { opacity:0.9; }
@@ -643,38 +796,60 @@ export default function AgriMarket() {
         .g-price-n {
           font-family:'Cormorant Garamond', serif;
           font-size:24px; font-weight:700; color:#fff;
-          letter-spacing:0.02em; line-height:1; text-shadow:0 2px 12px rgba(0,0,0,0.4);
+          letter-spacing:0.02em; line-height:1;
+          text-shadow:0 2px 12px rgba(0,0,0,0.4);
         }
-        .g-price-u { font-size:9px; color:rgba(255,255,255,0.7); margin-bottom:2px; font-weight:500; letter-spacing:0.06em; }
+        .g-price-u {
+          font-size:9px; color:rgba(255,255,255,0.7);
+          margin-bottom:2px; font-weight:500; letter-spacing:0.06em;
+        }
 
         .g-verified {
           position:absolute; top:10px; left:10px;
-          background:linear-gradient(135deg,var(--emerald),var(--jade)); color:#fff;
-          font-family:'DM Sans', sans-serif; font-size:7px; font-weight:800;
-          letter-spacing:0.1em; padding:3px 9px; border-radius:100px;
+          background:linear-gradient(135deg,var(--emerald),var(--jade));
+          color:#fff;
+          font-family:'DM Sans', sans-serif;
+          font-size:7px; font-weight:800;
+          letter-spacing:0.1em; padding:3px 9px;
+          border-radius:100px;
           box-shadow:0 4px 14px rgba(37,137,74,0.45);
         }
 
         .g-wish {
           position:absolute; top:10px; right:10px;
           width:34px; height:34px;
-          background:rgba(255,255,255,0.75); backdrop-filter:blur(12px);
-          border:1.5px solid rgba(255,255,255,0.6); border-radius:50%;
+          background:rgba(255,255,255,0.75);
+          backdrop-filter:blur(12px);
+          border:1.5px solid rgba(255,255,255,0.6);
+          border-radius:50%;
           display:flex; align-items:center; justify-content:center;
           cursor:pointer; font-size:15px;
-          transition:all 0.3s cubic-bezier(.34,1.56,.64,1); color:var(--mtext); box-shadow:var(--shadow-sm);
+          transition:all 0.3s cubic-bezier(.34,1.56,.64,1);
+          color:var(--mtext);
+          box-shadow:var(--shadow-sm);
         }
         .g-wish:hover { transform:scale(1.2); background:rgba(255,255,255,0.92); color:var(--emerald); }
         .g-wish.on    { background:rgba(239,68,68,0.85); color:#fff; border-color:transparent; }
 
         .g-card-body { padding:12px 14px 14px; }
-        .g-card-cat { font-size:8px; font-weight:700; letter-spacing:0.16em; color:var(--sage); text-transform:uppercase; margin-bottom:5px; }
+
+        .g-card-cat {
+          font-size:8px; font-weight:700;
+          letter-spacing:0.16em; color:var(--sage);
+          text-transform:uppercase; margin-bottom:5px;
+        }
+
         .g-card-name {
           font-family:'Cormorant Garamond', serif;
-          font-size:17px; font-weight:600; color:var(--text); line-height:1.2; margin-bottom:6px;
-          display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
+          font-size:17px; font-weight:600; color:var(--text);
+          line-height:1.2; margin-bottom:6px;
+          display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
+          overflow:hidden;
         }
-        .g-card-farmer { display:flex; align-items:center; gap:6px; margin-bottom:8px; }
+
+        .g-card-farmer {
+          display:flex; align-items:center; gap:6px; margin-bottom:8px;
+        }
         .g-farmer-avatar {
           width:16px; height:16px;
           background:linear-gradient(135deg,var(--emerald),var(--fern));
@@ -686,87 +861,143 @@ export default function AgriMarket() {
         .g-stars { display:flex; align-items:center; gap:2px; margin-bottom:10px; }
 
         .g-card-actions { display:flex; gap:8px; }
+
         .g-wa-btn {
           flex:1; height:36px;
-          background:linear-gradient(135deg,var(--emerald),var(--fern)); border:none; border-radius:11px; color:#fff;
-          font-family:'DM Sans', sans-serif; font-size:10px; font-weight:700; letter-spacing:0.06em;
-          cursor:pointer; display:flex; align-items:center; justify-content:center; gap:5px;
-          transition:all 0.3s ease; box-shadow:0 4px 16px rgba(37,137,74,0.3);
+          background:linear-gradient(135deg,var(--emerald),var(--fern));
+          border:none; border-radius:11px; color:#fff;
+          font-family:'DM Sans', sans-serif;
+          font-size:10px; font-weight:700; letter-spacing:0.06em;
+          cursor:pointer;
+          display:flex; align-items:center; justify-content:center; gap:5px;
+          transition:all 0.3s ease;
+          box-shadow:0 4px 16px rgba(37,137,74,0.3);
         }
         .g-wa-btn:hover { transform:translateY(-2px); box-shadow:0 8px 24px rgba(37,137,74,0.45); }
 
         .g-add-btn {
           width:36px; height:36px;
-          background:var(--alabaster); border:1.5px solid var(--border); border-radius:11px;
-          color:var(--mtext); font-size:18px; cursor:pointer; flex-shrink:0;
+          background:var(--alabaster);
+          border:1.5px solid var(--border);
+          border-radius:11px;
+          color:var(--mtext); font-size:18px;
+          cursor:pointer; flex-shrink:0;
           display:flex; align-items:center; justify-content:center;
-          transition:all 0.3s cubic-bezier(.34,1.56,.64,1); font-weight:300;
+          transition:all 0.3s cubic-bezier(.34,1.56,.64,1);
+          font-weight:300;
         }
         .g-add-btn:hover { background:var(--mist); color:var(--jade); border-color:var(--jade); transform:scale(1.1); }
         .g-add-btn.done  { background:linear-gradient(135deg,var(--emerald),var(--jade)); color:#fff; border-color:transparent; }
 
         .g-empty { grid-column:1/-1; text-align:center; padding:80px 20px; }
-        .g-empty-glyph { font-family:'Italiana', serif; font-size:80px; color:var(--mint); letter-spacing:0.05em; display:block; margin-bottom:16px; line-height:1; }
-        .g-empty-title { font-family:'Cormorant Garamond', serif; font-size:28px; font-style:italic; font-weight:600; color:var(--mtext); margin-bottom:8px; }
+        .g-empty-glyph {
+          font-family:'Italiana', serif;
+          font-size:80px; color:var(--mint); letter-spacing:0.05em;
+          display:block; margin-bottom:16px; line-height:1;
+        }
+        .g-empty-title {
+          font-family:'Cormorant Garamond', serif;
+          font-size:28px; font-style:italic; font-weight:600;
+          color:var(--mtext); margin-bottom:8px;
+        }
         .g-empty-sub { font-size:13px; color:var(--dtext); margin-bottom:24px; }
         .g-empty-btn {
-          display:inline-flex; align-items:center; gap:8px; padding:13px 34px;
-          background:linear-gradient(135deg,var(--emerald),var(--jade)); border:none; border-radius:100px;
-          color:#fff; font-weight:700; font-size:12px; letter-spacing:0.1em; cursor:pointer;
-          transition:all 0.3s ease; box-shadow:0 8px 28px rgba(37,137,74,0.35);
+          display:inline-flex; align-items:center; gap:8px;
+          padding:13px 34px;
+          background:linear-gradient(135deg,var(--emerald),var(--jade));
+          border:none; border-radius:100px;
+          color:#fff; font-weight:700; font-size:12px;
+          letter-spacing:0.1em; cursor:pointer;
+          transition:all 0.3s ease;
+          box-shadow:0 8px 28px rgba(37,137,74,0.35);
         }
         .g-empty-btn:hover { transform:translateY(-3px); box-shadow:0 16px 40px rgba(37,137,74,0.5); }
 
         .g-nav {
           position:fixed; bottom:0; left:0; right:0; z-index:300;
           background:rgba(255,255,255,0.96);
-          backdrop-filter:blur(24px) saturate(1.8); -webkit-backdrop-filter:blur(24px) saturate(1.8);
+          backdrop-filter:blur(24px) saturate(1.8);
+          -webkit-backdrop-filter:blur(24px) saturate(1.8);
           border-top:1.5px solid var(--border);
           box-shadow:0 -20px 60px rgba(13,74,31,0.1), 0 -1px 0 rgba(255,255,255,0.9);
           padding-bottom:env(safe-area-inset-bottom);
         }
         .g-nav-inner {
           max-width:480px; margin:0 auto;
-          display:flex; align-items:center; justify-content:space-around; padding:8px 0 12px;
+          display:flex; align-items:center; justify-content:space-around;
+          padding:8px 0 12px;
         }
         .g-nav-btn {
           display:flex; flex-direction:column; align-items:center; gap:3px;
           background:none; border:none; cursor:pointer;
-          color:var(--dtext); text-decoration:none; padding:4px 10px; border-radius:14px;
+          color:var(--dtext); text-decoration:none;
+          padding:4px 10px; border-radius:14px;
           transition:all 0.25s ease;
         }
         .g-nav-btn:hover { color:var(--mtext); }
         .g-nav-btn.on    { color:var(--emerald); }
         .g-nav-ic { font-size:20px; line-height:1; }
-        .g-nav-lbl { font-family:'DM Sans', sans-serif; font-size:7px; font-weight:700; letter-spacing:0.12em; }
+        .g-nav-lbl {
+          font-family:'DM Sans', sans-serif;
+          font-size:7px; font-weight:700; letter-spacing:0.12em;
+        }
 
         .g-nav-cta {
           display:flex; flex-direction:column; align-items:center; gap:4px;
-          background:none; border:none; cursor:pointer; position:relative; top:-14px;
+          background:none; border:none; cursor:pointer;
+          position:relative; top:-14px;
         }
         .g-nav-cta-ring {
           width:60px; height:60px;
           background:linear-gradient(145deg,var(--fern),var(--emerald),var(--forest));
-          border-radius:20px; display:flex; align-items:center; justify-content:center;
-          box-shadow: 0 8px 32px rgba(37,137,74,0.5), 0 0 0 1px rgba(255,255,255,0.3), 0 0 0 3px rgba(37,137,74,0.15), inset 0 1px 0 rgba(255,255,255,0.3);
-          transition:all 0.4s cubic-bezier(.34,1.56,.64,1); color:#fff;
+          border-radius:20px;
+          display:flex; align-items:center; justify-content:center;
+          box-shadow:
+            0 8px 32px rgba(37,137,74,0.5),
+            0 0 0 1px rgba(255,255,255,0.3),
+            0 0 0 3px rgba(37,137,74,0.15),
+            inset 0 1px 0 rgba(255,255,255,0.3);
+          transition:all 0.4s cubic-bezier(.34,1.56,.64,1);
+          color:#fff;
         }
-        .g-nav-cta:hover .g-nav-cta-ring { transform:scale(1.12) rotate(-5deg); box-shadow:0 16px 48px rgba(37,137,74,0.65); }
-        .g-nav-cta-lbl { font-size:6.5px; font-weight:800; letter-spacing:0.12em; color:var(--sage); }
+        .g-nav-cta:hover .g-nav-cta-ring {
+          transform:scale(1.12) rotate(-5deg);
+          box-shadow:0 16px 48px rgba(37,137,74,0.65);
+        }
+        .g-nav-cta-lbl {
+          font-size:6.5px; font-weight:800; letter-spacing:0.12em;
+          color:var(--sage);
+        }
 
         .g-user-menu {
-          position:absolute; right:0; top:calc(100%+10px); width:240px;
-          background:var(--snow); border:1.5px solid var(--border2); border-radius:22px; overflow:hidden;
+          position:absolute; right:0; top:calc(100%+10px);
+          width:240px;
+          background:var(--snow);
+          border:1.5px solid var(--border2);
+          border-radius:22px; overflow:hidden;
           box-shadow:var(--shadow-xl), inset 0 1px 0 rgba(255,255,255,0.9);
-          animation:g-pop 0.2s cubic-bezier(.34,1.56,.64,1); z-index:500;
+          animation:g-pop 0.2s cubic-bezier(.34,1.56,.64,1);
+          z-index:500;
         }
-        .g-um-head { padding:16px 18px; border-bottom:1px solid var(--border); background:linear-gradient(135deg,var(--mist),var(--alabaster)); }
-        .g-um-role { font-size:8px; font-weight:800; letter-spacing:0.18em; color:var(--sage); margin-bottom:3px; }
-        .g-um-email { font-size:12px; font-weight:500; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .g-um-head {
+          padding:16px 18px;
+          border-bottom:1px solid var(--border);
+          background:linear-gradient(135deg,var(--mist),var(--alabaster));
+        }
+        .g-um-role {
+          font-size:8px; font-weight:800; letter-spacing:0.18em;
+          color:var(--sage); margin-bottom:3px;
+        }
+        .g-um-email {
+          font-size:12px; font-weight:500; color:var(--text);
+          overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+        }
         .g-um-item {
-          display:flex; align-items:center; gap:10px; padding:11px 18px;
+          display:flex; align-items:center; gap:10px;
+          padding:11px 18px;
           font-size:12px; font-weight:500; color:var(--mtext);
-          cursor:pointer; transition:all 0.2s; text-decoration:none; border:none; background:none; width:100%;
+          cursor:pointer; transition:all 0.2s;
+          text-decoration:none; border:none; background:none; width:100%;
         }
         .g-um-item:hover { background:var(--mist); color:var(--text); }
         .g-um-item.red   { color:rgba(239,68,68,0.8); }
@@ -775,15 +1006,18 @@ export default function AgriMarket() {
         .g-overlay {
           position:fixed; inset:0; z-index:400;
           background:rgba(13,46,21,0.4);
-          backdrop-filter:blur(20px) saturate(1.5); -webkit-backdrop-filter:blur(20px) saturate(1.5);
+          backdrop-filter:blur(20px) saturate(1.5);
+          -webkit-backdrop-filter:blur(20px) saturate(1.5);
           animation:g-fade 0.3s ease;
         }
         @keyframes g-fade { from{opacity:0} to{opacity:1} }
 
         .g-drawer {
           position:fixed; bottom:0; left:0; right:0; z-index:401;
-          max-height:90vh; background:var(--snow);
-          border-radius:30px 30px 0 0; border-top:2px solid var(--border2);
+          max-height:90vh;
+          background:var(--snow);
+          border-radius:30px 30px 0 0;
+          border-top:2px solid var(--border2);
           overflow-y:auto; scrollbar-width:none;
           box-shadow:0 -40px 100px rgba(13,74,31,0.25), inset 0 1px 0 rgba(255,255,255,0.9);
           animation:g-up 0.45s cubic-bezier(.16,1,.3,1);
@@ -791,73 +1025,186 @@ export default function AgriMarket() {
         .g-drawer::-webkit-scrollbar { display:none; }
         @keyframes g-up { from{transform:translateY(100%)} to{transform:translateY(0)} }
 
-        .g-drawer-handle { display:flex; align-items:center; justify-content:center; padding:14px 0 8px; }
-        .g-drawer-handle-bar { width:44px; height:5px; background:var(--silk); border-radius:5px; }
+        .g-drawer-handle {
+          display:flex; align-items:center; justify-content:center;
+          padding:14px 0 8px;
+        }
+        .g-drawer-handle-bar {
+          width:44px; height:5px;
+          background:var(--silk);
+          border-radius:5px;
+        }
 
         .g-drawer-top {
-          position:sticky; top:0; z-index:5; background:var(--snow);
-          padding:0 20px 12px; display:flex; align-items:center; justify-content:space-between;
+          position:sticky; top:0; z-index:5;
+          background:var(--snow);
+          padding:0 20px 12px;
+          display:flex; align-items:center; justify-content:space-between;
           border-bottom:1px solid var(--border);
         }
         .g-drawer-cat-pill {
-          font-size:9px; font-weight:700; letter-spacing:0.14em; color:var(--emerald);
-          background:var(--mist); border:1.5px solid var(--border2); padding:5px 14px; border-radius:100px;
+          font-size:9px; font-weight:700; letter-spacing:0.14em;
+          color:var(--emerald);
+          background:var(--mist);
+          border:1.5px solid var(--border2);
+          padding:5px 14px; border-radius:100px;
         }
         .g-drawer-close {
-          width:36px; height:36px; background:var(--alabaster); border:1.5px solid var(--border);
-          border-radius:50%; display:flex; align-items:center; justify-content:center;
-          cursor:pointer; color:var(--mtext); font-size:14px; transition:all 0.25s ease; box-shadow:var(--shadow-sm);
+          width:36px; height:36px;
+          background:var(--alabaster);
+          border:1.5px solid var(--border);
+          border-radius:50%;
+          display:flex; align-items:center; justify-content:center;
+          cursor:pointer; color:var(--mtext); font-size:14px;
+          transition:all 0.25s ease;
+          box-shadow:var(--shadow-sm);
         }
         .g-drawer-close:hover { background:var(--mist); color:var(--text); transform:rotate(90deg); border-color:var(--border2); }
 
         .g-drawer-gallery { position:relative; width:100%; aspect-ratio:4/3; background:var(--alabaster); }
         .g-drawer-gallery::after {
-          content:''; position:absolute; bottom:0; left:0; right:0; height:45%;
-          background:linear-gradient(to top, var(--snow) 0%, transparent 100%); pointer-events:none;
+          content:'';
+          position:absolute; bottom:0; left:0; right:0; height:45%;
+          background:linear-gradient(to top, var(--snow) 0%, transparent 100%);
+          pointer-events:none;
         }
 
-        .g-gallery-dots { position:absolute; bottom:16px; left:50%; transform:translateX(-50%); display:flex; gap:6px; z-index:2; }
-        .g-gdot { height:4px; border-radius:4px; border:none; cursor:pointer; background:rgba(255,255,255,0.5); width:16px; transition:all 0.3s ease; }
+        .g-gallery-dots {
+          position:absolute; bottom:16px; left:50%;
+          transform:translateX(-50%);
+          display:flex; gap:6px; z-index:2;
+        }
+        .g-gdot {
+          height:4px; border-radius:4px; border:none; cursor:pointer;
+          background:rgba(255,255,255,0.5); width:16px;
+          transition:all 0.3s ease;
+        }
         .g-gdot.on { background:var(--snow); width:30px; box-shadow:0 2px 8px rgba(0,0,0,0.2); }
 
         .g-dc { padding:20px 20px 0; }
-        .g-dc-name { font-family:'Cormorant Garamond', serif; font-size:34px; font-weight:700; color:var(--forest); line-height:1.05; margin-bottom:10px; letter-spacing:-0.01em; }
+        .g-dc-name {
+          font-family:'Cormorant Garamond', serif;
+          font-size:34px; font-weight:700; color:var(--forest);
+          line-height:1.05; margin-bottom:10px; letter-spacing:-0.01em;
+        }
         .g-dc-price-row { display:flex; align-items:baseline; gap:8px; margin-bottom:16px; }
-        .g-dc-price { font-family:'Cormorant Garamond', serif; font-size:46px; font-weight:700; color:var(--jade); line-height:1; letter-spacing:0.01em; }
+        .g-dc-price {
+          font-family:'Cormorant Garamond', serif;
+          font-size:46px; font-weight:700; color:var(--jade);
+          line-height:1; letter-spacing:0.01em;
+        }
         .g-dc-unit { font-size:13px; color:var(--dtext); font-weight:400; }
         .g-dc-desc { font-size:13px; line-height:1.75; color:var(--mtext); margin-bottom:18px; }
 
         .g-dc-meta { display:flex; flex-direction:column; gap:8px; margin-bottom:20px; }
-        .g-meta-row { display:flex; align-items:center; gap:12px; padding:12px 14px; background:var(--alabaster); border:1.5px solid var(--border); border-radius:15px; }
-        .g-meta-icon { width:32px; height:32px; background:var(--mist); border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:15px; flex-shrink:0; border:1px solid var(--border); }
+        .g-meta-row {
+          display:flex; align-items:center; gap:12px;
+          padding:12px 14px;
+          background:var(--alabaster);
+          border:1.5px solid var(--border);
+          border-radius:15px;
+        }
+        .g-meta-icon {
+          width:32px; height:32px;
+          background:var(--mist);
+          border-radius:10px;
+          display:flex; align-items:center; justify-content:center;
+          font-size:15px; flex-shrink:0;
+          border:1px solid var(--border);
+        }
         .g-meta-text { font-size:12px; font-weight:500; color:var(--mtext); }
         .g-meta-text span { color:var(--jade); font-weight:600; }
 
-        .g-category-cards { margin-top:12px; padding:16px; background:var(--mist); border-radius:20px; margin-bottom:12px; }
-        .g-category-title { font-family:'Cormorant Garamond', serif; font-size:16px; font-weight:600; color:var(--forest); margin-bottom:12px; display:flex; align-items:center; gap:6px; }
-        .g-category-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(130px, 1fr)); gap:10px; }
-        .g-category-card { background:var(--snow); border:1.5px solid var(--border); border-radius:14px; padding:10px; cursor:pointer; transition:all 0.25s ease; }
-        .g-category-card:hover { transform:translateY(-2px); border-color:var(--jade); box-shadow:var(--shadow-md); }
-        .g-category-card-image { width:100%; aspect-ratio:1; border-radius:10px; overflow:hidden; position:relative; margin-bottom:8px; background:var(--alabaster); }
-        .g-category-card-name { font-family:'Cormorant Garamond', serif; font-size:13px; font-weight:600; color:var(--text); margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-        .g-category-card-price { font-size:11px; font-weight:700; color:var(--jade); }
-        .g-category-card-cat { font-size:7px; font-weight:700; letter-spacing:0.1em; color:var(--sage); text-transform:uppercase; margin-bottom:2px; }
+        .g-category-cards {
+          margin-top: 12px;
+          padding: 16px;
+          background: var(--mist);
+          border-radius: 20px;
+          margin-bottom: 12px;
+        }
+        .g-category-title {
+          font-family: 'Cormorant Garamond', serif;
+          font-size: 16px;
+          font-weight: 600;
+          color: var(--forest);
+          margin-bottom: 12px;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+        }
+        .g-category-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+          gap: 10px;
+        }
+        .g-category-card {
+          background: var(--snow);
+          border: 1.5px solid var(--border);
+          border-radius: 14px;
+          padding: 10px;
+          cursor: pointer;
+          transition: all 0.25s ease;
+        }
+        .g-category-card:hover {
+          transform: translateY(-2px);
+          border-color: var(--jade);
+          box-shadow: var(--shadow-md);
+        }
+        .g-category-card-image {
+          width: 100%;
+          aspect-ratio: 1;
+          border-radius: 10px;
+          overflow: hidden;
+          position: relative;
+          margin-bottom: 8px;
+          background: var(--alabaster);
+        }
+        .g-category-card-name {
+          font-family: 'Cormorant Garamond', serif;
+          font-size: 13px;
+          font-weight: 600;
+          color: var(--text);
+          margin-bottom: 4px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .g-category-card-price {
+          font-size: 11px;
+          font-weight: 700;
+          color: var(--jade);
+        }
+        .g-category-card-cat {
+          font-size: 7px;
+          font-weight: 700;
+          letter-spacing: 0.1em;
+          color: var(--sage);
+          text-transform: uppercase;
+          margin-bottom: 2px;
+        }
 
         .g-dc-actions { display:flex; gap:10px; padding:20px; }
         .g-dwa {
           flex:1; height:56px;
-          background:linear-gradient(135deg,var(--emerald),var(--jade)); border:none; border-radius:18px; color:#fff;
-          font-family:'DM Sans', sans-serif; font-size:13px; font-weight:700; letter-spacing:0.04em;
-          cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px;
+          background:linear-gradient(135deg,var(--emerald),var(--jade));
+          border:none; border-radius:18px; color:#fff;
+          font-family:'DM Sans', sans-serif;
+          font-size:13px; font-weight:700; letter-spacing:0.04em;
+          cursor:pointer;
+          display:flex; align-items:center; justify-content:center; gap:8px;
           transition:all 0.3s ease;
           box-shadow:0 6px 24px rgba(37,137,74,0.4), inset 0 1px 0 rgba(255,255,255,0.2);
         }
         .g-dwa:hover { transform:translateY(-2px); box-shadow:0 14px 36px rgba(37,137,74,0.55); }
 
         .g-dcart {
-          flex:1; height:56px; background:var(--forest); border:none; border-radius:18px; color:#fff;
-          font-family:'DM Sans', sans-serif; font-size:13px; font-weight:800; letter-spacing:0.04em;
-          cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px;
+          flex:1; height:56px;
+          background:var(--forest);
+          border:none; border-radius:18px; color:#fff;
+          font-family:'DM Sans', sans-serif;
+          font-size:13px; font-weight:800; letter-spacing:0.04em;
+          cursor:pointer;
+          display:flex; align-items:center; justify-content:center; gap:8px;
           transition:all 0.3s ease;
           box-shadow:0 6px 24px rgba(13,74,31,0.3), inset 0 1px 0 rgba(255,255,255,0.1);
         }
@@ -865,21 +1212,39 @@ export default function AgriMarket() {
 
         .g-recs { border-top:1px solid var(--border); padding:20px 20px 32px; }
         .g-recs-title {
-          font-family:'Cormorant Garamond', serif; font-size:18px; font-style:italic; font-weight:600;
-          color:var(--mtext); margin-bottom:14px; display:flex; align-items:center; gap:8px;
+          font-family:'Cormorant Garamond', serif;
+          font-size:18px; font-style:italic; font-weight:600;
+          color:var(--mtext); margin-bottom:14px;
+          display:flex; align-items:center; gap:8px;
         }
         .g-recs-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:10px; }
-        .g-rec { display:flex; gap:10px; padding:10px; background:var(--alabaster); border:1.5px solid var(--border); border-radius:15px; cursor:pointer; transition:all 0.25s ease; }
+        .g-rec {
+          display:flex; gap:10px; padding:10px;
+          background:var(--alabaster);
+          border:1.5px solid var(--border);
+          border-radius:15px; cursor:pointer;
+          transition:all 0.25s ease;
+        }
         .g-rec:hover { background:var(--mist); border-color:var(--jade); transform:translateY(-2px); box-shadow:var(--shadow-md); }
-        .g-rec-img { width:50px; height:50px; border-radius:11px; overflow:hidden; background:var(--silk); flex-shrink:0; }
+        .g-rec-img {
+          width:50px; height:50px; border-radius:11px;
+          overflow:hidden; background:var(--silk); flex-shrink:0;
+        }
         .g-rec-cat  { font-size:7.5px; font-weight:700; letter-spacing:0.12em; color:var(--sage); margin-bottom:2px; }
-        .g-rec-name { font-family:'Cormorant Garamond', serif; font-size:13px; font-weight:600; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .g-rec-name {
+          font-family:'Cormorant Garamond', serif;
+          font-size:13px; font-weight:600; color:var(--text);
+          white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+        }
         .g-rec-price { font-size:10px; font-weight:600; color:var(--jade); margin-top:2px; }
 
-        .g-motif { text-align:center; padding:8px 0 24px; color:var(--silk); font-size:11px; letter-spacing:0.4em; user-select:none; }
+        .g-motif {
+          text-align:center; padding:8px 0 24px;
+          color:var(--silk); font-size:11px;
+          letter-spacing:0.4em; user-select:none;
+        }
       `}</style>
 
-      {/* ── HEADER ── */}
       <header className={`g-header ${scrolled ? 'scrolled' : ''}`}>
         <div className="g-header-inner">
           <div className="g-logo-row">
@@ -936,11 +1301,14 @@ export default function AgriMarket() {
         </div>
       </header>
 
-      {/* ── CATÉGORIES ── */}
       <div className="g-cats">
         <div className="g-cats-inner">
           {CATEGORIES.map(c => (
-            <button key={c.label} onClick={() => setCat(c.label)} className={`g-cat ${cat === c.label ? 'on' : ''}`}>
+            <button
+              key={c.label}
+              onClick={() => setCat(c.label)}
+              className={`g-cat ${cat === c.label ? 'on' : ''}`}
+            >
               {c.icon && <span className="g-cat-ic">{c.icon}</span>}
               {c.label}
             </button>
@@ -948,26 +1316,80 @@ export default function AgriMarket() {
         </div>
       </div>
 
-      {/* ── TOOLBAR (localisation + tri — sans compteur) ── */}
       <div className="g-toolbar">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-          <button className="g-loc-chip" onClick={getLocation} style={{ minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, position: 'relative' }}>
+          {/* Bouton localisation GPS */}
+          <button
+            className="g-loc-chip"
+            onClick={() => locStatus === 'error' ? setShowLocModal(true) : getLocation()}
+            style={{ minWidth: 0, flexShrink: 0 }}
+            title={locStatus === 'error' ? 'Définir ma position manuellement' : 'Actualiser ma position GPS'}
+          >
             <div className={`g-loc-pulse ${locStatus}`} />
-            <span className="g-loc-text">
-              {locStatus === 'searching'
-                ? 'Localisation…'
-                : locStatus === 'error'
-                  ? 'Non disponible'
-                  : locStatus === 'unavailable'
-                    ? 'Sénégal'
-                    : location?.detailedAddress || location?.address || 'Sénégal'}
+            <span className="g-loc-text" style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {locStatus === 'searching' ? 'Localisation...' :
+               locStatus === 'error'     ? '📍 Définir ma position' :
+               location?.detailedAddress || location?.address || 'Sénégal'}
             </span>
           </button>
-          {/* ✅ Compteur supprimé */}
+
+          {/* Dropdown filtre région */}
+          <div style={{ position: 'relative' }}>
+            <button
+              onClick={() => setShowRegionMenu(v => !v)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                padding: '6px 12px', borderRadius: 20,
+                background: selectedRegion !== 'Tout le Sénégal' ? 'var(--jade)' : 'rgba(255,255,255,0.08)',
+                color: selectedRegion !== 'Tout le Sénégal' ? '#060e09' : 'var(--text)',
+                border: `1px solid ${selectedRegion !== 'Tout le Sénégal' ? 'var(--jade)' : 'rgba(255,255,255,0.15)'}`,
+                fontSize: 12, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+                transition: 'all 0.2s',
+              }}
+            >
+              📍 {selectedRegion === 'Tout le Sénégal' ? 'Région' : selectedRegion}
+              <span style={{ fontSize: 10, opacity: 0.7 }}>{showRegionMenu ? '▲' : '▼'}</span>
+            </button>
+
+            {showRegionMenu && (
+              <div style={{
+                position: 'absolute', top: '110%', left: 0, zIndex: 200,
+                background: '#0f1a12', border: '1px solid rgba(255,255,255,0.12)',
+                borderRadius: 12, padding: 6, minWidth: 200,
+                boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+                maxHeight: 320, overflowY: 'auto',
+              }}>
+                {REGIONS_SENEGAL.map(reg => (
+                  <button
+                    key={reg}
+                    onClick={() => { setSelectedRegion(reg); setShowRegionMenu(false); }}
+                    style={{
+                      display: 'block', width: '100%', textAlign: 'left',
+                      padding: '9px 14px', borderRadius: 8, border: 'none',
+                      background: selectedRegion === reg ? 'rgba(0,255,135,0.15)' : 'transparent',
+                      color: selectedRegion === reg ? 'var(--jade)' : 'var(--text)',
+                      fontSize: 13, fontWeight: selectedRegion === reg ? 700 : 400,
+                      cursor: 'pointer', transition: 'background 0.15s',
+                    }}
+                    onMouseEnter={e => { if (selectedRegion !== reg) (e.target as HTMLElement).style.background = 'rgba(255,255,255,0.06)'; }}
+                    onMouseLeave={e => { if (selectedRegion !== reg) (e.target as HTMLElement).style.background = 'transparent'; }}
+                  >
+                    {reg === 'Tout le Sénégal' ? '🇸🇳 ' : '📍 '}{reg}
+                    {selectedRegion === reg && <span style={{ float: 'right' }}>✓</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <span className="g-count"><b>{filtered.length}</b> produits</span>
         </div>
 
         <div style={{ position: 'relative', flexShrink: 0 }}>
-          <button onClick={() => setShowSort(v => !v)} className={`g-sort-trigger ${sort !== 'default' ? 'on' : ''}`}>
+          <button
+            onClick={() => setShowSort(v => !v)}
+            className={`g-sort-trigger ${sort !== 'default' ? 'on' : ''}`}
+          >
             ⚖ {sort === 'asc' ? 'PRIX ↑' : sort === 'desc' ? 'PRIX ↓' : 'TRIER'}
           </button>
           {showSort && (
@@ -983,10 +1405,11 @@ export default function AgriMarket() {
         </div>
       </div>
 
-      {/* ── GRILLE PRODUITS ── */}
       <main className="g-main">
         <div className="g-section-head">
-          <h2 className="g-section-title">{cat === 'Tous' ? 'Tous les produits' : cat}</h2>
+          <h2 className="g-section-title">
+            {cat === 'Tous' ? 'Tous les produits' : cat}
+          </h2>
           <div className="g-section-line" />
           <span className="g-section-badge">DIRECT PRODUCTEUR</span>
         </div>
@@ -1003,10 +1426,11 @@ export default function AgriMarket() {
             </div>
           ) : (
             filtered.map((p, idx) => {
-              const rd = ratings.get(p.sellerId || '');
+              const rd    = ratings.get(p.sellerId || '');
               const stars = rd?.averageRating || 0;
-              const cnt = rd?.reviewCount || 0;
+              const cnt   = rd?.reviewCount   || 0;
               const isHero = idx % 9 === 0 && idx !== 0;
+
               return (
                 <div
                   key={p.id}
@@ -1015,19 +1439,25 @@ export default function AgriMarket() {
                   onClick={() => open(p)}
                 >
                   <div className="g-card-visual">
-                    {safeImageSrc(p.images?.[0]) ? (
-                      <Image src={safeImageSrc(p.images?.[0])!} alt={p.name || ''} fill style={{ objectFit: 'cover', transition: 'transform 0.6s cubic-bezier(.16,1,.3,1)' }} />
+                    {p.images?.[0] ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={p.images[0]} alt={p.name} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', transition: 'transform 0.6s cubic-bezier(.16,1,.3,1)' }} />
                     ) : (
-                      <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 52, background: 'var(--alabaster)' }}>🌾</div>
+                      <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 52, background: 'var(--graphite)' }}>
+                        🌾
+                      </div>
                     )}
                     <div className="g-card-fog" />
+
                     {p.farmerVerified && <div className="g-verified">✓ VÉRIFIÉ</div>}
+
                     <div className="g-card-price">
                       <div>
                         <div className="g-price-n">{p.price?.toLocaleString()}</div>
                         <div className="g-price-u">FCFA / {p.unit || 'kg'}</div>
                       </div>
                     </div>
+
                     <button onClick={e => toggleWish(p.id, e)} className={`g-wish ${wishlist.has(p.id) ? 'on' : ''}`}>
                       {wishlist.has(p.id) ? '♥️' : '♡'}
                     </button>
@@ -1042,9 +1472,10 @@ export default function AgriMarket() {
                     </div>
                     {cnt > 0 && (
                       <div className="g-stars">
-                        {[1, 2, 3, 4, 5].map(i => (
-                          <svg key={i} width={10} height={10} viewBox="0 0 24 24" fill={i <= Math.floor(stars) ? 'var(--jade)' : 'rgba(13,74,31,0.15)'}>
-                            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+                        {[1,2,3,4,5].map(i => (
+                          <svg key={i} width={10} height={10} viewBox="0 0 24 24"
+                            fill={i <= Math.floor(stars) ? 'var(--jade)' : 'rgba(13,74,31,0.15)'}>
+                            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
                           </svg>
                         ))}
                         <span style={{ fontSize: 8, color: 'var(--dtext)', marginLeft: 3 }}>({cnt})</span>
@@ -1068,7 +1499,161 @@ export default function AgriMarket() {
         <div className="g-motif">— ✦ ◈ ✦ —</div>
       </main>
 
-      {/* ── NAV BOTTOM ── */}
+      {/* ===== MODAL LOCALISATION MANUELLE ===== */}
+      {showLocModal && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, zIndex: 9000,
+            background: 'rgba(6,14,9,0.92)', backdropFilter: 'blur(12px)',
+            display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+          }}
+          onClick={() => setShowLocModal(false)}
+        >
+          <div
+            style={{
+              width: '100%', maxWidth: 480,
+              background: '#0d1a0f',
+              border: '1px solid rgba(0,255,135,0.2)',
+              borderRadius: '24px 24px 0 0',
+              padding: '28px 20px 40px',
+              boxShadow: '0 -16px 64px rgba(0,0,0,0.6)',
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Handle */}
+            <div style={{ width: 40, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.15)', margin: '0 auto 24px' }} />
+
+            {/* Titre */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: '#fff', marginBottom: 4 }}>
+                  📍 Où êtes-vous ?
+                </div>
+                <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)' }}>
+                  Localisation GPS refusée — indiquez votre position manuellement
+                </div>
+              </div>
+              <button
+                onClick={() => setShowLocModal(false)}
+                style={{ background: 'rgba(255,255,255,0.08)', border: 'none', color: '#fff', width: 32, height: 32, borderRadius: '50%', cursor: 'pointer', fontSize: 16 }}
+              >✕</button>
+            </div>
+
+            {/* Étape 1 : Région */}
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--jade)', letterSpacing: 1, textTransform: 'uppercase', display: 'block', marginBottom: 8 }}>
+                1. Région
+              </label>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                {REGIONS_SENEGAL.filter(r => r !== 'Tout le Sénégal').map(reg => (
+                  <button
+                    key={reg}
+                    onClick={() => { setManualRegion(reg); setManualDept(''); setManualCommune(''); }}
+                    style={{
+                      padding: '7px 14px', borderRadius: 20, fontSize: 13, cursor: 'pointer',
+                      border: `1px solid ${manualRegion === reg ? 'var(--jade)' : 'rgba(255,255,255,0.12)'}`,
+                      background: manualRegion === reg ? 'rgba(0,255,135,0.15)' : 'transparent',
+                      color: manualRegion === reg ? 'var(--jade)' : 'rgba(255,255,255,0.7)',
+                      fontWeight: manualRegion === reg ? 700 : 400,
+                      transition: 'all 0.15s',
+                    }}
+                  >{reg}</button>
+                ))}
+              </div>
+            </div>
+
+            {/* Étape 2 : Département */}
+            {manualRegion && GEO_SENEGAL[manualRegion] && (
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--jade)', letterSpacing: 1, textTransform: 'uppercase', display: 'block', marginBottom: 8 }}>
+                  2. Département
+                </label>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {Object.keys(GEO_SENEGAL[manualRegion]).map(dept => (
+                    <button
+                      key={dept}
+                      onClick={() => { setManualDept(dept); setManualCommune(''); }}
+                      style={{
+                        padding: '7px 14px', borderRadius: 20, fontSize: 13, cursor: 'pointer',
+                        border: `1px solid ${manualDept === dept ? 'var(--jade)' : 'rgba(255,255,255,0.12)'}`,
+                        background: manualDept === dept ? 'rgba(0,255,135,0.15)' : 'transparent',
+                        color: manualDept === dept ? 'var(--jade)' : 'rgba(255,255,255,0.7)',
+                        fontWeight: manualDept === dept ? 700 : 400,
+                        transition: 'all 0.15s',
+                      }}
+                    >{dept}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Étape 3 : Commune */}
+            {manualRegion && manualDept && GEO_SENEGAL[manualRegion]?.[manualDept] && (
+              <div style={{ marginBottom: 24 }}>
+                <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--jade)', letterSpacing: 1, textTransform: 'uppercase', display: 'block', marginBottom: 8 }}>
+                  3. Commune
+                </label>
+                <div style={{ maxHeight: 160, overflowY: 'auto', display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {GEO_SENEGAL[manualRegion][manualDept].map(com => (
+                    <button
+                      key={com}
+                      onClick={() => setManualCommune(com)}
+                      style={{
+                        padding: '7px 14px', borderRadius: 20, fontSize: 12, cursor: 'pointer',
+                        border: `1px solid ${manualCommune === com ? 'var(--jade)' : 'rgba(255,255,255,0.1)'}`,
+                        background: manualCommune === com ? 'rgba(0,255,135,0.15)' : 'transparent',
+                        color: manualCommune === com ? 'var(--jade)' : 'rgba(255,255,255,0.6)',
+                        fontWeight: manualCommune === com ? 700 : 400,
+                        transition: 'all 0.15s',
+                      }}
+                    >{com}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Résumé + Confirmer */}
+            {manualRegion && (
+              <button
+                onClick={() => {
+                  const label = [manualCommune, manualDept, manualRegion].filter(Boolean).join(', ');
+                  setLocation({
+                    address: [manualDept || manualRegion, manualRegion].filter(Boolean).join(', '),
+                    lat: 14.7167, lng: -17.4677, precision: 0,
+                    detailedAddress: label,
+                    region: manualRegion,
+                  });
+                  setLocStatus('found');
+                  setSelectedRegion(manualRegion);
+                  setShowLocModal(false);
+                }}
+                style={{
+                  width: '100%', padding: '15px', borderRadius: 14, border: 'none',
+                  background: 'var(--jade)', color: '#060e09',
+                  fontSize: 14, fontWeight: 800, cursor: 'pointer',
+                  letterSpacing: 0.5,
+                  opacity: manualRegion ? 1 : 0.4,
+                }}
+              >
+                ✓ Confirmer — {[manualCommune || manualDept || manualRegion].join('')}
+              </button>
+            )}
+
+            {/* Bouton réessayer GPS */}
+            <button
+              onClick={() => { setShowLocModal(false); getLocation(); }}
+              style={{
+                width: '100%', padding: '12px', borderRadius: 14, border: '1px solid rgba(255,255,255,0.12)',
+                background: 'transparent', color: 'rgba(255,255,255,0.5)',
+                fontSize: 13, cursor: 'pointer', marginTop: 10,
+              }}
+            >
+              🔄 Réessayer la géolocalisation GPS
+            </button>
+          </div>
+        </div>
+      )}
+
       <nav className="g-nav">
         <div className="g-nav-inner">
           <Link href="/" className="g-nav-btn on">
@@ -1092,14 +1677,13 @@ export default function AgriMarket() {
             <span className="g-nav-ic">◻</span>
             <span className="g-nav-lbl">PANIER</span>
           </Link>
-          <Link href="/main/unlock-ia" className="g-nav-btn">
-            <span className="g-nav-ic">🤖</span>
-            <span className="g-nav-lbl">IA</span>
+          <Link href="/account" className="g-nav-btn">
+            <span className="g-nav-ic">◎</span>
+            <span className="g-nav-lbl">COMPTE</span>
           </Link>
         </div>
       </nav>
 
-      {/* ── DRAWER PRODUIT ── */}
       {selected && (
         <>
           <div className="g-overlay" onClick={close} />
@@ -1114,14 +1698,14 @@ export default function AgriMarket() {
             </div>
 
             <div className="g-drawer-gallery">
-              {safeImageSrc(selected.images?.[imgIdx]) ? (
-                <Image src={safeImageSrc(selected.images?.[imgIdx])!} alt={selected.name || ''} fill style={{ objectFit: 'cover' }} />
+              {selected.images?.[imgIdx] ? (
+                <img src={selected.images[imgIdx]} alt={selected.name} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }} />
               ) : (
                 <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 80 }}>🌾</div>
               )}
-              {(selected.images?.length || 0) > 1 && (
+              {(selected.images?.length ?? 0) > 1 && (
                 <div className="g-gallery-dots">
-                  {selected.images!.map((_, i) => (
+                  {(selected.images ?? []).map((_, i) => (
                     <button key={i} onClick={() => setImgIdx(i)} className={`g-gdot ${imgIdx === i ? 'on' : ''}`} />
                   ))}
                 </div>
@@ -1143,15 +1727,19 @@ export default function AgriMarket() {
                   </div>
                   <div className="g-category-grid">
                     {categoryProducts.map(catProd => (
-                      <div key={catProd.id} className="g-category-card" onClick={e => {
-                        e.stopPropagation();
-                        setSelected(catProd);
-                        setImgIdx(0);
-                        drawerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
-                      }}>
+                      <div
+                        key={catProd.id}
+                        className="g-category-card"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelected(catProd);
+                          setImgIdx(0);
+                          drawerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+                        }}
+                      >
                         <div className="g-category-card-image">
-                          {safeImageSrc(catProd.images?.[0]) ? (
-                            <Image src={safeImageSrc(catProd.images?.[0])!} alt={catProd.name || ''} fill style={{ objectFit: 'cover' }} />
+                          {catProd.images?.[0] ? (
+                            <img src={catProd.images[0]} alt={catProd.name} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }} />
                           ) : (
                             <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24 }}>🌾</div>
                           )}
@@ -1203,14 +1791,10 @@ export default function AgriMarket() {
                 </div>
                 <div className="g-recs-grid">
                   {recs.map(r => (
-                    <div key={r.id} className="g-rec" onClick={() => {
-                      setSelected(r);
-                      setImgIdx(0);
-                      drawerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
-                    }}>
+                    <div key={r.id} className="g-rec" onClick={() => { setSelected(r); setImgIdx(0); drawerRef.current?.scrollTo({ top: 0, behavior: 'smooth' }); }}>
                       <div className="g-rec-img">
-                        {safeImageSrc(r.images?.[0])
-                          ? <Image src={safeImageSrc(r.images?.[0])!} alt={r.name || ''} width={50} height={50} style={{ objectFit: 'cover', width: '100%', height: '100%' }} />
+                        {r.images?.[0]
+                          ? <img src={r.images[0]} alt={r.name} style={{ objectFit: 'cover', width: '100%', height: '100%' }} />
                           : <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22 }}>🌾</div>}
                       </div>
                       <div style={{ minWidth: 0 }}>

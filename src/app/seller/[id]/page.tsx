@@ -4,52 +4,66 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
 import { useEffect, useState } from 'react';
-import { collection, query, where, getDocs } from 'firebase/firestore';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
 
 export default function SellerPage() {
   const { id } = useParams<{ id: string }>();
+
   const [products, setProducts] = useState<any[]>([]);
   const [reviews, setReviews] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // ✅ Produits du vendeur — lus depuis Firestore, plus depuis localStorage
   useEffect(() => {
     if (!id) return;
 
-    const fetchData = async () => {
-      try {
-        // Produits depuis Firestore
-        const productsSnap = await getDocs(
-          query(collection(db, 'products'), where('sellerId', '==', id), where('status', '==', 'active'))
-        );
-        setProducts(productsSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-
-        // Avis depuis Firestore
-        const reviewsSnap = await getDocs(
-          query(collection(db, 'reviews'), where('sellerId', '==', id))
-        );
-        setReviews(reviewsSnap.docs.map(d => d.data()));
-      } catch (e) {
-        console.error('Erreur chargement vendeur:', e);
-      } finally {
+    const q = query(collection(db, 'products'), where('sellerId', '==', id));
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        setProducts(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+        setLoading(false);
+      },
+      (err) => {
+        console.error('Erreur chargement produits vendeur:', err);
         setLoading(false);
       }
-    };
+    );
 
-    fetchData();
+    return () => unsub();
+  }, [id]);
+
+  // ✅ Avis du vendeur — lus depuis Firestore, plus depuis localStorage
+  useEffect(() => {
+    if (!id) return;
+
+    const q = query(collection(db, 'reviews'), where('sellerId', '==', id));
+    const unsub = onSnapshot(q, (snap) => {
+      setReviews(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    }, (err) => {
+      console.error('Erreur chargement avis vendeur:', err);
+    });
+
+    return () => unsub();
   }, [id]);
 
   const seller = products[0];
 
   const averageRating =
     reviews.length > 0
-      ? (reviews.reduce((acc, r) => acc + r.rating, 0) / reviews.length).toFixed(1)
+      ? (
+          reviews.reduce((acc, r) => acc + (r.rating || 0), 0) / reviews.length
+        ).toFixed(1)
       : '0';
 
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="w-10 h-10 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin" />
+        <div className="text-center">
+          <div className="text-6xl mb-4 animate-pulse">🌾</div>
+          <p className="font-bold text-gray-700">Chargement...</p>
+        </div>
       </div>
     );
   }
@@ -87,20 +101,27 @@ export default function SellerPage() {
               height={120}
               className="rounded-full object-cover border-4 border-white"
             />
+
             <div>
               <h1 className="text-3xl font-bold">{seller.sellerName}</h1>
+
               <p className="mt-2 text-green-100">📍 {seller.region}</p>
+
               <p className="mt-2">⭐ {averageRating} / 5</p>
+
               <p className="mt-1">📝 {reviews.length} avis</p>
-              <a
-                href={`https://wa.me/${seller.sellerPhone}`}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <button className="mt-4 bg-white text-green-700 px-5 py-3 rounded-2xl font-bold">
-                  💬 Contacter
-                </button>
-              </a>
+
+              {seller.sellerPhone && (
+                <a
+                  href={`https://wa.me/${seller.sellerPhone}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <button className="mt-4 bg-white text-green-700 px-5 py-3 rounded-2xl font-bold">
+                    💬 Contacter
+                  </button>
+                </a>
+              )}
             </div>
           </div>
         </div>
@@ -109,6 +130,7 @@ export default function SellerPage() {
       {/* PRODUITS */}
       <div className="max-w-6xl mx-auto px-4 py-8">
         <h2 className="text-2xl font-bold text-gray-900 mb-6">🌾 Produits du vendeur</h2>
+
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {products.map((product) => (
             <Link
@@ -127,11 +149,12 @@ export default function SellerPage() {
                   />
                 )}
               </div>
+
               <div className="p-3">
                 <p className="font-bold text-gray-900 truncate">{product.name}</p>
                 <p className="text-sm text-gray-500">{product.category}</p>
                 <p className="text-green-700 font-bold mt-2">
-                  {product.price.toLocaleString()} FCFA
+                  {(product.price || 0).toLocaleString()} FCFA
                 </p>
               </div>
             </Link>
