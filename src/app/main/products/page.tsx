@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { collection, onSnapshot, query, where } from 'firebase/firestore';
@@ -621,10 +621,8 @@ export default function AgriMarket() {
   const [selected,           setSelected]           = useState<ProductData|null>(null);
   const [imgIdx,             setImgIdx]             = useState(0);
   const [scrolled,           setScrolled]           = useState(false);
-  const [recs,               setRecs]               = useState<ProductData[]>([]);
   const [ratings,            setRatings]            = useState<Map<string,SellerRating>>(new Map());
   const [heroVisible,        setHeroVisible]        = useState(false);
-  const [categoryProducts,   setCategoryProducts]   = useState<ProductData[]>([]);
 
   const drawerRef = useRef<HTMLDivElement>(null);
   const voiceRef  = useRef<DivineVoiceRecognition | null>(null);
@@ -714,16 +712,63 @@ export default function AgriMarket() {
     return () => unsubs.forEach(unsub => unsub());
   }, [products]);
 
-  useEffect(() => {
-    if (selected && products.length)
-      setRecs(products.filter(p => p.category === selected.category && p.id !== selected.id).slice(0, 6));
-  }, [selected, products]);
+  // ============================================================
+  // ✅ RECOMMANDATIONS PRODUIT — région, producteur, proximité réelle, catégorie
+  //    Remplace l'ancien double affichage ("Autres produits dans X" +
+  //    "Produits similaires") qui dupliquait exactement le même filtre.
+  //    Les sections "saison" et "populaire" de la version précédente ont été
+  //    retirées : elles reposaient sur des données simulées/aléatoires
+  //    (Math.random() pour la note, liste figée pour la saison) qui n'apportaient
+  //    aucune valeur réelle et pouvaient induire l'utilisateur en erreur.
+  // ============================================================
+  const distanceKm = (lat1: number, lng1: number, lat2: number, lng2: number) => {
+    const R = 6371, toRad = (d: number) => d * Math.PI / 180;
+    const dLat = toRad(lat2 - lat1), dLng = toRad(lng2 - lng1);
+    const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLng/2)**2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  };
 
-  useEffect(() => {
-    if (selected && products.length) {
-      setCategoryProducts(products.filter(p => p.category === selected.category && p.id !== selected.id).slice(0, 4));
+  const recommendationSections = useMemo(() => {
+    if (!selected) return [] as { title: string; badge: string; items: ProductData[]; distances?: Map<string, number> }[];
+    const others = products.filter(p => p.id !== selected.id);
+    const sections: { title: string; badge: string; items: ProductData[]; distances?: Map<string, number> }[] = [];
+
+    // 1. Région de l'utilisateur (uniquement si une région réelle a été détectée/choisie)
+    if (location?.region) {
+      const sameRegion = others.filter(p => (p.region || '').toLowerCase() === location.region!.toLowerCase());
+      if (sameRegion.length > 0) {
+        sections.push({ title: `Populaire en ${location.region}`, badge: '📍 Région', items: sameRegion.slice(0, 6) });
+      }
     }
-  }, [selected, products]);
+
+    // 2. Même producteur
+    if (selected.farmer) {
+      const sameFarmer = others.filter(p => p.farmer === selected.farmer);
+      if (sameFarmer.length > 0) {
+        sections.push({ title: `Autres produits de ${selected.farmer}`, badge: '👨\u200d🌾 Producteur', items: sameFarmer.slice(0, 6) });
+      }
+    }
+
+    // 3. Proximité réelle (distance calculée à partir de la position GPS détectée)
+    if (location?.lat && location?.lng) {
+      const distances = new Map<string, number>();
+      const nearby = others
+        .filter(p => p.lat !== undefined && p.lng !== undefined)
+        .map(p => { distances.set(p.id, distanceKm(location.lat, location.lng, p.lat!, p.lng!)); return p; })
+        .sort((a, b) => (distances.get(a.id) ?? 0) - (distances.get(b.id) ?? 0));
+      if (nearby.length > 0) {
+        sections.push({ title: 'Près de chez vous', badge: '📍 Proche', items: nearby.slice(0, 6), distances });
+      }
+    }
+
+    // 4. Même catégorie (toujours présent en dernier recours pour ne jamais laisser le drawer vide)
+    const sameCategory = others.filter(p => p.category === selected.category);
+    if (sameCategory.length > 0) {
+      sections.push({ title: 'Dans la même catégorie', badge: '📂 Catégorie', items: sameCategory.slice(0, 6) });
+    }
+
+    return sections;
+  }, [selected, products, location]);
 
   const getDivineLocation = useCallback(async () => {
     setLocStatus('searching');
@@ -1642,74 +1687,6 @@ export default function AgriMarket() {
         .g-meta-text { font-size:12px; font-weight:500; color:var(--mtext); }
         .g-meta-text span { color:var(--jade); font-weight:600; }
 
-        .g-category-cards {
-          margin-top: 12px;
-          padding: 16px;
-          background: var(--mist);
-          border-radius: 20px;
-          margin-bottom: 12px;
-        }
-        .g-category-title {
-          font-family: 'Cormorant Garamond', serif;
-          font-size: 16px;
-          font-weight: 600;
-          color: var(--forest);
-          margin-bottom: 12px;
-          display: flex;
-          align-items: center;
-          gap: 6px;
-        }
-        .g-category-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
-          gap: 10px;
-        }
-        .g-category-card {
-          background: var(--snow);
-          border: 1.5px solid var(--border);
-          border-radius: 14px;
-          padding: 10px;
-          cursor: pointer;
-          transition: all 0.25s ease;
-        }
-        .g-category-card:hover {
-          transform: translateY(-2px);
-          border-color: var(--jade);
-          box-shadow: var(--shadow-md);
-        }
-        .g-category-card-image {
-          width: 100%;
-          aspect-ratio: 1;
-          border-radius: 10px;
-          overflow: hidden;
-          position: relative;
-          margin-bottom: 8px;
-          background: var(--alabaster);
-        }
-        .g-category-card-name {
-          font-family: 'Cormorant Garamond', serif;
-          font-size: 13px;
-          font-weight: 600;
-          color: var(--text);
-          margin-bottom: 4px;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-        .g-category-card-price {
-          font-size: 11px;
-          font-weight: 700;
-          color: var(--jade);
-        }
-        .g-category-card-cat {
-          font-size: 7px;
-          font-weight: 700;
-          letter-spacing: 0.1em;
-          color: var(--sage);
-          text-transform: uppercase;
-          margin-bottom: 2px;
-        }
-
         .g-dc-actions { display:flex; gap:10px; padding:20px; }
         .g-dwa {
           flex:1; height:56px;
@@ -2220,18 +2197,25 @@ export default function AgriMarket() {
             </div>
 
             <div className="g-drawer-gallery">
-              {selected.images?.[imgIdx] ? (
-                <img src={selected.images[imgIdx]} alt={selected.name} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }} />
-              ) : (
-                <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 80 }}>🌾</div>
-              )}
-              {(selected.images?.length ?? 0) > 1 && (
-                <div className="g-gallery-dots">
-                  {(selected.images ?? []).map((_, i) => (
-                    <button key={i} onClick={() => setImgIdx(i)} className={`g-gdot ${imgIdx === i ? 'on' : ''}`} />
-                  ))}
-                </div>
-              )}
+              {(() => {
+                const galleryImages = (selected.images ?? []).slice(0, 5); // ✅ 5 images max par produit
+                return (
+                  <>
+                    {galleryImages[imgIdx] ? (
+                      <img src={galleryImages[imgIdx]} alt={selected.name} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }} />
+                    ) : (
+                      <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 80 }}>🌾</div>
+                    )}
+                    {galleryImages.length > 1 && (
+                      <div className="g-gallery-dots">
+                        {galleryImages.map((_, i) => (
+                          <button key={i} onClick={() => setImgIdx(i)} className={`g-gdot ${imgIdx === i ? 'on' : ''}`} />
+                        ))}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </div>
 
             <div className="g-dc">
@@ -2241,39 +2225,6 @@ export default function AgriMarket() {
                 <span className="g-dc-unit">FCFA / {selected.unit || 'kg'}</span>
               </div>
               {selected.description && <p className="g-dc-desc">{selected.description}</p>}
-
-              {categoryProducts.length > 0 && (
-                <div className="g-category-cards">
-                  <div className="g-category-title">
-                    <span>📦</span> Autres produits dans <span style={{ color: 'var(--jade)' }}>{selected.category}</span>
-                  </div>
-                  <div className="g-category-grid">
-                    {categoryProducts.map(catProd => (
-                      <div
-                        key={catProd.id}
-                        className="g-category-card"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelected(catProd);
-                          setImgIdx(0);
-                          drawerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
-                        }}
-                      >
-                        <div className="g-category-card-image">
-                          {catProd.images?.[0] ? (
-                            <img src={catProd.images[0]} alt={catProd.name} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }} />
-                          ) : (
-                            <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24 }}>🌾</div>
-                          )}
-                        </div>
-                        <div className="g-category-card-cat">{catProd.category}</div>
-                        <div className="g-category-card-name">{catProd.name}</div>
-                        <div className="g-category-card-price">{catProd.price?.toLocaleString()} FCFA</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
 
               <div className="g-dc-meta">
                 <div className="g-meta-row">
@@ -2305,14 +2256,17 @@ export default function AgriMarket() {
               </button>
             </div>
 
-            {recs.length > 0 && (
-              <div className="g-recs">
+            {recommendationSections.map(section => (
+              <div key={section.title} className="g-recs">
                 <div className="g-recs-title">
                   <span style={{ color: 'var(--jade)', fontSize: 12 }}>✦</span>
-                  Produits similaires
+                  {section.title}
+                  <span style={{ fontSize: 8, fontWeight: 700, letterSpacing: '0.08em', color: 'var(--sage)', textTransform: 'uppercase', marginLeft: 'auto' }}>
+                    {section.badge}
+                  </span>
                 </div>
                 <div className="g-recs-grid">
-                  {recs.map(r => (
+                  {section.items.map(r => (
                     <div key={r.id} className="g-rec" onClick={() => { setSelected(r); setImgIdx(0); drawerRef.current?.scrollTo({ top: 0, behavior: 'smooth' }); }}>
                       <div className="g-rec-img">
                         {r.images?.[0]
@@ -2322,13 +2276,20 @@ export default function AgriMarket() {
                       <div style={{ minWidth: 0 }}>
                         <div className="g-rec-cat">{r.category}</div>
                         <div className="g-rec-name">{r.name}</div>
-                        <div className="g-rec-price">{r.price?.toLocaleString()} FCFA</div>
+                        <div className="g-rec-price">
+                          {r.price?.toLocaleString()} FCFA
+                          {section.distances?.has(r.id) && (
+                            <span style={{ color: 'var(--sage)', fontWeight: 500 }}>
+                              &ensp;·&ensp;{section.distances.get(r.id)!.toFixed(1)} km
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </div>
                   ))}
                 </div>
               </div>
-            )}
+            ))}
 
             <div style={{ height: 40 }} />
           </div>
