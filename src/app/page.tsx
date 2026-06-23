@@ -28,7 +28,7 @@ export default function SplashPage() {
       onAuthStateChanged(auth, async (firebaseUser) => {
         if (!firebaseUser) {
           // Pas connecté → page de login
-          router.push('/auth/login');
+          router.push('/main/products');
           return;
         }
 

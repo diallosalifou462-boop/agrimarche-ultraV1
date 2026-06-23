@@ -4,7 +4,10 @@ import { useState, useEffect, createContext, useContext, ReactNode, useCallback,
 import { useFCMToken } from '@/hooks/useFCMToken';
 import { useAuth } from '@/hooks/useAuth';
 import { Bell, X, CheckCircle, Truck, MessageCircle, Star, AlertCircle } from 'lucide-react';
-import { collection, query, where, onSnapshot, orderBy, limit } from 'firebase/firestore';
+import {
+  collection, query, where, onSnapshot, orderBy, limit,
+  doc, updateDoc, writeBatch,
+} from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
 
 interface Notification {
@@ -174,12 +177,35 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
     return unsubscribe;
   }, [onMessageReceived, isNative]);
 
+  // ── FIX : persistance Firestore ──────────────────────────────
+  // Avant : ces deux fonctions ne faisaient que setNotifications(...) en local.
+  // Résultat : une notif "lue" redevenait non-lue au prochain onSnapshot/reload,
+  // puisque le document Firestore gardait read: false.
+  // Maintenant : on met à jour l'état local tout de suite (optimiste, UI réactive),
+  // ET on persiste dans Firestore. Le onSnapshot recevra ensuite la même valeur
+  // en confirmation, donc pas de double-render visible.
   const markAsRead = useCallback((id: string) => {
     setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
+
+    updateDoc(doc(db, 'notifications', id), { read: true }).catch((err) => {
+      console.error('markAsRead Firestore:', err);
+    });
   }, []);
 
   const markAllAsRead = useCallback(() => {
-    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    setNotifications((prev) => {
+      const unread = prev.filter((n) => !n.read);
+
+      if (unread.length > 0) {
+        const batch = writeBatch(db);
+        unread.forEach((n) => batch.update(doc(db, 'notifications', n.id), { read: true }));
+        batch.commit().catch((err) => {
+          console.error('markAllAsRead Firestore:', err);
+        });
+      }
+
+      return prev.map((n) => ({ ...n, read: true }));
+    });
   }, []);
 
   const showNotification = useCallback(
@@ -221,8 +247,14 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
     return `il y a ${Math.floor(diff / 86400)} j`;
   };
 
-  if (!isMounted) return <>{children}</>;
-
+  // ── FIX : le Provider est maintenant TOUJOURS monté ──────────
+  // Avant : `if (!isMounted) return <>{children}</>;` rendait les enfants
+  // SANS le Provider au tout premier render. Si un enfant appelait
+  // useNotifications() dès son propre premier render, ça jetait
+  // immédiatement "useNotifications must be used within NotificationProvider".
+  // Maintenant : on enveloppe toujours children dans le Provider, et seul
+  // l'affichage du bouton flottant custom reste conditionné par isMounted
+  // (pour éviter un mismatch d'hydratation SSR/client sur CE bouton précis).
   return (
     <NotificationContext.Provider
       value={{
@@ -237,7 +269,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
     >
       {/* Bouton flottant custom — UNIQUEMENT sur web, jamais sur APK natif
           (côté natif, la popup système se déclenche automatiquement, voir useEffect ci-dessus) */}
-      {user && !isNative && permission === 'default' && showNotifButton && (
+      {isMounted && user && !isNative && permission === 'default' && showNotifButton && (
         <div className="fixed bottom-24 left-4 z-50 flex items-center gap-1">
           <button
             onClick={requestPermission}

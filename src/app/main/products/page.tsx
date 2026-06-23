@@ -192,8 +192,40 @@ const encodeGeohash = (lat: number, lng: number, precision = 12): string => {
   return hash;
 };
 
+// ─── GPS : Capacitor (Android/iOS) ou Web selon la plateforme ────────────────
+
+const getCapacitorGPS = async (): Promise<{lat:number;lng:number;accuracy:number;heading:number;speed:number}|null> => {
+  try {
+    // @capacitor/geolocation est disponible uniquement dans le contexte natif
+    const { Geolocation } = await import('@capacitor/geolocation');
+    const perm = await Geolocation.requestPermissions();
+    if (perm.location !== 'granted') return null;
+    const pos = await Geolocation.getCurrentPosition({
+      enableHighAccuracy: true,
+      timeout: 20000,
+      maximumAge: 0,
+    });
+    return {
+      lat: pos.coords.latitude,
+      lng: pos.coords.longitude,
+      accuracy: pos.coords.accuracy ?? 50,
+      heading: pos.coords.heading ?? 0,
+      speed: pos.coords.speed ?? 0,
+    };
+  } catch {
+    return null;
+  }
+};
+
 const getUltimateGPS = (): Promise<{lat:number;lng:number;accuracy:number;heading:number;speed:number}> =>
-  new Promise((resolve, reject) => {
+  new Promise(async (resolve, reject) => {
+    // Essai Capacitor en premier (Android WebView)
+    try {
+      const cap = await getCapacitorGPS();
+      if (cap) { resolve(cap); return; }
+    } catch { /* pas de Capacitor, continuer avec Web */ }
+
+    // Fallback : Web Geolocation API (navigateur standard)
     const kalman = new KalmanFilter2D();
     let readings: any[] = [];
     let bestAccuracy = Infinity, bestPos: any = null;
@@ -251,7 +283,10 @@ const reverseGeocodeOSM = async (lat: number, lng: number) => {
     const stateRaw = a.state || '';
     const detailedAddress = [poi||street, quarter, locality, a.state_district||'', stateRaw].filter(Boolean).join(', ') || 'Sénégal';
     const address = [locality||a.state_district, stateRaw].filter(Boolean).join(', ') || 'Sénégal';
-    return { address, detailedAddress, quarter, commune:locality, dept:a.state_district||'', region:stateRaw };
+    // Pour le Sénégal, la commune est dans suburb/city_district (ex: Diamaguène),
+    // pas dans city (qui donne la ville parent ex: Pikine).
+    const commune = a.suburb || a.city_district || a.neighbourhood || a.quarter || locality;
+    return { address, detailedAddress, quarter, commune, dept:a.state_district||'', region:stateRaw };
   } catch { return null; }
 };
 
@@ -646,11 +681,8 @@ export default function AgriMarket() {
       setSearch(text);
       setVoiceConfidence(confidence);
       if (isFinal) {
-        // Une phrase suffit pour une recherche : on referme l'écoute proprement.
-        engine.stopListening();
-        setListening(false);
-        setVoiceVolume(0);
-        setVoiceWhisper(false);
+        // Vibration de confirmation mais on garde l'écoute active (mode continu)
+        // L'utilisateur arrête lui-même en appuyant sur le bouton micro.
         if (navigator.vibrate) navigator.vibrate([10, 5, 10]);
       }
     });
@@ -816,28 +848,36 @@ export default function AgriMarket() {
       const inSenegal = finalLat >= 12.0 && finalLat <= 16.8 && finalLng >= -17.6 && finalLng <= -11.2;
       if (!inSenegal) {
         console.warn('🚫 Position hors Sénégal détectée, rejetée:', { finalLat, finalLng });
-        setLocStatus('error');
+        // Position hors Sénégal : afficher Sénégal par défaut
+        setLocation({ address: 'Sénégal', lat: 14.7167, lng: -17.4677, precision: 10000, detailedAddress: 'Sénégal', region: '' });
+        setLocStatus('found');
         return;
       }
 
       const regionRaw = bestAddr?.region || ipData?.region || '';
       const region = REGION_ALIASES[regionRaw] || regionRaw;
 
+      // Toujours afficher : commune + région (jamais l'adresse de rue)
+      const commune = bestAddr?.commune || bestAddr?.quarter || '';
+      const displayAddress = commune && region
+        ? `${commune}, ${region}`
+        : commune || region || 'Sénégal';
+
       setLocation({
-        address: bestAddr?.address || 'Sénégal',
+        address: displayAddress,
         lat: finalLat, lng: finalLng,
         precision: finalAccuracy,
-        detailedAddress: bestAddr?.detailedAddress || bestAddr?.address || 'Sénégal',
+        detailedAddress: displayAddress,
         region
       });
-      // La région détectée par GPS n'est plus utilisée pour filtrer les produits :
-      // la localisation est désormais purement informative.
       setLocStatus('found');
 
       console.log('🎯 LOCALISATION:', { précision:`${finalAccuracy.toFixed(1)}m`, confiance:`${confidence.toFixed(0)}%`, adresse:bestAddr?.detailedAddress, geohash: encodeGeohash(finalLat, finalLng, 9) });
     } catch (error) {
       console.error('Localisation error:', error);
-      setLocStatus('error');
+      // Erreur GPS : afficher Sénégal par défaut
+      setLocation({ address: 'Sénégal', lat: 14.7167, lng: -17.4677, precision: 10000, detailedAddress: 'Sénégal', region: '' });
+      setLocStatus('found');
     }
   }, []);
 
@@ -850,9 +890,8 @@ export default function AgriMarket() {
             setTimeout(() => getDivineLocation(), 300);
             return;
           }
-          // Permission explicitement refusée : on ne tente plus l'IP en silence
-          // (source de fausses positions). On laisse l'utilisateur l'activer.
-          setLocStatus('error');
+          // Permission refusée → fallback silencieux sur IP
+          setTimeout(() => getDivineLocation(), 300);
           return;
         }
         setTimeout(() => getDivineLocation(), 300);
@@ -1867,20 +1906,11 @@ export default function AgriMarket() {
             <div className={`g-loc-pulse ${locStatus}`} />
             <span className="g-loc-text" style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {locStatus === 'searching' ? 'Localisation...' :
-               locStatus === 'error'     ? '📍 Activer la localisation' :
+               locStatus === 'error'     ? 'Sénégal' :
                location?.detailedAddress || location?.address || 'Sénégal'}
             </span>
           </button>
 
-          {/* ✅ Lien séparé pour corriger manuellement (région/département/commune),
-              utile si la détection automatique échoue ou se trompe */}
-          <button
-            onClick={() => setShowLocModal(true)}
-            style={{ background: 'none', border: 'none', padding: 0, flexShrink: 0, fontSize: 11, color: 'rgba(255,255,255,0.45)', textDecoration: 'underline', cursor: 'pointer' }}
-            title="Corriger ma localisation manuellement"
-          >
-            modifier
-          </button>
 
           {/* Dropdown filtre région et compteur de produits retirés — la localisation suffit */}
         </div>
@@ -2255,6 +2285,34 @@ export default function AgriMarket() {
                 🛒 Panier
               </button>
             </div>
+
+            {recommendationSections.length > 0 && (
+              <div style={{ margin: '0 20px 4px', padding: '12px 16px', background: 'rgba(37,137,74,0.06)', border: '1px solid rgba(37,137,74,0.15)', borderRadius: 14 }}>
+                <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: '0.1em', color: 'var(--sage)', textTransform: 'uppercase', marginBottom: 10 }}>
+                  ✦ Suggestions personnalisées
+                </div>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
+                  <tbody>
+                    {[
+                      { icon: '📍', label: 'Région',      desc: 'Produits populaires dans votre région',          prio: 1 },
+                      { icon: '👨‍🌾', label: 'Producteur',  desc: 'Autres produits du même producteur',             prio: 2 },
+                      { icon: '📍', label: 'Proximité',   desc: 'Produits les plus proches géographiquement (GPS)',prio: 3 },
+                      { icon: '📂', label: 'Catégorie',   desc: 'Produits de la même catégorie',                  prio: 4 },
+                    ]
+                    .filter(row => recommendationSections.some(s => s.badge.includes(row.label)))
+                    .map(row => (
+                      <tr key={row.label}>
+                        <td style={{ padding: '4px 6px 4px 0', color: 'var(--jade)', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                          {row.icon} {row.label}
+                        </td>
+                        <td style={{ padding: '4px 0', color: 'var(--mtext)' }}>{row.desc}</td>
+                        <td style={{ padding: '4px 0 4px 8px', color: 'var(--dtext)', fontWeight: 700, textAlign: 'right' }}>#{row.prio}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
 
             {recommendationSections.map(section => (
               <div key={section.title} className="g-recs">

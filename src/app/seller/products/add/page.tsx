@@ -5,778 +5,504 @@ import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import { db, storage } from '@/lib/firebase/firebase';
 import { collection, addDoc, serverTimestamp, doc, getDoc } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import {
-  Package, Plus, Loader2, ArrowLeft, X,
-  Sparkles, Leaf, CheckCircle, AlertCircle, Image as ImageIcon,
-  Wand2, Camera, Zap, Star, Heart, Shield,
-  Gem, Crown
-} from 'lucide-react';
+import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
+import { Package, Plus, Loader2, ArrowLeft, X, CheckCircle, AlertCircle, Camera, Leaf } from 'lucide-react';
 import Image from 'next/image';
 import Link from 'next/link';
 
-// Configuration API Remove.bg
-const REMOVE_BG_API_KEY = process.env.NEXT_PUBLIC_REMOVE_BG_API_KEY;
+// ─── Config ───────────────────────────────────────────────────────────────────
 const MAX_IMAGES = 5;
-const MAX_DIMENSION = 1280; // largeur/hauteur max apres compression
-const JPEG_QUALITY = 0.8;
+const MAX_DIMENSION = 800;   // px — petit = léger = rapide sur 3G
+const JPEG_QUALITY = 0.65;   // bon compromis qualité/poids
 
-// Compresse et redimensionne une image cote client avant upload (accelere fortement l'envoi)
-const compressImage = (file: File): Promise<File> => {
-  return new Promise((resolve) => {
-    // On ne compresse pas les GIF (animations) pour ne pas casser l'animation
-    if (file.type === 'image/gif') {
-      resolve(file);
-      return;
-    }
-
-    const img = document.createElement('img');
-    const objectUrl = URL.createObjectURL(file);
-
-    img.onload = () => {
-      let { width, height } = img;
-
-      if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
-        if (width > height) {
-          height = Math.round((height * MAX_DIMENSION) / width);
-          width = MAX_DIMENSION;
-        } else {
-          width = Math.round((width * MAX_DIMENSION) / height);
-          height = MAX_DIMENSION;
-        }
-      }
-
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-
-      if (!ctx) {
-        URL.revokeObjectURL(objectUrl);
-        resolve(file);
-        return;
-      }
-
-      ctx.drawImage(img, 0, 0, width, height);
-      URL.revokeObjectURL(objectUrl);
-
-      canvas.toBlob(
-        (blob) => {
-          if (!blob) {
-            resolve(file);
-            return;
-          }
-          // Si la compression fait gonfler le fichier (rare), on garde l'original
-          if (blob.size >= file.size) {
-            resolve(file);
-            return;
-          }
-          const compressedFile = new File(
-            [blob],
-            file.name.replace(/\.(png|jpe?g|webp)$/i, '.jpg'),
-            { type: 'image/jpeg' }
-          );
-          resolve(compressedFile);
-        },
-        'image/jpeg',
-        JPEG_QUALITY
-      );
-    };
-
-    img.onerror = () => {
-      URL.revokeObjectURL(objectUrl);
-      resolve(file);
-    };
-
-    img.src = objectUrl;
-  });
-};
-
-// Categories completes (sans emojis)
 const CATEGORIES = [
-  { id: 'tous', label: 'Tous', color: 'bg-gray-500' },
-  { id: 'fruits', label: 'Fruits', color: 'bg-red-500' },
-  { id: 'legumes', label: 'Legumes', color: 'bg-green-500' },
-  { id: 'cereales', label: 'Cereales', color: 'bg-amber-500' },
-  { id: 'tubercules', label: 'Tubercules', color: 'bg-orange-500' },
-  { id: 'machines_agricoles', label: 'Machines agricoles', color: 'bg-blue-600' },
-  { id: 'condiments', label: 'Condiments', color: 'bg-yellow-600' },
-  { id: 'poissons', label: 'Poissons', color: 'bg-cyan-500' },
-  { id: 'produits_laitiers', label: 'Produits laitiers', color: 'bg-sky-500' },
-  { id: 'legumineuses', label: 'Legumineuses', color: 'bg-emerald-600' },
-  { id: 'engrais', label: 'Engrais', color: 'bg-lime-600' },
-  { id: 'boissons_locales', label: 'Boissons locales', color: 'bg-teal-600' },
+  { id: 'fruits', label: 'Fruits' },
+  { id: 'legumes', label: 'Légumes' },
+  { id: 'cereales', label: 'Céréales' },
+  { id: 'tubercules', label: 'Tubercules' },
+  { id: 'machines_agricoles', label: 'Machines agricoles' },
+  { id: 'condiments', label: 'Condiments' },
+  { id: 'poissons', label: 'Poissons' },
+  { id: 'produits_laitiers', label: 'Produits laitiers' },
+  { id: 'legumineuses', label: 'Légumineuses' },
+  { id: 'engrais', label: 'Engrais' },
+  { id: 'boissons_locales', label: 'Boissons locales' },
 ];
 
+// ─── Compression rapide ───────────────────────────────────────────────────────
+function compressImage(file: File): Promise<{ file: File; originalKb: number; compressedKb: number }> {
+  return new Promise((resolve) => {
+    if (file.type === 'image/gif') {
+      resolve({ file, originalKb: file.size / 1024, compressedKb: file.size / 1024 });
+      return;
+    }
+    const img = document.createElement('img');
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+        if (width > height) { height = Math.round(height * MAX_DIMENSION / width); width = MAX_DIMENSION; }
+        else { width = Math.round(width * MAX_DIMENSION / height); height = MAX_DIMENSION; }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width; canvas.height = height;
+      const ctx = canvas.getContext('2d')!;
+      ctx.filter = 'contrast(1.05) saturate(1.08) brightness(1.02)';
+      ctx.drawImage(img, 0, 0, width, height);
+      URL.revokeObjectURL(url);
+      canvas.toBlob((blob) => {
+        if (!blob || blob.size >= file.size) {
+          resolve({ file, originalKb: file.size / 1024, compressedKb: file.size / 1024 });
+          return;
+        }
+        const compressed = new File([blob], file.name.replace(/\.(png|jpe?g|webp)$/i, '.jpg'), { type: 'image/jpeg' });
+        resolve({ file: compressed, originalKb: file.size / 1024, compressedKb: compressed.size / 1024 });
+      }, 'image/jpeg', JPEG_QUALITY);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve({ file, originalKb: file.size / 1024, compressedKb: file.size / 1024 }); };
+    img.src = url;
+  });
+}
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+interface ImageEntry {
+  id: string;
+  localPreview: string; // blob URL — affiché immédiatement
+  uploadedUrl: string | null;
+  progress: number;     // 0-100
+  status: 'compressing' | 'uploading' | 'done' | 'error';
+  sizeInfo?: string;
+}
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
 export default function AddProductPage() {
   const router = useRouter();
   const { user } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  
-  const [loading, setLoading] = useState(false);
-  // Une entree par photo (jusqu'a MAX_IMAGES). index 0 = photo principale (nettoyee par IA).
-  const [images, setImages] = useState<{
-    preview: string;
-    uploading: boolean;
-    cleaning: boolean;
-    cleanedUrl: string | null;
-  }[]>([]);
-  const [aiConfidence, setAiConfidence] = useState(0);
-  const [formData, setFormData] = useState({
-    name: '',
-    description: '',
-    price: '',
-    originalPrice: '',
-    unit: 'kg',
-    stock: '',
-    category: 'legumes',
-  });
 
+  const [images, setImages] = useState<ImageEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [formData, setFormData] = useState({
+    name: '', description: '', price: '', originalPrice: '',
+    unit: 'kg', stock: '', category: 'legumes',
+  });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
-  // 🔒 Vérifier que le vendeur a rempli son profil avant d'ajouter un produit
+  // Vérif profil vendeur
   useEffect(() => {
     if (!user) return;
-    const checkProfile = async () => {
-      try {
-        const userDoc = await getDoc(doc(db, 'users', user.uid));
-        if (!userDoc.exists()) {
-          router.replace('/seller/register');
-          return;
-        }
-        const data = userDoc.data();
-        const isComplete = data.displayName?.trim() && data.phone?.trim() && data.region?.trim();
-        if (!isComplete) {
-          router.replace('/seller/register');
-        }
-      } catch (e) {
-        console.error('Vérification profil:', e);
-      }
-    };
-    checkProfile();
+    getDoc(doc(db, 'users', user.uid)).then((snap) => {
+      if (!snap.exists()) { router.replace('/seller/register'); return; }
+      const d = snap.data();
+      if (!d.displayName?.trim() || !d.phone?.trim() || !d.region?.trim())
+        router.replace('/seller/register');
+    }).catch(console.error);
   }, [user, router]);
 
-  const showToast = (type: 'success' | 'error', message: string) => {
-    setToast({ type, message });
+  const showToast = (type: 'success' | 'error', msg: string) => {
+    setToast({ type, message: msg });
     setTimeout(() => setToast(null), 4000);
   };
 
-  // Nettoyage image par IA (uniquement utilise pour la photo principale, index 0)
-  const cleanImageWithAI = async (file: File): Promise<string | null> => {
-    if (!REMOVE_BG_API_KEY) {
-      showToast('error', 'Configuration API manquante');
-      return null;
-    }
+  const updateImage = (id: string, patch: Partial<ImageEntry>) =>
+    setImages((prev) => prev.map((img) => img.id === id ? { ...img, ...patch } : img));
 
-    const formData = new FormData();
-    formData.append('image_file', file);
-    formData.append('size', 'auto');
-    formData.append('type', 'product');
-
-    const tStart = performance.now();
-    try {
-      const response = await fetch('https://api.remove.bg/v1.0/removebg', {
-        method: 'POST',
-        headers: {
-          'X-Api-Key': REMOVE_BG_API_KEY,
-        },
-        body: formData,
-      });
-      console.log(`[TIMING] Remove.bg reponse recue: ${(performance.now() - tStart).toFixed(0)}ms`);
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.errors?.[0]?.title || `Erreur ${response.status}`);
-      }
-
-      const tBlob = performance.now();
-      const blob = await response.blob();
-      console.log(`[TIMING] Remove.bg blob telecharge: ${(performance.now() - tBlob).toFixed(0)}ms`);
-      const cleanedFile = new File([blob], `ai_cleaned_${Date.now()}.png`, { type: 'image/png' });
-
-      const tUpload = performance.now();
-      const storageRef = ref(storage, `products/${user?.uid}/cleaned/${Date.now()}.png`);
-      await uploadBytes(storageRef, cleanedFile);
-      console.log(`[TIMING] Upload image nettoyee vers Storage: ${(performance.now() - tUpload).toFixed(0)}ms`);
-
-      const tUrl = performance.now();
-      const downloadUrl = await getDownloadURL(storageRef);
-      console.log(`[TIMING] getDownloadURL (nettoyee): ${(performance.now() - tUrl).toFixed(0)}ms`);
-
-      console.log(`[TIMING] === Total cleanImageWithAI: ${(performance.now() - tStart).toFixed(0)}ms ===`);
-      setAiConfidence(98);
-      return downloadUrl;
-    } catch (error: any) {
-      console.error('Erreur API Remove.bg:', error);
-      console.log(`[TIMING] cleanImageWithAI a echoue apres: ${(performance.now() - tStart).toFixed(0)}ms`);
-      showToast('error', `Nettoyage IA échoué: ${error.message}`);
-      return null;
-    }
-  };
-
+  // ─── Upload avec progression ──────────────────────────────────────────────
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    if (files.length === 0) return;
+    if (!files.length) return;
 
-    const remainingSlots = MAX_IMAGES - images.length;
-    if (remainingSlots <= 0) {
-      showToast('error', `Maximum ${MAX_IMAGES} photos par produit`);
-      return;
-    }
+    const slots = MAX_IMAGES - images.length;
+    if (slots <= 0) { showToast('error', `Maximum ${MAX_IMAGES} photos`); return; }
+    const candidates = files.slice(0, slots);
 
-    const candidateFiles = files.slice(0, remainingSlots);
-    if (files.length > remainingSlots) {
-      showToast('error', `Seulement ${remainingSlots} photo(s) ajoutée(s), limite de ${MAX_IMAGES} atteinte`);
-    }
-
-    // Validation rapide (format / taille) avant tout traitement
-    const validFiles = candidateFiles.filter((file) => {
-      if (!file.type.startsWith('image/')) {
-        showToast('error', 'Format non supporté (JPG, PNG, WebP uniquement)');
-        return false;
-      }
-      if (file.size > 8 * 1024 * 1024) {
-        showToast('error', 'Image trop lourde (max 8 Mo)');
-        return false;
-      }
+    const valid = candidates.filter((f) => {
+      if (!f.type.startsWith('image/')) { showToast('error', 'Format non supporté'); return false; }
+      if (f.size > 10 * 1024 * 1024) { showToast('error', 'Image trop lourde (max 10 Mo)'); return false; }
       return true;
     });
+    if (!valid.length) { if (fileInputRef.current) fileInputRef.current.value = ''; return; }
 
-    if (validFiles.length === 0) {
-      if (fileInputRef.current) fileInputRef.current.value = '';
-      return;
-    }
+    // 1. Créer aperçus locaux IMMÉDIATEMENT — le vendeur voit ses photos de suite
+    const entries: ImageEntry[] = valid.map((f) => ({
+      id: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+      localPreview: URL.createObjectURL(f),
+      uploadedUrl: null,
+      progress: 0,
+      status: 'compressing',
+    }));
+    setImages((prev) => [...prev, ...entries]);
 
-    const isFirstBatch = images.length === 0;
+    // 2. Compresser + uploader en parallèle avec progression
+    await Promise.all(valid.map(async (file, i) => {
+      const entry = entries[i];
+      try {
+        // Compression
+        const { file: compressed, originalKb, compressedKb } = await compressImage(file);
+        const saved = Math.round(100 - (compressedKb / originalKb) * 100);
+        updateImage(entry.id, {
+          status: 'uploading',
+          progress: 5,
+          sizeInfo: saved > 5 ? `-${saved}%` : undefined,
+        });
 
-    // Generer tous les apercus locaux d'abord, pour affichage immediat de la grille
-    const previews = await Promise.all(
-      validFiles.map(
-        (file) =>
-          new Promise<string>((resolve) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result as string);
-            reader.readAsDataURL(file);
-          })
-      )
-    );
+        // Upload avec progression réelle
+        const storageRef = ref(storage, `products/${user?.uid}/${Date.now()}_${compressed.name}`);
+        const task = uploadBytesResumable(storageRef, compressed);
 
-    setImages((prev) => [
-      ...prev,
-      ...previews.map((preview, i) => ({
-        preview,
-        uploading: true,
-        cleaning: isFirstBatch && i === 0,
-        cleanedUrl: null,
-      })),
-    ]);
-
-    // Traiter (compresser + uploader) toutes les photos en parallele
-    const tBatchStart = performance.now();
-    console.log(`[TIMING] === Debut traitement de ${validFiles.length} photo(s) en parallele ===`);
-
-    await Promise.all(
-      validFiles.map(async (file, i) => {
-        const localPreview = previews[i];
-        const isMainPhoto = isFirstBatch && i === 0;
-        const label = `photo${i + 1}${isMainPhoto ? ' (principale)' : ''}`;
-        const tPhotoStart = performance.now();
-        console.log(`[TIMING] ${label}: taille originale = ${(file.size / 1024).toFixed(0)} Ko`);
-
-        try {
-          const tCompress = performance.now();
-          const compressedFile = await compressImage(file);
-          console.log(
-            `[TIMING] ${label}: compression = ${(performance.now() - tCompress).toFixed(0)}ms (${(file.size / 1024).toFixed(0)} Ko -> ${(compressedFile.size / 1024).toFixed(0)} Ko)`
-          );
-
-          const tUpload = performance.now();
-          const originalRef = ref(
-            storage,
-            `products/${user?.uid}/originals/${Date.now()}_${compressedFile.name}`
-          );
-          await uploadBytes(originalRef, compressedFile);
-          console.log(`[TIMING] ${label}: uploadBytes (original) = ${(performance.now() - tUpload).toFixed(0)}ms`);
-
-          const tUrl = performance.now();
-          const originalUrl = await getDownloadURL(originalRef);
-          console.log(`[TIMING] ${label}: getDownloadURL (original) = ${(performance.now() - tUrl).toFixed(0)}ms`);
-
-          if (isMainPhoto) {
-            const tAi = performance.now();
-            const cleanedUrl = await cleanImageWithAI(compressedFile);
-            console.log(`[TIMING] ${label}: cleanImageWithAI total = ${(performance.now() - tAi).toFixed(0)}ms`);
-            setImages((prev) => {
-              const next = [...prev];
-              const idx = next.findIndex((img) => img.preview === localPreview);
-              if (idx !== -1) {
-                next[idx] = {
-                  ...next[idx],
-                  preview: cleanedUrl || originalUrl,
-                  uploading: false,
-                  cleaning: false,
-                  cleanedUrl: cleanedUrl,
-                };
-              }
-              return next;
-            });
-            if (cleanedUrl) {
-              showToast('success', 'Photo principale nettoyée par IA !');
+        await new Promise<void>((resolve, reject) => {
+          task.on('state_changed',
+            (snap) => {
+              const pct = Math.round((snap.bytesTransferred / snap.totalBytes) * 100);
+              updateImage(entry.id, { progress: pct });
+            },
+            (err) => { reject(err); },
+            async () => {
+              const url = await getDownloadURL(task.snapshot.ref);
+              updateImage(entry.id, { uploadedUrl: url, status: 'done', progress: 100 });
+              resolve();
             }
-          } else {
-            setImages((prev) => {
-              const next = [...prev];
-              const idx = next.findIndex((img) => img.preview === localPreview);
-              if (idx !== -1) {
-                next[idx] = { ...next[idx], preview: originalUrl, uploading: false, cleaning: false };
-              }
-              return next;
-            });
-          }
-          console.log(`[TIMING] ${label}: TOTAL = ${(performance.now() - tPhotoStart).toFixed(0)}ms`);
-        } catch (error) {
-          console.error('Upload error:', error);
-          showToast('error', 'Erreur lors de l\'upload');
-          setImages((prev) => prev.filter((img) => img.preview !== localPreview));
-        }
-      })
-    );
+          );
+        });
+      } catch {
+        updateImage(entry.id, { status: 'error', progress: 0 });
+        showToast('error', "Erreur d'upload, réessayez");
+      }
+    }));
 
-    console.log(`[TIMING] === Batch complet (${validFiles.length} photo(s)) en ${(performance.now() - tBatchStart).toFixed(0)}ms ===`);
-
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  const removeImage = (index: number) => {
-    setImages((prev) => prev.filter((_, i) => i !== index));
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
-  };
-
-  // Permet de promouvoir une photo existante en photo principale (reordonne le tableau)
-  const setMainImage = (index: number) => {
-    if (index === 0) return;
+  const removeImage = (id: string) => {
     setImages((prev) => {
+      const img = prev.find((i) => i.id === id);
+      if (img?.localPreview.startsWith('blob:')) URL.revokeObjectURL(img.localPreview);
+      return prev.filter((i) => i.id !== id);
+    });
+  };
+
+  const setMainImage = (id: string) => {
+    setImages((prev) => {
+      const idx = prev.findIndex((i) => i.id === id);
+      if (idx <= 0) return prev;
       const next = [...prev];
-      const [chosen] = next.splice(index, 1);
-      next.unshift(chosen);
+      const [item] = next.splice(idx, 1);
+      next.unshift(item);
       return next;
     });
   };
 
-  const validateForm = () => {
-    const newErrors: Record<string, string> = {};
-    if (!formData.name.trim()) newErrors.name = 'Nom du produit requis';
-    if (formData.name.length < 3) newErrors.name = 'Minimum 3 caracteres';
-    if (formData.name.length > 50) newErrors.name = 'Maximum 50 caracteres';
-    if (!formData.price || Number(formData.price) <= 0) newErrors.price = 'Prix valide requis';
-    if (Number(formData.price) > 1000000) newErrors.price = 'Prix maximum: 1 000 000 FCFA';
-    if (formData.stock && Number(formData.stock) < 0) newErrors.stock = 'Stock invalide';
-    if (!images.length) newErrors.image = 'Ajoutez au moins une photo du produit';
-    
-    setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
+  // ─── Validation ───────────────────────────────────────────────────────────
+  const validate = () => {
+    const e: Record<string, string> = {};
+    if (!formData.name.trim() || formData.name.length < 3) e.name = 'Minimum 3 caractères';
+    if (formData.name.length > 50) e.name = 'Maximum 50 caractères';
+    if (!formData.price || Number(formData.price) <= 0) e.price = 'Prix valide requis';
+    if (Number(formData.price) > 1000000) e.price = 'Prix max: 1 000 000 FCFA';
+    if (formData.stock && Number(formData.stock) < 0) e.stock = 'Stock invalide';
+    if (!images.filter(i => i.status === 'done').length) e.image = 'Ajoutez au moins une photo';
+    setErrors(e);
+    return !Object.keys(e).length;
   };
 
+  // ─── Submit ───────────────────────────────────────────────────────────────
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user) {
-      showToast('error', 'Connexion requise');
-      router.push('/auth/login');
-      return;
-    }
-    if (!validateForm()) return;
-
+    if (!user) { router.push('/auth/login'); return; }
+    if (!validate()) return;
     setLoading(true);
     try {
-      const imageUrls = images.map((img) => img.cleanedUrl || img.preview);
-
-      const productData = {
+      const imageUrls = images.filter(i => i.uploadedUrl).map(i => i.uploadedUrl!);
+      await addDoc(collection(db, 'products'), {
         sellerId: user.uid,
         name: formData.name.trim(),
-        description: formData.description.trim() || 'Produit de qualite, directement du producteur',
+        description: formData.description.trim() || 'Produit de qualité, directement du producteur',
         price: Number(formData.price),
-        originalPrice: formData.originalPrice && Number(formData.originalPrice) > Number(formData.price) ? Number(formData.originalPrice) : null,
+        originalPrice: formData.originalPrice && Number(formData.originalPrice) > Number(formData.price)
+          ? Number(formData.originalPrice) : null,
         unit: formData.unit,
         stock: formData.stock === '' ? -1 : Number(formData.stock),
         category: formData.category,
         categoryLabel: CATEGORIES.find(c => c.id === formData.category)?.label || formData.category,
-        status: 'active',
-        sales: 0,
-        images: imageUrls,
-        aiEnhanced: !!images[0]?.cleanedUrl,
-        aiConfidence: aiConfidence,
+        status: 'active', sales: 0, images: imageUrls,
         createdAt: serverTimestamp(),
         updatedAt: new Date().toISOString(),
-      };
+      });
 
-      await addDoc(collection(db, 'products'), productData);
-      showToast('success', 'Produit ajouté avec succès !');
+      fetch('/api/notifications/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: 'all',
+          title: '🌾 Nouveau produit disponible !',
+          body: `${formData.name} - ${Number(formData.price).toLocaleString()} FCFA`,
+          link: '/main/products',
+        }),
+      }).catch(console.error);
 
-      // ✅ ENVOI DE LA NOTIFICATION À TOUS LES UTILISATEURS
-      try {
-        await fetch('/api/notifications/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            userId: 'all',
-            title: '🌾 Nouveau produit disponible !',
-            body: `${formData.name} - ${Number(formData.price).toLocaleString()} FCFA`,
-            link: '/main/products',
-          }),
-        });
-      } catch (notifError) {
-        console.error('Erreur lors de l\'envoi de la notification:', notifError);
-      }
-      
-      setTimeout(() => {
-        router.push('/seller/dashboard');
-      }, 2000);
-    } catch (error) {
-      console.error('Erreur:', error);
-      showToast('error', 'Erreur lors de l\'ajout du produit');
+      showToast('success', 'Produit ajouté !');
+      setTimeout(() => router.push('/seller/dashboard'), 1500);
+    } catch {
+      showToast('error', "Erreur lors de l'ajout");
     } finally {
       setLoading(false);
     }
   };
 
-  if (!user) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-teal-100 flex items-center justify-center p-4">
-        <div className="bg-white/90 backdrop-blur rounded-3xl p-8 text-center max-w-md shadow-2xl">
-          <div className="w-20 h-20 bg-gradient-to-br from-emerald-500 to-teal-500 rounded-2xl flex items-center justify-center mx-auto mb-4">
-            <Package size={32} className="text-white" />
-          </div>
-          <h2 className="text-2xl font-bold mb-2">Bienvenue !</h2>
-          <p className="text-gray-500 mb-6">Connectez-vous pour ajouter vos produits</p>
-          <button 
-            onClick={() => router.push('/auth/login')} 
-            className="bg-gradient-to-r from-emerald-600 to-teal-600 text-white px-8 py-3 rounded-xl font-semibold hover:scale-105 transition"
-          >
-            Se connecter
-          </button>
-        </div>
+  if (!user) return (
+    <div className="min-h-screen bg-emerald-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl p-8 text-center shadow-lg max-w-sm w-full">
+        <Package size={36} className="text-emerald-500 mx-auto mb-3" />
+        <h2 className="text-lg font-bold mb-4">Connexion requise</h2>
+        <button onClick={() => router.push('/auth/login')} className="w-full bg-emerald-600 text-white py-3 rounded-xl font-semibold">
+          Se connecter
+        </button>
       </div>
-    );
-  }
+    </div>
+  );
 
-  const selectedCategory = CATEGORIES.find(c => c.id === formData.category);
+  const anyUploading = images.some(i => i.status === 'compressing' || i.status === 'uploading');
+  const allDone = images.length > 0 && images.every(i => i.status === 'done' || i.status === 'error');
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-emerald-50/30 via-white to-teal-50/30 pb-24">
+    <div className="min-h-screen bg-gray-50 pb-24">
+
+      {/* Toast */}
       {toast && (
-        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 animate-slideDown">
-          <div className={`flex items-center gap-2 px-5 py-3 rounded-xl shadow-xl backdrop-blur ${
-            toast.type === 'success' 
-              ? 'bg-emerald-500 text-white' 
-              : 'bg-rose-500 text-white'
+        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-50" style={{ animation: 'slideDown .25s ease-out' }}>
+          <div className={`flex items-center gap-2 px-4 py-3 rounded-xl shadow-xl text-white text-sm font-medium ${
+            toast.type === 'success' ? 'bg-emerald-500' : 'bg-rose-500'
           }`}>
-            {toast.type === 'success' ? <Sparkles size={18} /> : <AlertCircle size={18} />}
-            <span className="font-medium text-sm">{toast.message}</span>
+            {toast.type === 'success' ? <CheckCircle size={15} /> : <AlertCircle size={15} />}
+            {toast.message}
           </div>
         </div>
       )}
 
-      <div className="max-w-lg mx-auto px-4 py-6">
-        <div className="flex items-center justify-between mb-8">
-          <Link href="/seller/dashboard" className="group flex items-center gap-2 text-gray-600 hover:text-emerald-600 transition">
-            <ArrowLeft size={18} />
-            <span className="text-sm font-medium">Retour</span>
+      <div className="max-w-lg mx-auto px-4 py-5">
+
+        {/* Header */}
+        <div className="flex items-center gap-3 mb-6">
+          <Link href="/seller/dashboard" className="p-2 rounded-xl bg-white shadow-sm border border-gray-100">
+            <ArrowLeft size={18} className="text-gray-600" />
           </Link>
-          <div className="text-center">
-            <h1 className="text-2xl font-black bg-gradient-to-r from-emerald-600 to-teal-600 bg-clip-text text-transparent flex items-center gap-2">
-              <Gem size={22} className="text-emerald-500" />
-              Nouveau produit
-            </h1>
-            <p className="text-[10px] text-gray-400 mt-1">Optimise par IA</p>
-          </div>
-          <div className="w-16" />
+          <h1 className="text-lg font-black text-gray-800 flex items-center gap-2">
+            <Leaf size={18} className="text-emerald-500" />
+            Nouveau produit
+          </h1>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-6">
-          {/* Upload Images (jusqu'a 5 photos) */}
-          <div className="bg-white/80 backdrop-blur-sm rounded-2xl p-6 shadow-xl border border-white/50">
-            <label className="block font-bold text-gray-800 mb-3 flex items-center gap-2">
-              <Camera size={18} className="text-emerald-500" />
-              Photos du produit
-              <span className="text-xs font-normal text-gray-400">({images.length}/{MAX_IMAGES})</span>
-              {images.some((img) => img.cleaning) && (
-                <span className="ml-1 text-xs text-emerald-600 flex items-center gap-1">
-                  <Loader2 size={12} className="animate-spin" />
-                  IA en action...
+        <form onSubmit={handleSubmit} className="space-y-4">
+
+          {/* ── Photos ── */}
+          <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+            <div className="flex items-center justify-between mb-3">
+              <label className="flex items-center gap-2 font-bold text-gray-800 text-sm">
+                <Camera size={15} className="text-emerald-500" />
+                Photos
+                <span className="text-gray-400 font-normal">({images.length}/{MAX_IMAGES})</span>
+              </label>
+              {anyUploading && (
+                <span className="text-xs text-emerald-600 flex items-center gap-1">
+                  <Loader2 size={11} className="animate-spin" /> En cours...
                 </span>
               )}
-            </label>
+              {allDone && images.length > 0 && (
+                <span className="text-xs text-emerald-600 flex items-center gap-1">
+                  <CheckCircle size={11} /> Prêt
+                </span>
+              )}
+            </div>
 
-            <div className="grid grid-cols-3 gap-3">
-              {images.map((img, index) => (
-                <div key={index} className="relative">
+            <div className="grid grid-cols-3 gap-2">
+              {images.map((img, idx) => (
+                <div key={img.id} className="relative">
                   <div
-                    onClick={() => index !== 0 && setMainImage(index)}
-                    className={`relative aspect-square w-full rounded-xl overflow-hidden bg-gradient-to-br from-gray-100 to-gray-50 shadow-lg ${
-                      index !== 0 ? 'cursor-pointer' : ''
+                    onClick={() => img.status === 'done' && idx !== 0 && setMainImage(img.id)}
+                    className={`relative aspect-square rounded-xl overflow-hidden bg-gray-100 ${
+                      img.status === 'done' && idx !== 0 ? 'cursor-pointer' : ''
                     }`}
                   >
-                    <Image src={img.preview} alt={`Photo ${index + 1}`} fill className="object-contain" />
-                    {img.cleaning && (
-                      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center">
-                        <Loader2 size={20} className="animate-spin text-white" />
+                    {/* Aperçu local immédiat */}
+                    <Image src={img.localPreview} alt="" fill className="object-cover" unoptimized />
+
+                    {/* Overlay progression */}
+                    {(img.status === 'compressing' || img.status === 'uploading') && (
+                      <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-1">
+                        {/* Barre de progression */}
+                        <div className="w-3/4 h-1.5 bg-white/30 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-white rounded-full transition-all duration-300"
+                            style={{ width: `${img.status === 'compressing' ? 5 : img.progress}%` }}
+                          />
+                        </div>
+                        <span className="text-white text-[10px] font-bold">
+                          {img.status === 'compressing' ? 'Optimisation...' : `${img.progress}%`}
+                        </span>
                       </div>
                     )}
-                    {img.cleanedUrl && !img.cleaning && (
-                      <div className="absolute top-1.5 right-1.5 bg-gradient-to-r from-emerald-500 to-teal-500 text-white rounded-full p-1 shadow-lg">
-                        <CheckCircle size={12} />
+
+                    {/* Erreur */}
+                    {img.status === 'error' && (
+                      <div className="absolute inset-0 bg-rose-500/80 flex items-center justify-center">
+                        <AlertCircle size={20} className="text-white" />
                       </div>
                     )}
-                    {index === 0 && (
-                      <div className="absolute top-1.5 left-1.5 bg-emerald-600 text-white rounded-md px-1.5 py-0.5 text-[9px] font-bold shadow">
+
+                    {/* Badge principale */}
+                    {idx === 0 && img.status === 'done' && (
+                      <div className="absolute top-1 left-1 bg-emerald-600 text-white text-[8px] font-bold px-1.5 py-0.5 rounded">
                         Principale
                       </div>
                     )}
+
+                    {/* Badge taille économisée */}
+                    {img.sizeInfo && img.status === 'done' && (
+                      <div className="absolute bottom-1 right-1 bg-black/50 text-white text-[8px] px-1 py-0.5 rounded">
+                        {img.sizeInfo}
+                      </div>
+                    )}
                   </div>
+
+                  {/* Supprimer */}
                   <button
                     type="button"
-                    onClick={() => removeImage(index)}
-                    className="absolute -top-2 -right-2 bg-rose-500 text-white rounded-full p-1 shadow-lg hover:bg-rose-600 transition"
+                    onClick={() => removeImage(img.id)}
+                    className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-rose-500 text-white rounded-full flex items-center justify-center shadow"
                   >
-                    <X size={12} />
+                    <X size={10} />
                   </button>
                 </div>
               ))}
 
+              {/* Bouton ajouter */}
               {images.length < MAX_IMAGES && (
-                <div
+                <button
+                  type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="relative aspect-square w-full border-2 border-dashed border-gray-200 rounded-xl flex flex-col items-center justify-center cursor-pointer hover:border-emerald-400 hover:bg-emerald-50/30 transition-all group"
+                  className="aspect-square border-2 border-dashed border-gray-200 rounded-xl flex flex-col items-center justify-center hover:border-emerald-400 hover:bg-emerald-50 transition"
                 >
-                  <div className="w-10 h-10 bg-gradient-to-br from-emerald-100 to-teal-100 rounded-xl flex items-center justify-center mb-1 group-hover:scale-110 transition shadow">
-                    <Plus size={20} className="text-emerald-600" />
-                  </div>
-                  <p className="text-[10px] text-gray-400 text-center px-1">Ajouter</p>
-                </div>
+                  <Plus size={22} className="text-emerald-400 mb-0.5" />
+                  <span className="text-[9px] text-gray-400">Photo</span>
+                </button>
               )}
             </div>
 
-            {images.length === 0 && (
-              <div className="mt-3 text-center">
-                <p className="text-xs text-gray-400">JPG, PNG, WebP (max 8 Mo par photo)</p>
-                <div className="mt-3 inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-emerald-500 to-teal-500 text-white rounded-full text-xs font-bold shadow-md">
-                  <Wand2 size={14} />
-                  IA : Suppression fond automatique sur la photo principale
-                </div>
-              </div>
-            )}
+            <input ref={fileInputRef} type="file" accept="image/*" multiple onChange={handleImageUpload} className="hidden" />
+            {errors.image && <p className="text-rose-500 text-xs mt-2">{errors.image}</p>}
 
-            {images.length > 0 && (
-              <p className="text-[10px] text-gray-400 mt-3 text-center">
-                Astuce : touchez une photo pour la définir comme photo principale
-              </p>
-            )}
-
-            {images[0]?.cleanedUrl && !images[0]?.cleaning && (
-              <div className="mt-2 text-center">
-                <p className="text-xs text-emerald-600 font-medium flex items-center justify-center gap-1">
-                  <Star size={12} className="fill-emerald-500" />
-                  Photo principale nettoyée par IA
-                  <Shield size={10} />
-                </p>
-              </div>
-            )}
-
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              multiple
-              onChange={handleImageUpload}
-              className="hidden"
-            />
-            {errors.image && <p className="text-rose-500 text-xs mt-2 text-center">{errors.image}</p>}
+            <p className="text-[10px] text-gray-400 text-center mt-2">
+              Photos optimisées automatiquement · JPG PNG WebP · max 10 Mo
+            </p>
           </div>
 
-          {/* Formulaire produit */}
-          <div className="bg-white/80 backdrop-blur-sm rounded-2xl p-6 shadow-xl border border-white/50 space-y-5">
+          {/* ── Formulaire ── */}
+          <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 space-y-3">
+
             <div>
-              <label className="block text-sm font-bold text-gray-800 mb-2">
+              <label className="block text-sm font-bold text-gray-700 mb-1">
                 Nom du produit <span className="text-emerald-500">*</span>
               </label>
               <input
-                type="text"
-                value={formData.name}
+                type="text" value={formData.name}
                 onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                placeholder="Ex: Tomates bio coeur de boeuf"
-                className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 outline-none transition"
+                placeholder="Ex: Tomates, Mil local, Mangues..."
+                className="w-full px-3 py-2.5 rounded-xl border border-gray-200 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-50 outline-none text-sm"
               />
               {errors.name && <p className="text-rose-500 text-xs mt-1">{errors.name}</p>}
             </div>
 
             <div>
-              <label className="block text-sm font-bold text-gray-800 mb-2">Description</label>
+              <label className="block text-sm font-bold text-gray-700 mb-1">Description</label>
               <textarea
                 value={formData.description}
                 onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                rows={3}
-                placeholder="Décrivez votre produit (origine, qualite, certification...)"
-                className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 outline-none transition resize-none"
+                rows={2} placeholder="Origine, qualité..."
+                className="w-full px-3 py-2.5 rounded-xl border border-gray-200 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-50 outline-none resize-none text-sm"
               />
-              <p className="text-[10px] text-gray-400 mt-1">Optionnel mais recommande</p>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block text-sm font-bold text-gray-800 mb-2">
+                <label className="block text-sm font-bold text-gray-700 mb-1">
                   Prix <span className="text-emerald-500">*</span>
                 </label>
                 <div className="relative">
                   <input
-                    type="number"
-                    value={formData.price}
+                    type="number" value={formData.price}
                     onChange={(e) => setFormData({ ...formData, price: e.target.value })}
                     placeholder="0"
-                    className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 outline-none"
+                    className="w-full px-3 py-2.5 rounded-xl border border-gray-200 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-50 outline-none text-sm"
                   />
-                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm font-medium">FCFA</span>
+                  <span className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 text-[10px]">FCFA</span>
                 </div>
                 {errors.price && <p className="text-rose-500 text-xs mt-1">{errors.price}</p>}
               </div>
-
               <div>
-                <label className="block text-sm font-bold text-gray-800 mb-2">
-                  Prix barré <span className="text-gray-400 text-xs font-normal">(optionnel)</span>
-                </label>
+                <label className="block text-sm font-bold text-gray-700 mb-1">Prix barré</label>
                 <div className="relative">
                   <input
-                    type="number"
-                    value={formData.originalPrice}
+                    type="number" value={formData.originalPrice}
                     onChange={(e) => setFormData({ ...formData, originalPrice: e.target.value })}
-                    placeholder="Ancien prix"
-                    className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 outline-none"
+                    placeholder="Optionnel"
+                    className="w-full px-3 py-2.5 rounded-xl border border-gray-200 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-50 outline-none text-sm"
                   />
-                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm font-medium">FCFA</span>
+                  <span className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 text-[10px]">FCFA</span>
                 </div>
-                {formData.originalPrice && Number(formData.originalPrice) <= Number(formData.price) && (
-                  <p className="text-amber-500 text-xs mt-1">Doit être supérieur au prix actuel</p>
-                )}
               </div>
-
               <div>
-                <label className="block text-sm font-bold text-gray-800 mb-2">Unite</label>
-                <select
-                  value={formData.unit}
-                  onChange={(e) => setFormData({ ...formData, unit: e.target.value })}
-                  className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 outline-none"
-                >
-                  <option value="kg">Kilogramme (kg)</option>
-                  <option value="tonne">Tonne (t)</option>
-                  <option value="g">Gramme (g)</option>
-                  <option value="l">Litre (L)</option>
-                  <option value="unite">Piece (unite)</option>
-                  <option value="botte">Botte</option>
-                  <option value="sachet">Sachet</option>
-                  <option value="bunch">Regime</option>
-                  <option value="douzaine">Douzaine</option>
+                <label className="block text-sm font-bold text-gray-700 mb-1">Unité</label>
+                <select value={formData.unit} onChange={(e) => setFormData({ ...formData, unit: e.target.value })}
+                  className="w-full px-3 py-2.5 rounded-xl border border-gray-200 focus:border-emerald-400 outline-none text-sm">
+                  {['kg','tonne','g','l','unite','botte','sachet','bunch','douzaine'].map(u =>
+                    <option key={u} value={u}>{u}</option>
+                  )}
                 </select>
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-1">Stock</label>
+                <input
+                  type="number" value={formData.stock}
+                  onChange={(e) => setFormData({ ...formData, stock: e.target.value })}
+                  placeholder="Illimité"
+                  className="w-full px-3 py-2.5 rounded-xl border border-gray-200 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-50 outline-none text-sm"
+                />
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-bold text-gray-800 mb-2">Stock disponible</label>
-                <input
-                  type="number"
-                  value={formData.stock}
-                  onChange={(e) => setFormData({ ...formData, stock: e.target.value })}
-                  placeholder="Illimite"
-                  className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 outline-none"
-                />
-                <p className="text-[10px] text-gray-400 mt-1">Laisser vide = stock illimite</p>
-              </div>
-
-              {/* Selection categorie */}
-              <div>
-                <label className="block text-sm font-bold text-gray-800 mb-2">
-                  Categorie <span className="text-emerald-500">*</span>
-                </label>
-                <select
-                  value={formData.category}
-                  onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                  className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 outline-none"
-                >
-                  {CATEGORIES.map((cat) => (
-                    <option key={cat.id} value={cat.id}>
-                      {cat.label}
-                    </option>
-                  ))}
-                </select>
-                {selectedCategory && (
-                  <div className="mt-2 flex items-center gap-2">
-                    <div className={`w-3 h-3 rounded-full ${selectedCategory.color}`}></div>
-                    <span className="text-xs text-gray-500">
-                      Categorie : {selectedCategory.label}
-                    </span>
-                  </div>
-                )}
-              </div>
+            <div>
+              <label className="block text-sm font-bold text-gray-700 mb-1">
+                Catégorie <span className="text-emerald-500">*</span>
+              </label>
+              <select value={formData.category} onChange={(e) => setFormData({ ...formData, category: e.target.value })}
+                className="w-full px-3 py-2.5 rounded-xl border border-gray-200 focus:border-emerald-400 outline-none text-sm">
+                {CATEGORIES.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+              </select>
             </div>
           </div>
 
-          {/* Bouton submit */}
+          {/* ── Submit ── */}
           <button
             type="submit"
-            disabled={loading || images.some((img) => img.uploading || img.cleaning)}
-            className="relative w-full overflow-hidden group bg-gradient-to-r from-emerald-600 via-green-600 to-teal-600 text-white py-4 rounded-xl font-bold shadow-xl transition-all duration-300 hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={loading || anyUploading}
+            className="w-full bg-emerald-600 text-white py-3.5 rounded-xl font-bold text-sm shadow-md hover:bg-emerald-700 active:scale-[0.98] transition disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
-            <div className="absolute inset-0 bg-gradient-to-r from-emerald-400 via-green-400 to-teal-400 opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
-            <span className="relative flex items-center justify-center gap-2">
-              {loading || images.some((img) => img.uploading || img.cleaning) ? (
-                <>
-                  <Loader2 size={20} className="animate-spin" />
-                  {images.some((img) => img.cleaning)
-                    ? 'IA nettoie la photo...'
-                    : images.some((img) => img.uploading)
-                    ? 'Upload en cours...'
-                    : 'Ajout en cours...'}
-                </>
-              ) : (
-                <>
-                  <Sparkles size={18} />
-                  Ajouter mon produit
-                  <Zap size={14} />
-                </>
-              )}
-            </span>
+            {loading ? (
+              <><Loader2 size={17} className="animate-spin" /> Ajout en cours...</>
+            ) : anyUploading ? (
+              <><Loader2 size={17} className="animate-spin" /> Upload en cours...</>
+            ) : (
+              'Ajouter mon produit'
+            )}
           </button>
         </form>
-
-        {/* Bandeau premium IA */}
-        <div className="mt-8 p-5 bg-gradient-to-r from-emerald-500/10 via-teal-500/10 to-emerald-500/10 rounded-2xl text-center border border-emerald-200/50 backdrop-blur-sm">
-          <div className="flex items-center justify-center gap-2 mb-2">
-            <Crown size={18} className="text-emerald-600" />
-            <span className="text-xs font-black text-emerald-700 uppercase tracking-wider">Experience Premium IA</span>
-            <Wand2 size={16} className="text-emerald-500" />
-          </div>
-          <p className="text-[11px] text-gray-600 leading-relaxed">
-            Nos vendeurs augmentent leurs ventes de <strong className="text-emerald-600">+47%</strong> avec des photos nettes<br />
-            Nettoyage automatique de l'arriere-plan par intelligence artificielle
-          </p>
-          <div className="flex items-center justify-center gap-1 mt-3">
-            <Heart size={10} className="text-rose-400" />
-            <span className="text-[9px] text-gray-400">100% gratuit • instantane • professionnel</span>
-          </div>
-        </div>
       </div>
 
       <style jsx>{`
         @keyframes slideDown {
-          from { opacity: 0; transform: translateY(-20px) translateX(-50%); }
-          to { opacity: 1; transform: translateY(0) translateX(-50%); }
-        }
-        .animate-slideDown {
-          animation: slideDown 0.3s ease-out forwards;
+          from { opacity: 0; transform: translateY(-12px) translateX(-50%); }
+          to   { opacity: 1; transform: translateY(0)    translateX(-50%); }
         }
       `}</style>
     </div>

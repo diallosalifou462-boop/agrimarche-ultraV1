@@ -3,7 +3,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { useAuth } from "@/hooks/useAuth";
+import { useAuth } from "@/contexts/AuthContext";
 import { AdminGuard } from "@/components/AdminGuard";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
@@ -19,18 +19,18 @@ import {
   ShieldCheck, Fingerprint, Key, Lock, Unlock, Gift, Heart, ThumbsUp,
   Send, Globe
 } from "lucide-react";
-import { db, auth, storage, messaging } from "@/lib/firebase";
+import { db, auth, storage } from "@/lib/firebase";
 import {
   collection, updateDoc, deleteDoc, doc,
   query, orderBy, onSnapshot, Timestamp, addDoc, serverTimestamp,
   writeBatch, where, getDocs, getDoc, setDoc, limit,
-  startAfter, increment, arrayUnion, arrayRemove
+  startAfter, increment, collectionGroup
 } from "firebase/firestore";
 import {
   signOut
 } from "firebase/auth";
 import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
-import { getToken, onMessage } from "firebase/messaging";
+import { useFCMToken } from "@/hooks/useFCMToken"; // ⚠️ ajuste ce chemin vers l'emplacement réel de ton hook useFCMToken
 import {
   AreaChart, Area, BarChart, Bar, LineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -169,7 +169,7 @@ interface Loan {
   village?: string;
 }
 
-interface Notification {
+interface AppNotification {
   id?: string;
   userId: string;
   type: 'order' | 'price' | 'message' | 'delivery' | 'alert' | 'loan' | 'promotion' | 'system';
@@ -189,8 +189,8 @@ interface BroadcastForm {
   title: string;
   body: string;
   icon: string;
-  type: Notification['type'];
-  priority: Notification['priority'];
+  type: AppNotification['type'];
+  priority: AppNotification['priority'];
   urgent: boolean;
   targetRole: 'all' | 'client' | 'seller' | 'admin' | 'delivery';
   targetRegion: string;
@@ -491,7 +491,7 @@ const StatCard = ({ icon, label, value, change, color }: { icon: React.ReactNode
 
 export default function AdminDashboard() {
   const router = useRouter();
-  const { user: authUser, loading: authLoading } = useAuth();
+  const { user: authUser } = useAuth();
 
   // ── UI STATE ──────────────────────────────────────────────
   const [sidebarOpen, setSidebarOpen]       = useState(true);
@@ -570,8 +570,8 @@ export default function AdminDashboard() {
   const [products, setProducts]             = useState<Product[]>([]);
   const [loans, setLoans]                   = useState<Loan[]>([]);
   const [deliveryPersons, setDeliveryPersons] = useState<UserProfile[]>([]);
-  const [notifications, setNotifications]   = useState<Notification[]>([]);
-  const [allNotifications, setAllNotifications] = useState<Notification[]>([]);
+  const [notifications, setNotifications]   = useState<AppNotification[]>([]);
+  const [allNotifications, setAllNotifications] = useState<AppNotification[]>([]);
   const [loading, setLoading]               = useState(true);
   const [lastSync, setLastSync]             = useState(new Date());
   const [unreadCount, setUnreadCount]       = useState(0);
@@ -579,7 +579,7 @@ export default function AdminDashboard() {
   // ── DIRECT MESSAGE ────────────────────────────────────────
   const [dmSearch, setDmSearch]             = useState('');
   const [dmTarget, setDmTarget]             = useState<UserProfile | null>(null);
-  const [dmForm, setDmForm]                 = useState({ title:'', body:'', icon:'💬', type:'message' as Notification['type'], priority:'medium' as Notification['priority'], urgent:false });
+  const [dmForm, setDmForm]                 = useState({ title:'', body:'', icon:'💬', type:'message' as AppNotification['type'], priority:'medium' as AppNotification['priority'], urgent:false });
   const [dmSending, setDmSending]           = useState(false);
 
   // ── IA ────────────────────────────────────────────────────
@@ -618,8 +618,8 @@ export default function AdminDashboard() {
 
   // ── NOTIFICATION SETTINGS ─────────────────────────────────
   const [soundEnabled, setSoundEnabled]     = useState(true);
-  const [pushEnabled, setPushEnabled]       = useState(false);
-  const [fcmToken, setFcmToken]             = useState<string | null>(null);
+  const { token: fcmToken, permission: fcmPermission, requestPermission: requestFcmPermission } = useFCMToken();
+  const pushEnabled = fcmPermission === 'granted';
 
   // ── COMPUTED ──────────────────────────────────────────────
   const totalRevenue    = useMemo(() => orders.reduce((s,o) => s + (o.amount ?? 0), 0), [orders]);
@@ -647,21 +647,14 @@ export default function AdminDashboard() {
   }, [orders, users, products]);
 
   // ── ROLE GUARD ────────────────────────────────────────────
-  const FORCED_ADMIN_EMAIL = "support@agrimarche.com";
-
   useEffect(() => {
-    if (authLoading) return; // attend la confirmation Firebase
     if (!authUser) { router.replace('/auth/login'); return; }
-
-    // Accès admin garanti pour ce compte, peu importe le champ Firestore
-    if (authUser.email === FORCED_ADMIN_EMAIL) return;
-
     getDoc(doc(db, 'users', authUser.uid)).then(snap => {
       if (!snap.exists() || snap.data()?.role !== 'admin') {
         router.replace('/');
       }
     });
-  }, [authUser, authLoading, router]);
+  }, [authUser, router]);
 
   // ── FIREBASE LISTENERS ────────────────────────────────────
   useEffect(() => {
@@ -711,7 +704,7 @@ export default function AdminDashboard() {
     const unsubNotifs = onSnapshot(
       query(collection(db, 'notifications'), orderBy('createdAt', 'desc'), limit(100)),
       snap => {
-        const all = snap.docs.map(d => ({ id: d.id, ...d.data() } as Notification));
+        const all = snap.docs.map(d => ({ id: d.id, ...d.data() } as AppNotification));
         setAllNotifications(all);
         // unreadCount = notifs personnelles non lues de l'admin
         const personal = all.filter(n => n.userId === authUser.uid);
@@ -752,23 +745,13 @@ export default function AdminDashboard() {
   }, [orders, products, loanSimAmount, loanSimDuration]);
 
   // ── FCM ───────────────────────────────────────────────────
+  // Utilise le même hook que les autres rôles (client/seller/delivery) :
+  // un seul endroit qui écrit le token, dans users/{uid}/tokens/{token},
+  // avec une seule clé VAPID (NEXT_PUBLIC_VAPID_KEY).
   useEffect(() => {
-    const initFCM = async () => {
-      if (!messaging || !authUser) return;
-      try {
-        const permission = await Notification.requestPermission();
-        if (permission === 'granted') {
-          const token = await getToken(messaging, { vapidKey: process.env.NEXT_PUBLIC_FIREBASE_VAPID_KEY });
-          if (token) {
-            setFcmToken(token);
-            setPushEnabled(true);
-            await updateDoc(doc(db, 'users', authUser.uid), { fcmTokens: arrayUnion(token) }).catch(() => {});
-          }
-        }
-      } catch (e) { console.error('FCM:', e); }
-    };
-    initFCM();
-  }, [authUser]);
+    if (!authUser) return;
+    requestFcmPermission();
+  }, [authUser, requestFcmPermission]);
 
   // ── ACTIONS ───────────────────────────────────────────────
 
@@ -1091,14 +1074,24 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
       }
 
       // Push notifications — envoi via FCM (Firebase Cloud Messaging)
+      // Les tokens sont stockés dans users/{uid}/tokens/{token} (cf. useFCMToken),
+      // pas dans un champ fcmTokens sur le doc utilisateur — d'où la requête collectionGroup.
       let pushCount = 0;
       if (broadcastForm.channels.push) {
+        const targetUids = new Set(targetUsers.map(u => u.uid ?? u.id ?? ''));
         const allTokens: string[] = [];
-        targetUsers.forEach(u => {
-          if (Array.isArray(u.fcmTokens)) allTokens.push(...u.fcmTokens.filter(Boolean));
-        });
+        try {
+          const tokensSnap = await getDocs(collectionGroup(db, 'tokens'));
+          tokensSnap.forEach(d => {
+            const ownerUid = d.ref.parent.parent?.id;
+            const t = d.data()?.token;
+            if (ownerUid && targetUids.has(ownerUid) && t) allTokens.push(t);
+          });
+        } catch (tokensErr) {
+          console.error('Erreur lecture tokens FCM:', tokensErr);
+          toast.warning('Push : impossible de lire les tokens (vérifie les règles Firestore pour la collection group "tokens")');
+        }
         const uniqueTokens = Array.from(new Set(allTokens));
-        const pushErrors: string[] = [];
         if (uniqueTokens.length > 0) {
           // FCM multicast limite à 500 tokens par requête
           for (let i = 0; i < uniqueTokens.length; i += 500) {
@@ -1120,15 +1113,10 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
                 pushCount += data?.successCount ?? chunk.length;
               } else {
                 const err = await res.json().catch(() => ({}));
-                pushErrors.push(err?.error ?? `HTTP ${res.status}`);
               }
             } catch (fetchErr: any) {
-              pushErrors.push(fetchErr?.message ?? 'Erreur réseau');
             }
           }
-        }
-        if (pushErrors.length > 0) {
-          toast.warning(`Push: ${pushCount} envoyé(s), ${pushErrors.length} lot(s) en erreur`);
         }
       }
 

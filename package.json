@@ -16,6 +16,7 @@
     "@capacitor/geolocation": "^8.2.0",
     "@capacitor/ios": "^8.4.0",
     "@capacitor/push-notifications": "^8.1.1",
+    "@imgly/background-removal": "^1.7.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
