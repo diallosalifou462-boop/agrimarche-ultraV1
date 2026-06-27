@@ -31,14 +31,18 @@ interface Order {
   cancelledAt?: any;
 }
 
-// ✅ CORRECTION : Remplacer JSX.Element par React.ReactNode
+// ─────────────────────────────────────────────────────────────────────────────
+// STATUTS UNIFIÉS — identiques dans checkout-page.tsx et orders-page.tsx
+//   en_attente → en_preparation → en_livraison → livre   (flux normal)
+//                                              ↘ annule  (vendeur ou client)
+// ─────────────────────────────────────────────────────────────────────────────
 const getStatusInfo = (status: string) => {
   const map: Record<string, { label: string; color: string; icon: React.ReactNode }> = {
-    en_attente:     { label: 'En attente',     color: 'bg-amber-100 text-amber-700',   icon: React.createElement(Clock, { size: 14, className: "mr-1" }) },
-    en_preparation: { label: 'En préparation', color: 'bg-blue-100 text-blue-700',    icon: React.createElement(Package, { size: 14, className: "mr-1" }) },
-    expediee:       { label: 'Expédiée',       color: 'bg-purple-100 text-purple-700', icon: React.createElement(Truck, { size: 14, className: "mr-1" }) },
-    livree:         { label: 'Livrée',         color: 'bg-green-100 text-green-700',  icon: React.createElement(CheckCircle, { size: 14, className: "mr-1" }) },
-    annulee:        { label: 'Annulée',        color: 'bg-red-100 text-red-700',      icon: React.createElement(XCircle, { size: 14, className: "mr-1" }) },
+    en_attente:     { label: 'En attente',     color: 'bg-amber-100 text-amber-700',   icon: React.createElement(Clock,       { size: 14, className: "mr-1" }) },
+    en_preparation: { label: 'En préparation', color: 'bg-blue-100 text-blue-700',    icon: React.createElement(Package,     { size: 14, className: "mr-1" }) },
+    en_livraison:   { label: 'En livraison',   color: 'bg-purple-100 text-purple-700', icon: React.createElement(Truck,       { size: 14, className: "mr-1" }) },
+    livre:          { label: 'Livrée',         color: 'bg-green-100 text-green-700',  icon: React.createElement(CheckCircle, { size: 14, className: "mr-1" }) },
+    annule:         { label: 'Annulée',        color: 'bg-red-100 text-red-700',      icon: React.createElement(XCircle,     { size: 14, className: "mr-1" }) },
   };
   return map[status] || { label: status, color: 'bg-gray-100 text-gray-700', icon: React.createElement(React.Fragment) };
 };
@@ -108,28 +112,42 @@ export default function SellerOrdersPage() {
         updatedAt: new Date().toISOString(),
       };
       // Si le vendeur annule, on trace qui a annulé
-      if (newStatus === 'annulee') {
+      if (newStatus === 'annule') {
         payload.cancelledBy  = 'seller';   // ← le client verra l'alerte
         payload.cancelledAt  = Timestamp.now();
       }
       await updateDoc(orderRef, payload);
       
-      // 🔔 NOTIFICATION AU CLIENT (quand expédiée)
-      if (newStatus === 'expediee' && orderData?.userId) {
+      // 🔔 NOTIFICATION AU CLIENT (quand en livraison)
+      if (newStatus === 'en_livraison' && orderData?.userId) {
         await fetch('/api/notifications/send', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             userId: orderData.userId,
-            title: '🚚 Commande expédiée',
+            title: '🚚 Commande en livraison',
             body: `Votre commande #${orderData.orderNumber || id.slice(-8)} est en route !`,
             link: '/account/orders',
           }),
         });
       }
       
+      // 🔔 NOTIFICATION AU CLIENT (quand livrée)
+      if (newStatus === 'livre' && orderData?.userId) {
+        await fetch('/api/notifications/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: orderData.userId,
+            title: '📦 Commande livrée',
+            body: `Votre commande #${orderData.orderNumber || id.slice(-8)} a été livrée. Merci !`,
+            link: '/account/orders',
+          }),
+        });
+      }
+      
       // 🔔 NOTIFICATION AU CLIENT (quand le vendeur annule)
-      if (newStatus === 'annulee' && orderData?.userId) {
+      if (newStatus === 'annule' && orderData?.userId) {
         await fetch('/api/notifications/send', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -200,9 +218,9 @@ export default function SellerOrdersPage() {
           {filteredOrders.length > 0 ? filteredOrders.map((order) => {
             const statusInfo      = getStatusInfo(order.status);
             const isUpdating      = updating === order.id;
-            const isCancelledByClient = order.status === 'annulee' && order.cancelledBy === 'client';
-            const isCancelledBySeller = order.status === 'annulee' && order.cancelledBy === 'seller';
-            const isCancelled         = order.status === 'annulee';
+            const isCancelledByClient = order.status === 'annule' && order.cancelledBy === 'client';
+            const isCancelledBySeller = order.status === 'annule' && order.cancelledBy === 'seller';
+            const isCancelled         = order.status === 'annule';
 
             return (
               <div
@@ -295,7 +313,7 @@ export default function SellerOrdersPage() {
                           {isUpdating ? '…' : '✅ Accepter'}
                         </button>
                         <button
-                          onClick={() => updateStatus(order.id, 'annulee', 'Annulée par le vendeur')}
+                          onClick={() => updateStatus(order.id, 'annule', 'Annulée par le vendeur')}
                           disabled={isUpdating}
                           className="px-4 py-2 bg-red-500 text-white rounded-xl text-sm font-medium hover:bg-red-600 transition disabled:opacity-50"
                         >
@@ -307,14 +325,14 @@ export default function SellerOrdersPage() {
                     {order.status === 'en_preparation' && (
                       <>
                         <button
-                          onClick={() => updateStatus(order.id, 'expediee', 'Expédiée')}
+                          onClick={() => updateStatus(order.id, 'en_livraison', 'En cours de livraison')}
                           disabled={isUpdating}
                           className="px-4 py-2 bg-purple-500 text-white rounded-xl text-sm font-medium hover:bg-purple-600 transition disabled:opacity-50"
                         >
                           {isUpdating ? '…' : '🚚 Expédier'}
                         </button>
                         <button
-                          onClick={() => updateStatus(order.id, 'annulee', 'Annulée par le vendeur')}
+                          onClick={() => updateStatus(order.id, 'annule', 'Annulée par le vendeur')}
                           disabled={isUpdating}
                           className="px-4 py-2 border border-red-300 text-red-600 rounded-xl text-sm font-medium hover:bg-red-50 transition disabled:opacity-50"
                         >
@@ -323,9 +341,9 @@ export default function SellerOrdersPage() {
                       </>
                     )}
 
-                    {order.status === 'expediee' && (
+                    {order.status === 'en_livraison' && (
                       <button
-                        onClick={() => updateStatus(order.id, 'livree', 'Livrée')}
+                        onClick={() => updateStatus(order.id, 'livre', 'Livrée avec succès')}
                         disabled={isUpdating}
                         className="px-4 py-2 bg-green-500 text-white rounded-xl text-sm font-medium hover:bg-green-600 transition disabled:opacity-50"
                       >
@@ -361,7 +379,7 @@ export default function SellerOrdersPage() {
                   <div className="mt-4 pt-4 border-t border-red-100 flex items-center gap-2">
                     <XCircle size={15} className="text-red-400 shrink-0" />
                     <p className="text-sm text-red-500">
-                      {isCancelledByClient ? 'Annulée par le client — aucune action requise.' : 'Commande refusée — aucune action requise.'}
+                    {isCancelledByClient ? 'Annulée par le client — aucune action requise.' : 'Commande refusée — aucune action requise.'}
                     </p>
                   </div>
                 )}

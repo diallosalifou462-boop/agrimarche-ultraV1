@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import './globals.css';
 import { AuthProvider } from '@/contexts/AuthContext';
 import { NotificationProvider } from '@/components/NotificationProvider';
-// Remove: import AndroidBackHandler from '@/components/AndroidBackHandler';
+import OfflineBanner from '@/components/OfflineBanner';
 
 export const metadata: Metadata = {
   title: 'AgriMarché - Votre marché agricole',
@@ -20,8 +20,8 @@ export default function RootLayout({
       <body suppressHydrationWarning>
         <AuthProvider>
           <NotificationProvider>
-            {/* Remove: <AndroidBackHandler /> */}
             {children}
+            <OfflineBanner />
           </NotificationProvider>
         </AuthProvider>
       </body>

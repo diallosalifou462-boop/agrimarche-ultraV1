@@ -3,6 +3,7 @@ import { getAuth, setPersistence, browserLocalPersistence, onAuthStateChanged, s
 import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, Timestamp, arrayUnion, arrayRemove, increment, writeBatch } from 'firebase/firestore';
 import { getStorage, uploadBytes, uploadBytesResumable, getDownloadURL, deleteObject } from 'firebase/storage';
 import { getMessaging, getToken, onMessage, isSupported } from 'firebase/messaging';
+import { getAnalytics } from 'firebase/analytics';
 
 // =====================================================
 // CONFIG FIREBASE
@@ -27,6 +28,10 @@ const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 export const auth = getAuth(app);
 export const db = getFirestore(app);
 export const storage = getStorage(app);
+export const analytics =
+  typeof window !== 'undefined'
+    ? getAnalytics(app)
+    : null;
 
 let messaging: any = null;
 

@@ -317,6 +317,11 @@ const GLOBAL_STYLES = `
 `;
 
 /* ─────────────────────────────────────────────
+   Acompte (paiement partiel à la commande)
+───────────────────────────────────────────── */
+const DEPOSIT_RATE = 0.25; // 25% à payer maintenant, le reste à la livraison
+
+/* ─────────────────────────────────────────────
    Payment Config
 ───────────────────────────────────────────── */
 const PAYMENT_METHODS_CONFIG = {
@@ -327,7 +332,7 @@ const PAYMENT_METHODS_CONFIG = {
     icon: <Smartphone size={17} />,
     fee: 0,
     paymentLink: (amount: number) => {
-      return `https://pay.wave.com/m/M_sn_G4vyn-BvhQxV/c/sn/${amount}`;
+      return `https://pay.wave.com/m/M_sn_G4vyn-BvhQxV/c/sn/`;
     },
     minAmount: 100,
     maxAmount: 1000000,
@@ -348,20 +353,19 @@ const PAYMENT_METHODS_CONFIG = {
 /* ─────────────────────────────────────────────
    Payment Modal simplifié (sans confirmation ID)
 ───────────────────────────────────────────── */
-function PaymentModal({ method, amount, onConfirm, onBack }: { method: any; amount: number; onConfirm: () => void; onBack: () => void }) {
+function PaymentModal({ method, amount, remainingAmount, onConfirm, onBack }: { method: any; amount: number; remainingAmount: number; onConfirm: () => void; onBack: () => void }) {
   const wavePaymentUrl = method.paymentLink ? method.paymentLink(amount) : null;
 
-  // Rediriger automatiquement vers Wave
+  // Sauvegarder le contexte AVANT de partir vers Wave
+  // Au retour, CheckoutPage detecte 'wave_pending' et cree la commande auto
   useEffect(() => {
     if (method.id === 'wave' && wavePaymentUrl) {
+      sessionStorage.setItem('wave_pending', JSON.stringify({ paymentMethod: 'wave', ts: Date.now() }));
       window.location.href = wavePaymentUrl;
     }
   }, []);
 
-  const handleManualConfirm = () => {
-    // Le client confirme manuellement après avoir payé
-    onConfirm();
-  };
+  const handleManualConfirm = () => { onConfirm(); };
 
   return (
     <div className="modal-card" style={{ maxWidth: 460 }}>
@@ -369,8 +373,9 @@ function PaymentModal({ method, amount, onConfirm, onBack }: { method: any; amou
         <div style={{ width: 56, height: 56, borderRadius: '50%', background: 'linear-gradient(135deg, var(--gold-lt), var(--gold))', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
           {method.icon}
         </div>
-        <h3 className="serif" style={{ fontSize: 22, fontWeight: 400, color: 'var(--ink)' }}>Paiement {method.name}</h3>
-        <p style={{ fontSize: 13, color: 'var(--ink-lt)', marginTop: 6 }}>Montant : <strong>{amount.toLocaleString()} FCFA</strong></p>
+        <h3 className="serif" style={{ fontSize: 22, fontWeight: 400, color: 'var(--ink)' }}>Acompte {method.name}</h3>
+        <p style={{ fontSize: 13, color: 'var(--ink-lt)', marginTop: 6 }}>Acompte (25%) : <strong>{amount.toLocaleString()} FCFA</strong></p>
+        <p style={{ fontSize: 11, color: 'var(--ink-lt)', marginTop: 4 }}>Solde à régler à la livraison : {remainingAmount.toLocaleString()} FCFA</p>
       </div>
 
       <div style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 20, textAlign: 'center' }}>
@@ -378,7 +383,7 @@ function PaymentModal({ method, amount, onConfirm, onBack }: { method: any; amou
           <>
             <div style={{ background: 'var(--ivory)', borderRadius: 12, padding: '20px', textAlign: 'center' }}>
               <p style={{ fontSize: 14, color: 'var(--ink)', marginBottom: 12 }}>
-                Vous allez être redirigé vers Wave pour effectuer le paiement.
+                Vous allez être redirigé vers Wave pour effectuer le paiement de l'acompte (25%).
               </p>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, marginTop: 16 }}>
                 <Shield size={16} style={{ color: 'var(--gold)' }} />
@@ -387,21 +392,22 @@ function PaymentModal({ method, amount, onConfirm, onBack }: { method: any; amou
             </div>
             <button onClick={handleManualConfirm} className="cta-btn">
               <CheckCircle size={16} />
-              J'ai payé, confirmer ma commande
+              J'ai payé l'acompte, confirmer ma commande
             </button>
           </>
         ) : (
           <>
             <div style={{ background: 'var(--ivory)', borderRadius: 12, padding: '20px' }}>
-              <p style={{ fontSize: 13, color: 'var(--ink-md)', marginBottom: 12 }}>Envoyez le montant à :</p>
+              <p style={{ fontSize: 13, color: 'var(--ink-md)', marginBottom: 12 }}>Envoyez l'acompte (25%) à :</p>
               <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--gold)', letterSpacing: '0.08em', marginBottom: 8 }}>
                 +221 {method.merchantPhone}
               </div>
               <p style={{ fontSize: 12, color: 'var(--ink-lt)' }}>via Orange Money</p>
+              <p style={{ fontSize: 11, color: 'var(--ink-lt)', marginTop: 10 }}>Solde de {remainingAmount.toLocaleString()} FCFA à régler à la livraison</p>
             </div>
             <button onClick={handleManualConfirm} className="cta-btn">
               <CheckCircle size={16} />
-              J'ai payé, confirmer ma commande
+              J'ai payé l'acompte, confirmer ma commande
             </button>
           </>
         )}
@@ -426,11 +432,27 @@ export default function CheckoutPage() {
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
   const [orderId, setOrderId] = useState('');
+  const [orderBalance, setOrderBalance] = useState(0);
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState('wave');
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [activePaymentMethod, setActivePaymentMethod] = useState<any>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [orderError, setOrderError] = useState('');
+  const [waveReturn, setWaveReturn] = useState(false);
+
+  // Detection retour Wave
+  useEffect(() => {
+    const pending = sessionStorage.getItem('wave_pending');
+    if (!pending) return;
+    try {
+      const saved = JSON.parse(pending);
+      if (saved.paymentMethod === 'wave') {
+        setSelectedPaymentMethod('wave');
+        setWaveReturn(true);
+        sessionStorage.removeItem('wave_pending');
+      }
+    } catch { sessionStorage.removeItem('wave_pending'); }
+  }, []);
 
   const cartItems = useMemo(() => cart?.items || [], [cart]);
   const subtotal = useMemo(() => cart?.total || 0, [cart]);
@@ -447,6 +469,8 @@ export default function CheckoutPage() {
   }, [location, isFreeDelivery]);
 
   const total = subtotal + deliveryFee;
+  const depositAmount = Math.round(total * DEPOSIT_RATE);
+  const remainingAmount = total - depositAmount;
 
   const estimatedDelivery = useMemo(() => {
     if (isFreeDelivery) return '24 – 48 h (Express)';
@@ -498,10 +522,12 @@ export default function CheckoutPage() {
         sellerLocation: { lat: sellerLat, lng: sellerLng, address: sellerAddress },
         customerLocation: { lat: location?.lat || null, lng: location?.lng || null, address: location?.address || location?.city || 'Adresse non détectée' },
         date: new Date().toLocaleDateString('fr-FR', { day:'numeric', month:'long', year:'numeric', hour:'2-digit', minute:'2-digit' }),
-        timestamp: new Date().toISOString(), status: 'en_attente', statusLabel: 'En attente de validation - Paiement à vérifier',
+        timestamp: new Date().toISOString(), status: 'en_attente', statusLabel: "En attente de validation - Acompte à vérifier",
         subtotal, deliveryFee, isFreeDelivery, total,
+        depositRate: DEPOSIT_RATE, depositAmount, remainingAmount,
+        balanceDueAtDelivery: remainingAmount,
         paymentMethod: selectedPaymentMethod, paymentMethodName: selectedMethod?.name,
-        paymentStatus: 'en_attente_verification',
+        paymentStatus: 'acompte_en_attente_verification',
         items: cartItems.map(item => ({
           productId: item?.product?.id || 'unknown', productName: item?.product?.name || 'Produit inconnu',
           productPrice: item?.product?.price || 0, quantity: item?.quantity || 1,
@@ -511,13 +537,41 @@ export default function CheckoutPage() {
         deliveryTime: estimatedDelivery, createdAt: Timestamp.now(), updatedAt: new Date().toISOString(),
       };
       const docRef = await addDoc(collection(db, 'orders'), newOrder);
+      // Mettre à jour le doc avec son propre ID Firestore pour faciliter les requêtes croisées
+      await updateDoc(doc(db, 'orders', docRef.id), {
+        firestoreId: docRef.id,
+        orderNumber,
+        estimatedDelivery: Timestamp.fromDate(getEstimatedDeliveryDate(new Date())),
+      });
       await initDeliveryTracking(docRef.id);
-      await updateDoc(doc(db, 'orders', docRef.id), { estimatedDelivery: Timestamp.fromDate(getEstimatedDeliveryDate(new Date())) });
+
+      // Notifier le vendeur dans seller_orders
+      try {
+        await addDoc(collection(db, 'seller_orders'), {
+          ...newOrder,
+          orderId: docRef.id,
+          orderNumber,
+          firestoreId: docRef.id,
+          sellerRead: false,
+          sellerStatus: 'nouvelle',  // statut interne vendeur (lecture seule)
+          notifiedAt: Timestamp.now(),
+        });
+      } catch (e) { console.error('seller_orders', e); }
+
+      // Decrementer stock
       for (const item of cartItems) {
-        if (item?.product?.id) await updateDoc(doc(db, 'products', item.product.id), { stock: increment(-(item.quantity || 1)) });
+        if (item?.product?.id) {
+          try { await updateDoc(doc(db, 'products', item.product.id), { stock: increment(-(item.quantity || 1)) }); } catch {}
+        }
       }
-      setOrderId(orderNumber); clearCart(); setSuccess(true);
-      setTimeout(() => router.push('/account/orders'), 3000);
+
+      // Vider panier + succes
+      clearCart();
+      setOrderId(orderNumber);
+      setOrderBalance(remainingAmount);
+      setSuccess(true);
+      // Rediriger vers la commande spécifique dans orders-page (docRef.id = ID Firestore)
+      setTimeout(() => router.push('/account/orders?order=' + docRef.id), 3000);
       return true;
     } catch (err) {
       console.error(err); setOrderError('Une erreur est survenue. Veuillez réessayer.'); return false;
@@ -529,6 +583,13 @@ export default function CheckoutPage() {
     await createOrder();
   };
 
+  // Retour depuis Wave: creer la commande automatiquement
+  useEffect(() => {
+    if (!waveReturn || cartItems.length === 0 || !user) return;
+    setWaveReturn(false);
+    createOrder();
+  }, [waveReturn, cartItems.length, user]);
+
   const handleCheckout = async () => {
     if (!user) { router.push('/auth/login?redirect=/checkout'); return; }
     if (cartItems.length === 0) { setOrderError('Votre panier est vide'); return; }
@@ -536,7 +597,22 @@ export default function CheckoutPage() {
     if (method) { setActivePaymentMethod(method); setShowPaymentModal(true); }
   };
 
-  /* ── Success screen ── */
+  /* -- Traitement retour Wave -- */
+  if (isProcessing || waveReturn) return (
+    <>
+      <style>{GLOBAL_STYLES}</style>
+      <div className="success-root checkout-root">
+        <div className="success-card">
+          <div style={{ width:60, height:60, borderRadius:'50%', border:'4px solid var(--gold)', borderTopColor:'transparent', animation:'spin 0.8s linear infinite', margin:'0 auto 24px' }} />
+          <p className="serif" style={{ fontSize:26, fontWeight:300, color:'var(--ink)', textAlign:'center' }}>Traitement en cours\u2026</p>
+          <p style={{ fontSize:13, color:'var(--ink-lt)', textAlign:'center', marginTop:8 }}>Votre commande est en cours de confirmation.</p>
+        </div>
+      </div>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+    </>
+  );
+
+  /* -- Success screen -- */
   if (success) return (
     <>
       <style>{GLOBAL_STYLES}</style>
@@ -558,6 +634,15 @@ export default function CheckoutPage() {
             {isFreeDelivery && (
               <span className="tag tag-green" style={{ marginTop:8 }}><Gift size={10} /> Livraison offerte</span>
             )}
+          </div>
+
+          <div style={{ background:'linear-gradient(135deg, #FFFDF9, #FDF5E4)', borderRadius:16, padding:'16px 20px', border:'1.5px solid var(--gold-lt)', textAlign:'left', marginBottom:28 }}>
+            <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
+              <Banknote size={14} style={{ color:'var(--gold)' }} />
+              <span style={{ fontSize:11, fontWeight:500, letterSpacing:'0.10em', textTransform:'uppercase', color:'var(--ink-md)' }}>Solde à régler à la livraison</span>
+            </div>
+            <p style={{ fontSize:18, color:'var(--ink)', fontWeight:600 }}>{orderBalance.toLocaleString()} <span style={{ fontSize:13, fontWeight:400, color:'var(--ink-lt)' }}>FCFA</span></p>
+            <p style={{ fontSize:12, color:'var(--ink-lt)', marginTop:4 }}>Acompte de 25% déjà réglé. Le solde est à remettre au livreur.</p>
           </div>
 
           <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
@@ -737,6 +822,21 @@ export default function CheckoutPage() {
                     </div>
                   </div>
 
+                  <div style={{ marginTop:16, padding:'16px 18px', background:'linear-gradient(135deg, #FFFDF9, #FDF5E4)', borderRadius:14, border:'1.5px solid var(--gold-lt)' }}>
+                    <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10 }}>
+                      <Receipt size={14} style={{ color:'var(--gold)' }} />
+                      <span style={{ fontSize:11, fontWeight:500, letterSpacing:'0.08em', textTransform:'uppercase', color:'var(--ink-md)' }}>Paiement en 2 fois</span>
+                    </div>
+                    <div className="total-row" style={{ marginBottom:6 }}>
+                      <span style={{ color:'var(--ink)', fontSize:13, fontWeight:500 }}>Acompte à régler maintenant (25%)</span>
+                      <span style={{ fontSize:15, color:'var(--gold)', fontWeight:700 }}>{depositAmount.toLocaleString()} FCFA</span>
+                    </div>
+                    <div className="total-row">
+                      <span style={{ color:'var(--ink-lt)', fontSize:12 }}>Solde à régler à la livraison (75%)</span>
+                      <span style={{ fontSize:13, color:'var(--ink-md)' }}>{remainingAmount.toLocaleString()} FCFA</span>
+                    </div>
+                  </div>
+
                   <div style={{ marginTop:16, padding:'12px 16px', background:'var(--ivory)', borderRadius:12, border:'1px solid var(--border)', display:'flex', alignItems:'center', gap:10 }}>
                     <Truck size={14} style={{ color:'var(--gold)', flexShrink:0 }} />
                     <div>
@@ -754,7 +854,7 @@ export default function CheckoutPage() {
                   <button onClick={handleCheckout} disabled={isProcessing || cartItems.length === 0} className="cta-btn" style={{ marginTop:20 }}>
                     {isProcessing
                       ? <><Loader2 size={16} style={{ animation:'spin 1s linear infinite' }} /> Traitement…</>
-                      : <>Payer & confirmer →</>}
+                      : <>Payer l'acompte · {depositAmount.toLocaleString()} FCFA →</>}
                   </button>
 
                   <div style={{ marginTop:14, display:'flex', alignItems:'center', justifyContent:'center', gap:8 }}>
@@ -773,7 +873,8 @@ export default function CheckoutPage() {
         <div className="modal-overlay">
           <PaymentModal
             method={activePaymentMethod}
-            amount={total}
+            amount={depositAmount}
+            remainingAmount={remainingAmount}
             onConfirm={handlePaymentConfirm}
             onBack={() => setShowPaymentModal(false)}
           />

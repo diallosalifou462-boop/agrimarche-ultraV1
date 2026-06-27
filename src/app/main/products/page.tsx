@@ -5,6 +5,8 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
+import { logEvent } from 'firebase/analytics';
+import { analytics } from '@/lib/firebase/firebase';
 import { useCart } from '@/hooks/useCart';
 import { useAuth } from '@/hooks/useAuth';
 
@@ -29,101 +31,6 @@ const REGIONS_SENEGAL = [
   'Kaffrine', 'Ziguinchor', 'Sédhiou', 'Kolda',
   'Tambacounda', 'Kédougou', 'Louga', 'Matam', 'Saint-Louis',
 ];
-
-// Données géographiques complètes Sénégal : Région → Département → Communes
-const GEO_SENEGAL: Record<string, Record<string, string[]>> = {
-  'Dakar': {
-    'Dakar': ['Dakar Plateau', 'Médina', 'Gueule Tapée-Fass-Colobane', 'Grand Dakar', 'Biscuiterie', 'HLM', 'Sicap Liberté', 'Parcelles Assainies', 'Patte d\'Oie', 'Ouakam', 'Yoff', 'Ngor', 'Almadies', 'Mermoz-Sacré-Cœur', 'Fann-Point E-Amitié', 'Cambérène'],
-    'Guédiawaye': ['Golf Sud', 'Médina Gounass', 'Ndiarème Limamoulaye', 'Sam Notaire', 'Wakhinane Nimzatt'],
-    'Pikine': ['Pikine Est', 'Pikine Nord', 'Pikine Ouest', 'Dalifort', 'Djidah Thiaroye Kao', 'Guinaw Rails Nord', 'Guinaw Rails Sud', 'Thiaroye-sur-Mer', 'Thiaroye Kao', 'Yeumbeul Nord', 'Yeumbeul Sud', 'Mbao', 'Tivaouane Diacksao', 'Diamaguène Sicap Mbao'],
-    'Rufisque': ['Rufisque Est', 'Rufisque Nord', 'Rufisque Ouest', 'Bargny', 'Diamniadio', 'Sébikotane', 'Sangalkam', 'Yène'],
-  },
-  'Thiès': {
-    'Thiès': ['Thiès Nord', 'Thiès Est', 'Thiès Ouest', 'Fandène', 'Keur Mousseu', 'Ndieyène Sirakh', 'Notto Gouye Diama', 'Pout', 'Thiadiaye'],
-    'Mbour': ['Mbour', 'Joal-Fadiouth', 'Malicounda', 'Nguékhokh', 'Poponguine-Ndayane', 'Sindia', 'Somone', 'Warang'],
-    'Tivaouane': ['Tivaouane', 'Méouane', 'Mont Rolland', 'Mérina Dakhar', 'Pambal', 'Pékesse', 'Pire Goureye', 'Taïba Ndiaye', 'Thilmakha'],
-  },
-  'Diourbel': {
-    'Diourbel': ['Diourbel', 'Ndindy', 'Tocky Gare'],
-    'Bambey': ['Bambey', 'Baba Garage', 'Gawane', 'Lambaye', 'Ngoye', 'Ndangalma', 'Patar', 'Réfane', 'Thiakhar', 'Touba Toul'],
-    'Mbacké': ['Mbacké', 'Touba', 'Ndoulo', 'Sadio'],
-  },
-  'Fatick': {
-    'Fatick': ['Fatick', 'Diakhao', 'Diarrère', 'Fimela', 'Gossas', 'Ndiop', 'Niodior', 'Palmarin Facao', 'Tattaguine', 'Toubacouta'],
-    'Foundiougne': ['Foundiougne', 'Djilor', 'Karang Poste', 'Keur Samba Guèye', 'Loul Sessène', 'Sokone', 'Toubacouta'],
-    'Gossas': ['Gossas', 'Colobane', 'Mbaouane', 'Ndièye Coumba Wade'],
-  },
-  'Kaolack': {
-    'Kaolack': ['Kaolack', 'Gandiaye', 'Kahone', 'Kalom', 'Ngathie Naoudé', 'Ndiébel', 'Ndoffane', 'Ngoloféf', 'Niani'],
-    'Guinguinéo': ['Guinguinéo', 'Dianké Souf', 'Keur Baka', 'Mbadakhoune', 'Mboss', 'Ndiaffate', 'Ngélou', 'Passy', 'Sibassor'],
-    'Nioro du Rip': ['Nioro du Rip', 'Darou Salam', 'Keur Madiabel', 'Médina Sabakh', 'Paoskoto', 'Porokhane', 'Taïba Niassène', 'Wack Ngouna'],
-  },
-  'Kaffrine': {
-    'Kaffrine': ['Kaffrine', 'Diaoubé-Kilé', 'Gniby', 'Kathiote', 'Koungheul', 'Mabo', 'Malème Hodar', 'Nganda'],
-    'Birkilane': ['Birkilane', 'Lour Escale', 'Ndiognick', 'Niaméne', 'Diamal'],
-    'Koungheul': ['Koungheul', 'Darou Minam', 'Fass', 'Ida Mouride', 'Lour Escale', 'Missirah Wadène', 'Mbili', 'Nguer Malal', 'Touba Mbella'],
-    'Malem Hodar': ['Malem Hodar', 'Kahi', 'Ndiognick', 'Sido'],
-  },
-  'Ziguinchor': {
-    'Ziguinchor': ['Ziguinchor', 'Adéane', 'Boutoupa-Camaracounda', 'Enampore', 'Niaguis', 'Nyassia', 'Oulampane', 'Niaguis'],
-    'Bignona': ['Bignona', 'Balingore', 'Diouloulou', 'Djibidione', 'Kafountine', 'Kartiack', 'Kataba 1', 'Mangagoulack', 'Mlomp', 'Niamone', 'Oulampane', 'Tendimane', 'Thionck Essyl'],
-    'Oussouye': ['Oussouye', 'Cabrousse', 'Diembéring', 'Loudia-Ouolof', 'Mlomp', 'Oukout', 'Santhiaba Manjaque'],
-  },
-  'Sédhiou': {
-    'Sédhiou': ['Sédhiou', 'Bambali', 'Boghal', 'Djiredji', 'Djibanar', 'Kabrousse', 'Kolibantang', 'Marsassoum', 'Oudoucar', 'Sama Kanta Peulh', 'Tanaff'],
-    'Bounkiling': ['Bounkiling', 'Bona', 'Diana Malari', 'Karantaba', 'Konkia', 'Mangaroungou Santo', 'Niamone', 'Simbandi Balante', 'Simbandi Brassou', 'Tankanto Escale', 'Tenghory'],
-    'Goudomp': ['Goudomp', 'Diattacounda', 'Diégoune', 'Kaïlou', 'Kéréwane', 'Koubalan', 'Samine', 'Saré Bidji', 'Simbandi Balante'],
-  },
-  'Kolda': {
-    'Kolda': ['Kolda', 'Bagadadji', 'Coumbacara', 'Dioulacolon', 'Dabo', 'Guimara', 'Médina Cherif', 'Médina El Hadj', 'Saré Yoba Diéga', 'Ouassadou', 'Pata'],
-    'Vélingara': ['Vélingara', 'Bonconto', 'Diaobé-Kabendou', 'Fafacourou', 'Kandia', 'Médina Gounass', 'Ndorna', 'Pakour', 'Saré Coly Sallé', 'Sinthiang Koundara'],
-    'Médina Yoro Foulah': ['Médina Yoro Foulah', 'Badion', 'Bignarabé', 'Fanda', 'Ndorna', 'Niaming', 'Saré Moussa', 'Thiétty', 'Touba VK'],
-  },
-  'Tambacounda': {
-    'Tambacounda': ['Tambacounda', 'Koumpentoum', 'Malem Niani', 'Missirah', 'Niani Toucouleur', 'Sinthiou Malème'],
-    'Bakel': ['Bakel', 'Bélé', 'Boynguel Bamba', 'Diawara', 'Gathiary', 'Kéniéba', 'Kidira', 'Moudéry', 'Sinthiou Fissa', 'Tomboronkoto'],
-    'Goudiry': ['Goudiry', 'Bala', 'Gabou', 'Kénioto', 'Koulor', 'Ndoga Babacar', 'Sinthiou Fissa'],
-    'Koumpentoum': ['Koumpentoum', 'Kahène', 'Kouthiaba Wolof', 'Malem Niani', 'Payar', 'Sokorone'],
-  },
-  'Kédougou': {
-    'Kédougou': ['Kédougou', 'Bandafassi', 'Fongolimbi', 'Ninéfecha', 'Salemata', 'Salémata'],
-    'Salemata': ['Salemata', 'Dakatéli', 'Ethiolo', 'Kéwoye', 'Oubadji'],
-    'Saraya': ['Saraya', 'Bembou', 'Dialakoto', 'Kéméto', 'Khossanto', 'Médina Baffé', 'Nétéboulou'],
-  },
-  'Louga': {
-    'Louga': ['Louga', 'Coki', 'Guéoul', 'Kébémer', 'Keur Momar Sarr', 'Léona', 'Mbédiène', 'Nguer Malal', 'Niomré', 'Sakal', 'Thiamène'],
-    'Kébémer': ['Kébémer', 'Darou Marnane', 'Guéoul', 'Kanène Dji', 'Ndande', 'Thiès Thiouthioune'],
-    'Linguère': ['Linguère', 'Barkedji', 'Dahra', 'Dodji', 'Kamb', 'Ouarkhokh', 'Ranérou', 'Yang Yang'],
-  },
-  'Matam': {
-    'Matam': ['Matam', 'Agnam Civol', 'Bokidiawé', 'Dabia', 'Ganguel Souleymane', 'Nabadji Civol', 'Nguidjilone', 'Oréfondé', 'Ogo', 'Ourossogui', 'Thilogne'],
-    'Kanel': ['Kanel', 'Aouré', 'Hamady Hounaré', 'Linguékoto', 'Orkadiéré', 'Semmé', 'Thilogne', 'Ogo'],
-    'Ranérou Ferlo': ['Ranérou', 'Lougré Thioly', 'Vélingara Ferlo'],
-  },
-  'Saint-Louis': {
-    'Saint-Louis': ['Saint-Louis', 'Fass Ngom', 'Gandon', 'Léona', 'Mpal', 'Ndiébène Gandiol', 'Rao', 'Ronkh', 'Sakal', 'Taredji'],
-    'Dagana': ['Dagana', 'Bokhol', 'Diama', 'Mboumba', 'Mbane', 'Ngnith', 'Richard Toll', 'Rosso-Sénégal', 'Syer', 'Thiago'],
-    'Podor': ['Podor', 'Aéré Lao', 'Boké Dialloubé', 'Cas-Cas', 'Demette', 'Dimat', 'Fanaye', 'Guédé Village', 'Guédé Chantier', 'Médina Ndiathbé', 'Mbolo Birane', 'Ndiayène Pendao', 'Nétté', 'Pete', 'Thillé Boubacar', 'Walaldé', 'Wouro Madiu'],
-  },
-};
-
-// Mapping pour normaliser les noms de régions retournés par Nominatim
-const REGION_ALIASES: Record<string, string> = {
-  'Région de Dakar': 'Dakar', 'Dakar Region': 'Dakar',
-  'Région de Thiès': 'Thiès', 'Thies': 'Thiès',
-  'Région de Diourbel': 'Diourbel',
-  'Région de Fatick': 'Fatick',
-  'Région de Kaolack': 'Kaolack',
-  'Région de Kaffrine': 'Kaffrine',
-  'Région de Ziguinchor': 'Ziguinchor',
-  'Région de Sédhiou': 'Sédhiou', 'Sedhiou': 'Sédhiou',
-  'Région de Kolda': 'Kolda',
-  'Région de Tambacounda': 'Tambacounda',
-  'Région de Kédougou': 'Kédougou', 'Kedougou': 'Kédougou',
-  'Région de Louga': 'Louga',
-  'Région de Matam': 'Matam',
-  'Région de Saint-Louis': 'Saint-Louis', 'Saint Louis': 'Saint-Louis',
-};
 
 const WA_NUMBER = '221779747073';
 
@@ -158,148 +65,6 @@ interface ProductData {
 
 interface SellerRating { sellerId: string; averageRating: number; reviewCount: number; }
 
-
-// ─── GEOLOCALISATION ULTRA-PRÉCISE ───────────────────────────────────────────
-
-class KalmanFilter2D {
-  private Q: number[][] = [[0.001,0],[0,0.001]];
-  private R: number[][] = [[0.5,0],[0,0.5]];
-  private P: number[][] = [[1,0],[0,1]];
-  private x: number[] = [0,0];
-  private initialized = false;
-  update(m: number[]): number[] {
-    if (!this.initialized) { this.x = m; this.initialized = true; return this.x; }
-    const P_ = this.P.map((row,i) => row.map((v,j) => v + this.Q[i][j]));
-    const y = m.map((v,i) => v - this.x[i]);
-    const K = P_.map((row,i) => row.map((v,j) => v / (v + this.R[i][j])));
-    this.x = this.x.map((xi,i) => xi + K[i].reduce((s,k,j) => s + k*y[j], 0));
-    this.P = P_.map((row,i) => row.map((v,j) => v - K[i][j]*P_[j][i]));
-    return this.x;
-  }
-}
-
-const encodeGeohash = (lat: number, lng: number, precision = 12): string => {
-  const BASE32 = '0123456789bcdefghjkmnpqrstuvwxyz';
-  let hash = '', minLat=-90, maxLat=90, minLng=-180, maxLng=180;
-  for (let i=0; i<precision; i++) {
-    let ch=0;
-    for (let b=0; b<5; b++) {
-      if (i%2===0) { const mid=(minLng+maxLng)/2; if(lng>mid){ch|=1<<(4-b);minLng=mid;}else{maxLng=mid;} }
-      else { const mid=(minLat+maxLat)/2; if(lat>mid){ch|=1<<(4-b);minLat=mid;}else{maxLat=mid;} }
-    }
-    hash += BASE32[ch];
-  }
-  return hash;
-};
-
-// ─── GPS : Capacitor (Android/iOS) ou Web selon la plateforme ────────────────
-
-const getCapacitorGPS = async (): Promise<{lat:number;lng:number;accuracy:number;heading:number;speed:number}|null> => {
-  try {
-    // @capacitor/geolocation est disponible uniquement dans le contexte natif
-    const { Geolocation } = await import('@capacitor/geolocation');
-    const perm = await Geolocation.requestPermissions();
-    if (perm.location !== 'granted') return null;
-    const pos = await Geolocation.getCurrentPosition({
-      enableHighAccuracy: true,
-      timeout: 20000,
-      maximumAge: 0,
-    });
-    return {
-      lat: pos.coords.latitude,
-      lng: pos.coords.longitude,
-      accuracy: pos.coords.accuracy ?? 50,
-      heading: pos.coords.heading ?? 0,
-      speed: pos.coords.speed ?? 0,
-    };
-  } catch {
-    return null;
-  }
-};
-
-const getUltimateGPS = (): Promise<{lat:number;lng:number;accuracy:number;heading:number;speed:number}> =>
-  new Promise(async (resolve, reject) => {
-    // Essai Capacitor en premier (Android WebView)
-    try {
-      const cap = await getCapacitorGPS();
-      if (cap) { resolve(cap); return; }
-    } catch { /* pas de Capacitor, continuer avec Web */ }
-
-    // Fallback : Web Geolocation API (navigateur standard)
-    const kalman = new KalmanFilter2D();
-    let readings: any[] = [];
-    let bestAccuracy = Infinity, bestPos: any = null;
-    let watchId: number | null = null;
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    watchId = navigator.geolocation.watchPosition(pos => {
-      const { latitude:lat, longitude:lng, accuracy, heading, speed } = pos.coords;
-      readings.push({ lat, lng, accuracy, heading:heading||0, speed:speed||0 });
-      readings.sort((a,b) => a.accuracy - b.accuracy);
-      if (readings.length > 30) readings = readings.slice(0,30);
-      const tw = readings.reduce((s,r) => s + 1/(r.accuracy+0.1), 0);
-      const avgLat = readings.reduce((s,r) => s + r.lat*(1/(r.accuracy+0.1))/tw, 0);
-      const avgLng = readings.reduce((s,r) => s + r.lng*(1/(r.accuracy+0.1))/tw, 0);
-      const [fLat, fLng] = kalman.update([avgLat, avgLng]);
-      if (accuracy < bestAccuracy) { bestAccuracy = accuracy; bestPos = { lat:fLat, lng:fLng, accuracy, heading:heading||0, speed:speed||0 }; }
-      if (accuracy < 5 || readings.length >= 30) {
-        if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
-        if (timeoutId) { clearTimeout(timeoutId); timeoutId = null; }
-        const best5 = readings.slice(0,5);
-        const bw = best5.reduce((s,r) => s + 1/(r.accuracy+0.1), 0);
-        resolve({ lat: best5.reduce((s,r) => s + r.lat*(1/(r.accuracy+0.1))/bw, 0), lng: best5.reduce((s,r) => s + r.lng*(1/(r.accuracy+0.1))/bw, 0), accuracy:bestAccuracy, heading:bestPos.heading, speed:bestPos.speed });
-      }
-    }, err => {
-      if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
-      if (timeoutId) { clearTimeout(timeoutId); timeoutId = null; }
-      reject(err);
-    }, { enableHighAccuracy:true, timeout:30000, maximumAge:0 });
-    timeoutId = setTimeout(() => {
-      if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
-      if (bestPos) resolve(bestPos);
-      else if (readings.length > 0) { const l=readings[readings.length-1]; resolve({lat:l.lat,lng:l.lng,accuracy:l.accuracy,heading:l.heading,speed:l.speed}); }
-      else reject(new Error('GPS timeout'));
-    }, 25000);
-  });
-
-const getIPLocation = async (): Promise<{lat:number;lng:number;region:string}|null> => {
-  try {
-    const r = await fetch('https://ipapi.co/json/', { headers: {'Accept':'application/json'} });
-    if (!r.ok) return null;
-    const d = await r.json();
-    return d.latitude && d.longitude ? { lat:d.latitude, lng:d.longitude, region:d.region||'' } : null;
-  } catch { return null; }
-};
-
-const reverseGeocodeOSM = async (lat: number, lng: number) => {
-  try {
-    const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1&extratags=1&namedetails=1`, { headers:{'Accept-Language':'fr-FR','User-Agent':'AgriMarche/3.0'} });
-    if (!r.ok) return null;
-    const d = await r.json(); const a = d.address || {};
-    const amenity = d.extratags?.name || d.namedetails?.name || '';
-    const quarter = a.quarter || a.suburb || a.neighbourhood || a.city_district || '';
-    const locality = a.hamlet || a.village || a.town || a.city || a.municipality || a.county || '';
-    const street = a.road || a.pedestrian || a.footway || a.path || '';
-    const poi = amenity || a.university || a.school || a.amenity || '';
-    const stateRaw = a.state || '';
-    const detailedAddress = [poi||street, quarter, locality, a.state_district||'', stateRaw].filter(Boolean).join(', ') || 'Sénégal';
-    const address = [locality||a.state_district, stateRaw].filter(Boolean).join(', ') || 'Sénégal';
-    // Pour le Sénégal, la commune est dans suburb/city_district (ex: Diamaguène),
-    // pas dans city (qui donne la ville parent ex: Pikine).
-    const commune = a.suburb || a.city_district || a.neighbourhood || a.quarter || locality;
-    return { address, detailedAddress, quarter, commune, dept:a.state_district||'', region:stateRaw };
-  } catch { return null; }
-};
-
-const reverseGeocodeBDC = async (lat: number, lng: number) => {
-  try {
-    const r = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=fr`);
-    if (!r.ok) return null;
-    const d = await r.json();
-    const locality = d.locality || d.city || '';
-    const region = d.principalSubdivision || '';
-    return { address:[locality,region].filter(Boolean).join(', ')||'Sénégal', detailedAddress:[d.streetNumber||'',d.street||'',locality,region].filter(Boolean).join(', ')||'Sénégal', quarter:locality, commune:d.city||locality, dept:region, region };
-  } catch { return null; }
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RECONNAISSANCE VOCALE — filtre de bruit + détection de murmure + amplification
@@ -648,19 +413,28 @@ export default function AgriMarket() {
   const [showSort,           setShowSort]           = useState(false);
   const [location,           setLocation]           = useState<{address:string;lat:number;lng:number;precision:number;detailedAddress?:string;region?:string}|null>(null);
   const [locStatus,          setLocStatus]          = useState<'searching'|'found'|'error'>('searching');
-  const [showLocModal,       setShowLocModal]       = useState(false);
-  const [manualRegion,       setManualRegion]       = useState('');
-  const [manualDept,         setManualDept]         = useState('');
-  const [manualCommune,      setManualCommune]      = useState('');
   const [addedIds,           setAddedIds]           = useState<Set<string>>(new Set());
   const [selected,           setSelected]           = useState<ProductData|null>(null);
   const [imgIdx,             setImgIdx]             = useState(0);
+  const [cardImgIdx,         setCardImgIdx]         = useState<Map<string,number>>(new Map());
+  const [recImgIdx,          setRecImgIdx]          = useState<Map<string,number>>(new Map());
   const [scrolled,           setScrolled]           = useState(false);
   const [ratings,            setRatings]            = useState<Map<string,SellerRating>>(new Map());
   const [heroVisible,        setHeroVisible]        = useState(false);
 
   const drawerRef = useRef<HTMLDivElement>(null);
   const voiceRef  = useRef<DivineVoiceRecognition | null>(null);
+
+  const getCardImg = (id: string) => cardImgIdx.get(id) || 0;
+  const setCardImg = (id: string, idx: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setCardImgIdx(prev => { const m = new Map(prev); m.set(id, idx); return m; });
+  };
+  const getRecImg = (id: string) => recImgIdx.get(id) || 0;
+  const setRecImg = (id: string, idx: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setRecImgIdx(prev => { const m = new Map(prev); m.set(id, idx); return m; });
+  };
 
   const cartCount = cart?.itemCount || 0;
 
@@ -724,6 +498,29 @@ export default function AgriMarket() {
     });
     return () => u();
   }, []);
+
+  // ── ANNONCES (Firestore collection 'ads') ──
+  const [ads, setAds] = useState<any[]>([]);
+  const [adIdx, setAdIdx] = useState(0);
+  useEffect(() => {
+    const u = onSnapshot(
+      query(collection(db, 'ads'), where('active', '==', true)),
+      snap => {
+        const list = snap.docs
+          .map(d => ({ id: d.id, ...d.data() }))
+          .sort((a: any, b: any) => (b.priority ?? 0) - (a.priority ?? 0));
+        setAds(list);
+        setAdIdx(0);
+      }
+    );
+    return () => u();
+  }, []);
+  useEffect(() => {
+    if (ads.length <= 1) return;
+    const t = setInterval(() => setAdIdx(i => (i + 1) % ads.length), 4500);
+    return () => clearInterval(t);
+  }, [ads.length]);
+
 
   useEffect(() => {
     if (!products.length) return;
@@ -802,107 +599,32 @@ export default function AgriMarket() {
     return sections;
   }, [selected, products, location]);
 
-  const getDivineLocation = useCallback(async () => {
-    setLocStatus('searching');
-    setLocation(null);
+  // ── Lecture de la localisation sauvegardée par /main/location ──
+  useEffect(() => {
     try {
-      // 1. GPS ultra-précis (Kalman + moyenne pondérée)
-      let gpsData: {lat:number;lng:number;accuracy:number;heading:number;speed:number} | null = null;
-      try {
-        if (navigator.geolocation) gpsData = await getUltimateGPS();
-      } catch (e) { console.warn('GPS failed:', e); }
-
-      // 2. IP fallback
-      let ipData: {lat:number;lng:number;region:string} | null = null;
-      try { ipData = await getIPLocation(); } catch (e) { console.warn('IP failed:', e); }
-
-      // 3. Fusion GPS + IP
-      // ✅ Correction : on ne mélange plus le GPS précis avec l'IP. La géolocalisation
-      //    IP (ipapi.co) est très grossière au Sénégal (souvent un point central de Dakar
-      //    quel que soit l'endroit réel de l'utilisateur), donc la pondérer avec un GPS
-      //    fiable faisait dériver la position (ex: Diamniadio affiché comme Dakar).
-      //    Désormais : GPS utilisé tel quel s'il est exploitable, IP seulement en dernier
-      //    recours si le GPS a échoué ou est trop imprécis pour être utile.
-      let finalLat = 14.7167, finalLng = -17.4677, finalAccuracy = 10000, confidence = 0;
-      if (gpsData && gpsData.accuracy <= 150) {
-        finalLat = gpsData.lat; finalLng = gpsData.lng; finalAccuracy = gpsData.accuracy;
-        confidence = Math.min(100, 1000 / (gpsData.accuracy + 1));
-      } else if (ipData) {
-        finalLat = ipData.lat; finalLng = ipData.lng; finalAccuracy = 5000; confidence = 10;
-      }
-
-      // 4. Reverse geocoding double (OSM + BigDataCloud)
-      const [osmAddr, bdcAddr] = await Promise.all([
-        reverseGeocodeOSM(finalLat, finalLng),
-        reverseGeocodeBDC(finalLat, finalLng)
-      ]);
-      let bestAddr = osmAddr || bdcAddr;
-      if (osmAddr && bdcAddr) {
-        bestAddr = osmAddr.detailedAddress.length >= bdcAddr.detailedAddress.length ? osmAddr : bdcAddr;
-      }
-
-      // ✅ Garde-fou : sur PC sans GPS, l'IP/WiFi peut renvoyer une position hors du
-      //    Sénégal (mauvaise base de géoloc IP locale). Plutôt que d'afficher une
-      //    fausse adresse avec confiance, on détecte ce cas et on demande une
-      //    correction manuelle au lieu d'inventer un lieu.
-      const inSenegal = finalLat >= 12.0 && finalLat <= 16.8 && finalLng >= -17.6 && finalLng <= -11.2;
-      if (!inSenegal) {
-        console.warn('🚫 Position hors Sénégal détectée, rejetée:', { finalLat, finalLng });
-        // Position hors Sénégal : afficher Sénégal par défaut
-        setLocation({ address: 'Sénégal', lat: 14.7167, lng: -17.4677, precision: 10000, detailedAddress: 'Sénégal', region: '' });
-        setLocStatus('found');
-        return;
-      }
-
-      const regionRaw = bestAddr?.region || ipData?.region || '';
-      const region = REGION_ALIASES[regionRaw] || regionRaw;
-
-      // Toujours afficher : commune + région (jamais l'adresse de rue)
-      const commune = bestAddr?.commune || bestAddr?.quarter || '';
-      const displayAddress = commune && region
-        ? `${commune}, ${region}`
-        : commune || region || 'Sénégal';
-
+      const raw = localStorage.getItem('agrimarche_location');
+      if (!raw) { setLocStatus('found'); return; }
+      const saved = JSON.parse(raw);
       setLocation({
-        address: displayAddress,
-        lat: finalLat, lng: finalLng,
-        precision: finalAccuracy,
-        detailedAddress: displayAddress,
-        region
+        address: saved.address,
+        lat: saved.lat,
+        lng: saved.lng,
+        precision: saved.precision,
+        detailedAddress: saved.detailedAddress,
+        region: saved.region,
       });
       setLocStatus('found');
-
-      console.log('🎯 LOCALISATION:', { précision:`${finalAccuracy.toFixed(1)}m`, confiance:`${confidence.toFixed(0)}%`, adresse:bestAddr?.detailedAddress, geohash: encodeGeohash(finalLat, finalLng, 9) });
-    } catch (error) {
-      console.error('Localisation error:', error);
-      // Erreur GPS : afficher Sénégal par défaut
-      setLocation({ address: 'Sénégal', lat: 14.7167, lng: -17.4677, precision: 10000, detailedAddress: 'Sénégal', region: '' });
+    } catch {
       setLocStatus('found');
     }
   }, []);
 
-  useEffect(() => {
-    const tryLocate = async () => {
-      try {
-        if ('permissions' in navigator) {
-          const status = await navigator.permissions.query({ name: 'geolocation' });
-          if (status.state === 'granted' || status.state === 'prompt') {
-            setTimeout(() => getDivineLocation(), 300);
-            return;
-          }
-          // Permission refusée → fallback silencieux sur IP
-          setTimeout(() => getDivineLocation(), 300);
-          return;
-        }
-        setTimeout(() => getDivineLocation(), 300);
-      } catch { setTimeout(() => getDivineLocation(), 300); }
-    };
-    tryLocate();
-  }, []);
 
 
   useEffect(() => {
     let r = [...products];
+    // Exclure les produits en rupture de stock
+    r = r.filter(p => p.stock === undefined || p.stock === null || p.stock > 0);
     if (search) r = r.filter(p => p.name?.toLowerCase().includes(search.toLowerCase()));
     if (cat !== 'Tous') r = r.filter(p => p.category === cat);
     if (sort === 'asc')  r.sort((a,b) => (a.price||0)-(b.price||0));
@@ -937,6 +659,9 @@ export default function AgriMarket() {
   
   const wa = (name: string, phone?: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
+    if (analytics) {
+      logEvent(analytics, 'whatsapp_click', { product_name: name });
+    }
     window.open(`https://wa.me/${phone?.replace(/\D/g,'') || WA_NUMBER}?text=${encodeURIComponent(`Bonjour, je suis intéressé par "${name}".`)}`, '_blank');
   };
 
@@ -1340,11 +1065,11 @@ export default function AgriMarket() {
         }
 
         .g-grid {
-          display:grid; grid-template-columns:repeat(2,1fr); gap:12px;
+          display:grid; grid-template-columns:repeat(3,1fr); gap:8px;
         }
-        @media(min-width:600px)  { .g-grid { grid-template-columns:repeat(3,1fr); } }
-        @media(min-width:900px)  { .g-grid { grid-template-columns:repeat(4,1fr); gap:16px; } }
-        @media(min-width:1200px) { .g-grid { grid-template-columns:repeat(5,1fr); } }
+        @media(min-width:600px)  { .g-grid { grid-template-columns:repeat(4,1fr); gap:12px; } }
+        @media(min-width:900px)  { .g-grid { grid-template-columns:repeat(5,1fr); gap:16px; } }
+        @media(min-width:1200px) { .g-grid { grid-template-columns:repeat(6,1fr); } }
 
         .g-card {
           background:var(--snow);
@@ -1397,19 +1122,51 @@ export default function AgriMarket() {
         }
         .g-card:hover .g-card-fog { opacity:0.9; }
 
+        /* ── Carousel flèches + dots ── */
+        .g-carr-arrow {
+          position:absolute; top:50%; transform:translateY(-50%);
+          width:28px; height:28px; border-radius:50%;
+          background:rgba(255,255,255,0.82); backdrop-filter:blur(8px);
+          border:1px solid rgba(255,255,255,0.5);
+          color:var(--forest); font-size:18px; font-weight:700;
+          display:flex; align-items:center; justify-content:center;
+          cursor:pointer; z-index:4; padding:0; line-height:1;
+          opacity:0; transition:opacity 0.2s, transform 0.2s;
+          box-shadow:0 2px 12px rgba(0,0,0,0.18);
+        }
+        .g-carr-arrow.left  { left:7px; }
+        .g-carr-arrow.right { right:7px; }
+        .g-card:hover .g-carr-arrow { opacity:1; }
+        .g-carr-arrow:hover { background:rgba(255,255,255,0.97); transform:translateY(-50%) scale(1.12); }
+
+        .g-carr-dots {
+          position:absolute; bottom:8px; left:0; right:0;
+          display:flex; justify-content:center; gap:5px; z-index:4;
+        }
+        .g-carr-dot {
+          width:5px; height:5px; border-radius:50%;
+          border:none; cursor:pointer; padding:0;
+          background:rgba(255,255,255,0.45);
+          transition:all 0.2s;
+        }
+        .g-carr-dot.on {
+          width:14px; border-radius:3px;
+          background:#fff;
+        }
+
         .g-card-price {
-          position:absolute; bottom:10px; left:12px; right:12px;
+          position:absolute; bottom:6px; left:8px; right:8px;
           display:flex; align-items:flex-end; justify-content:space-between;
         }
         .g-price-n {
           font-family:'Cormorant Garamond', serif;
-          font-size:24px; font-weight:700; color:#fff;
-          letter-spacing:0.02em; line-height:1;
-          text-shadow:0 2px 12px rgba(0,0,0,0.4);
+          font-size:16px; font-weight:700; color:#fff;
+          letter-spacing:0.01em; line-height:1;
+          text-shadow:0 2px 8px rgba(0,0,0,0.4);
         }
         .g-price-u {
-          font-size:9px; color:rgba(255,255,255,0.7);
-          margin-bottom:2px; font-weight:500; letter-spacing:0.06em;
+          font-size:7px; color:rgba(255,255,255,0.7);
+          margin-bottom:1px; font-weight:500; letter-spacing:0.04em;
         }
 
         .g-verified {
@@ -1417,8 +1174,8 @@ export default function AgriMarket() {
           background:linear-gradient(135deg,var(--emerald),var(--jade));
           color:#fff;
           font-family:'DM Sans', sans-serif;
-          font-size:7px; font-weight:800;
-          letter-spacing:0.1em; padding:3px 9px;
+          font-size:6px; font-weight:800;
+          letter-spacing:0.08em; padding:2px 6px;
           border-radius:100px;
           box-shadow:0 4px 14px rgba(37,137,74,0.45);
         }
@@ -1431,7 +1188,7 @@ export default function AgriMarket() {
           border:1.5px solid rgba(255,255,255,0.6);
           border-radius:50%;
           display:flex; align-items:center; justify-content:center;
-          cursor:pointer; font-size:15px;
+          cursor:pointer; font-size:11px;
           transition:all 0.3s cubic-bezier(.34,1.56,.64,1);
           color:var(--mtext);
           box-shadow:var(--shadow-sm);
@@ -1439,43 +1196,53 @@ export default function AgriMarket() {
         .g-wish:hover { transform:scale(1.2); background:rgba(255,255,255,0.92); color:var(--emerald); }
         .g-wish.on    { background:rgba(239,68,68,0.85); color:#fff; border-color:transparent; }
 
-        .g-card-body { padding:12px 14px 14px; }
+        .g-card-body { padding:8px 9px 10px; }
 
         .g-card-cat {
-          font-size:8px; font-weight:700;
-          letter-spacing:0.16em; color:var(--sage);
-          text-transform:uppercase; margin-bottom:5px;
+          font-size:7px; font-weight:700;
+          letter-spacing:0.12em; color:var(--sage);
+          text-transform:uppercase; margin-bottom:3px;
         }
 
         .g-card-name {
           font-family:'Cormorant Garamond', serif;
-          font-size:17px; font-weight:600; color:var(--text);
-          line-height:1.2; margin-bottom:6px;
+          font-size:13px; font-weight:600; color:var(--text);
+          line-height:1.2; margin-bottom:4px;
           display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
           overflow:hidden;
         }
 
+        .g-card-desc {
+          font-size: 9px;
+          color: var(--mtext);
+          margin: 2px 0 4px;
+          line-height: 1.35;
+          overflow: hidden;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+        }
         .g-card-farmer {
-          display:flex; align-items:center; gap:6px; margin-bottom:8px;
+          display:flex; align-items:center; gap:4px; margin-bottom:5px;
         }
         .g-farmer-avatar {
-          width:16px; height:16px;
+          width:12px; height:12px;
           background:linear-gradient(135deg,var(--emerald),var(--fern));
           border-radius:50%; display:flex; align-items:center; justify-content:center;
-          font-size:8px; flex-shrink:0;
+          font-size:6px; flex-shrink:0;
         }
-        .g-farmer-name { font-size:10px; color:var(--dtext); font-weight:500; }
+        .g-farmer-name { font-size:9px; color:var(--dtext); font-weight:500; }
 
-        .g-stars { display:flex; align-items:center; gap:2px; margin-bottom:10px; }
+        .g-stars { display:flex; align-items:center; gap:1px; margin-bottom:6px; }
 
-        .g-card-actions { display:flex; gap:8px; }
+        .g-card-actions { display:flex; gap:5px; }
 
         .g-wa-btn {
-          flex:1; height:36px;
+          flex:1; height:28px;
           background:linear-gradient(135deg,var(--emerald),var(--fern));
-          border:none; border-radius:11px; color:#fff;
+          border:none; border-radius:9px; color:#fff;
           font-family:'DM Sans', sans-serif;
-          font-size:10px; font-weight:700; letter-spacing:0.06em;
+          font-size:8px; font-weight:700; letter-spacing:0.04em;
           cursor:pointer;
           display:flex; align-items:center; justify-content:center; gap:5px;
           transition:all 0.3s ease;
@@ -1484,11 +1251,11 @@ export default function AgriMarket() {
         .g-wa-btn:hover { transform:translateY(-2px); box-shadow:0 8px 24px rgba(37,137,74,0.45); }
 
         .g-add-btn {
-          width:36px; height:36px;
+          width:28px; height:28px;
           background:var(--alabaster);
           border:1.5px solid var(--border);
-          border-radius:11px;
-          color:var(--mtext); font-size:18px;
+          border-radius:9px;
+          color:var(--mtext); font-size:14px;
           cursor:pointer; flex-shrink:0;
           display:flex; align-items:center; justify-content:center;
           transition:all 0.3s cubic-bezier(.34,1.56,.64,1);
@@ -1814,6 +1581,7 @@ export default function AgriMarket() {
                       <div className="g-um-email">{user?.email || 'Invité'}</div>
                     </div>
                     <Link href="/privacy" className="g-um-item">🛡️ &nbsp;Confidentialité</Link>
+                    <Link href="/conditions-utilisation" className="g-um-item">📋 &nbsp;Conditions d'utilisation</Link>
                     <Link href="/account" className="g-um-item">👤 &nbsp;Mon compte</Link>
                     {user && (
                       <button onClick={async () => { await logout(); router.push('/'); }} className="g-um-item red">
@@ -1899,9 +1667,9 @@ export default function AgriMarket() {
           {/* Bouton localisation GPS */}
           <button
             className="g-loc-chip"
-            onClick={() => getDivineLocation()}
+            onClick={() => router.push('/main/location')}
             style={{ minWidth: 0, flexShrink: 0 }}
-            title="Détecter ma position GPS"
+            title="Changer ma position"
           >
             <div className={`g-loc-pulse ${locStatus}`} />
             <span className="g-loc-text" style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -1910,9 +1678,6 @@ export default function AgriMarket() {
                location?.detailedAddress || location?.address || 'Sénégal'}
             </span>
           </button>
-
-
-          {/* Dropdown filtre région et compteur de produits retirés — la localisation suffit */}
         </div>
 
         <div style={{ position: 'relative', flexShrink: 0 }}>
@@ -1934,6 +1699,64 @@ export default function AgriMarket() {
           )}
         </div>
       </div>
+
+      {/* ── CARROUSEL ANNONCES ── */}
+      {ads.length > 0 && (
+        <div style={{ padding: '0 16px 4px', position: 'relative' }}>
+          <div
+            onClick={() => { const ad = ads[adIdx]; if (ad?.linkUrl) window.location.href = ad.linkUrl; }}
+            style={{ position: 'relative', borderRadius: 18, overflow: 'hidden', cursor: ads[adIdx]?.linkUrl ? 'pointer' : 'default', boxShadow: '0 8px 32px rgba(13,74,31,0.14)' }}
+          >
+            {/* Image avec fallback couleur si URL cassée */}
+            {ads[adIdx]?.imageUrl && ads[adIdx].imageUrl.startsWith('http') ? (
+              <img
+                src={ads[adIdx].imageUrl}
+                alt={ads[adIdx]?.title || 'Annonce'}
+                onError={e => { const el = e.currentTarget; el.style.display = 'none'; (el.nextElementSibling as HTMLElement).style.display = 'flex'; }}
+                style={{ width: '100%', height: 160, objectFit: 'cover', display: 'block' }}
+              />
+            ) : null}
+            {/* Fallback si pas d'image valide */}
+            <div style={{
+              display: (ads[adIdx]?.imageUrl && ads[adIdx].imageUrl.startsWith('http')) ? 'none' : 'flex',
+              width: '100%', height: 160,
+              background: 'linear-gradient(135deg, var(--forest), var(--jade))',
+              alignItems: 'center', justifyContent: 'center',
+              fontSize: 48,
+            }}>🌾</div>
+            {/* Overlay bas */}
+            <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, background: 'linear-gradient(transparent, rgba(0,0,0,0.72))', padding: '28px 14px 12px' }}>
+              {ads[adIdx]?.badge && (
+                <span style={{ display: 'inline-block', background: '#ef4444', color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 8px', borderRadius: 6, marginBottom: 4, letterSpacing: '0.06em' }}>
+                  {ads[adIdx].badge}
+                </span>
+              )}
+              <div style={{ color: '#fff', fontWeight: 700, fontSize: 14, lineHeight: 1.2 }}>{ads[adIdx]?.title}</div>
+              {ads[adIdx]?.type === 'promotion' && ads[adIdx]?.discountedPrice ? (
+                <div style={{ marginTop: 3, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ color: '#00ff87', fontWeight: 800, fontSize: 13 }}>{ads[adIdx].discountedPrice.toLocaleString()} FCFA</span>
+                  {ads[adIdx]?.originalPrice && <span style={{ textDecoration: 'line-through', color: 'rgba(255,255,255,0.5)', fontSize: 11 }}>{ads[adIdx].originalPrice.toLocaleString()}</span>}
+                  <span style={{ background: '#ef4444', color: '#fff', fontSize: 10, fontWeight: 700, padding: '1px 5px', borderRadius: 4 }}>-{ads[adIdx].discountPercent}%</span>
+                </div>
+              ) : ads[adIdx]?.partnerName ? (
+                <div style={{ color: 'rgba(255,255,255,0.65)', fontSize: 11, marginTop: 2 }}>Partenaire · {ads[adIdx].partnerName}</div>
+              ) : null}
+            </div>
+            {/* Dots */}
+            {ads.length > 1 && (
+              <div style={{ position: 'absolute', bottom: 10, right: 12, display: 'flex', gap: 5 }}>
+                {ads.map((_: any, i: number) => (
+                  <button
+                    key={i}
+                    onClick={e => { e.stopPropagation(); setAdIdx(i); }}
+                    style={{ width: i === adIdx ? 18 : 6, height: 6, borderRadius: 3, border: 'none', background: i === adIdx ? '#00ff87' : 'rgba(255,255,255,0.4)', cursor: 'pointer', padding: 0, transition: 'all 0.3s' }}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <main className="g-main">
         <div className="g-section-head">
@@ -1969,33 +1792,67 @@ export default function AgriMarket() {
                   onClick={() => open(p)}
                 >
                   <div className="g-card-visual">
-                    {p.images?.[0] ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img src={p.images[0]} alt={p.name} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', transition: 'transform 0.6s cubic-bezier(.16,1,.3,1)' }} />
-                    ) : (
-                      <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 52, background: 'var(--graphite)' }}>
-                        🌾
-                      </div>
-                    )}
-                    <div className="g-card-fog" />
-
-                    {p.farmerVerified && <div className="g-verified">✓ VÉRIFIÉ</div>}
-
-                    <div className="g-card-price">
-                      <div>
-                        <div className="g-price-n">{p.price?.toLocaleString()}</div>
-                        <div className="g-price-u">FCFA / {p.unit || 'kg'}</div>
-                      </div>
-                    </div>
-
-                    <button onClick={e => toggleWish(p.id, e)} className={`g-wish ${wishlist.has(p.id) ? 'on' : ''}`}>
-                      {wishlist.has(p.id) ? '♥️' : '♡'}
-                    </button>
+                    {(() => {
+                      const imgs = (p.images ?? []).slice(0, 5);
+                      const ci = getCardImg(p.id);
+                      return (
+                        <>
+                          {imgs[ci] ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              src={imgs[ci]}
+                              alt={p.name}
+                              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', transition: 'transform 0.6s cubic-bezier(.16,1,.3,1)' }}
+                            />
+                          ) : (
+                            <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 52, background: 'var(--graphite)' }}>🌾</div>
+                          )}
+                          <div className="g-card-fog" />
+                          {p.farmerVerified && <div className="g-verified">✓ VÉRIFIÉ</div>}
+                          {/* Flèches carousel — visibles dès qu'il y a des images */}
+                          {imgs.length > 0 && (
+                            <>
+                              <button
+                                className="g-carr-arrow left"
+                                onClick={e => { setCardImg(p.id, (ci - 1 + imgs.length) % imgs.length, e); }}
+                              >‹</button>
+                              <button
+                                className="g-carr-arrow right"
+                                onClick={e => { setCardImg(p.id, (ci + 1) % imgs.length, e); }}
+                              >›</button>
+                              {imgs.length > 1 && (
+                                <div className="g-carr-dots">
+                                  {imgs.map((_, i) => (
+                                    <button
+                                      key={i}
+                                      className={`g-carr-dot ${i === ci ? 'on' : ''}`}
+                                      onClick={e => setCardImg(p.id, i, e)}
+                                    />
+                                  ))}
+                                </div>
+                              )}
+                            </>
+                          )}
+                          <div className="g-card-price">
+                            <div>
+                              <div className="g-price-n">{p.price?.toLocaleString()}</div>
+                              <div className="g-price-u">FCFA / {p.unit || 'kg'}</div>
+                            </div>
+                          </div>
+                          <button onClick={e => toggleWish(p.id, e)} className={`g-wish ${wishlist.has(p.id) ? 'on' : ''}`}>
+                            {wishlist.has(p.id) ? '♥️' : '♡'}
+                          </button>
+                        </>
+                      );
+                    })()}
                   </div>
 
                   <div className="g-card-body">
                     <div className="g-card-cat">{p.category}</div>
                     <h3 className="g-card-name">{p.name}</h3>
+                    {p.description && (
+                      <p className="g-card-desc">{p.description}</p>
+                    )}
                     <div className="g-card-farmer">
                       <div className="g-farmer-avatar">🌱</div>
                       <span className="g-farmer-name">{p.farmer?.split(' ')[0] || 'Producteur'}</span>
@@ -2029,159 +1886,7 @@ export default function AgriMarket() {
         <div className="g-motif">— ✦ ◈ ✦ —</div>
       </main>
 
-      {/* ===== MODAL LOCALISATION MANUELLE ===== */}
-      {showLocModal && (
-        <div
-          style={{
-            position: 'fixed', inset: 0, zIndex: 9000,
-            background: 'rgba(6,14,9,0.92)', backdropFilter: 'blur(12px)',
-            display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
-          }}
-          onClick={() => setShowLocModal(false)}
-        >
-          <div
-            style={{
-              width: '100%', maxWidth: 480,
-              background: '#0d1a0f',
-              border: '1px solid rgba(0,255,135,0.2)',
-              borderRadius: '24px 24px 0 0',
-              padding: '28px 20px 40px',
-              boxShadow: '0 -16px 64px rgba(0,0,0,0.6)',
-            }}
-            onClick={e => e.stopPropagation()}
-          >
-            {/* Handle */}
-            <div style={{ width: 40, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.15)', margin: '0 auto 24px' }} />
 
-            {/* Titre */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-              <div>
-                <div style={{ fontSize: 16, fontWeight: 700, color: '#fff', marginBottom: 4 }}>
-                  📍 Où êtes-vous ?
-                </div>
-                <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)' }}>
-                  Localisation GPS refusée — indiquez votre position manuellement
-                </div>
-              </div>
-              <button
-                onClick={() => setShowLocModal(false)}
-                style={{ background: 'rgba(255,255,255,0.08)', border: 'none', color: '#fff', width: 32, height: 32, borderRadius: '50%', cursor: 'pointer', fontSize: 16 }}
-              >✕</button>
-            </div>
-
-            {/* Étape 1 : Région */}
-            <div style={{ marginBottom: 14 }}>
-              <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--jade)', letterSpacing: 1, textTransform: 'uppercase', display: 'block', marginBottom: 8 }}>
-                1. Région
-              </label>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                {REGIONS_SENEGAL.filter(r => r !== 'Tout le Sénégal').map(reg => (
-                  <button
-                    key={reg}
-                    onClick={() => { setManualRegion(reg); setManualDept(''); setManualCommune(''); }}
-                    style={{
-                      padding: '7px 14px', borderRadius: 20, fontSize: 13, cursor: 'pointer',
-                      border: `1px solid ${manualRegion === reg ? 'var(--jade)' : 'rgba(255,255,255,0.12)'}`,
-                      background: manualRegion === reg ? 'rgba(0,255,135,0.15)' : 'transparent',
-                      color: manualRegion === reg ? 'var(--jade)' : 'rgba(255,255,255,0.7)',
-                      fontWeight: manualRegion === reg ? 700 : 400,
-                      transition: 'all 0.15s',
-                    }}
-                  >{reg}</button>
-                ))}
-              </div>
-            </div>
-
-            {/* Étape 2 : Département */}
-            {manualRegion && GEO_SENEGAL[manualRegion] && (
-              <div style={{ marginBottom: 14 }}>
-                <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--jade)', letterSpacing: 1, textTransform: 'uppercase', display: 'block', marginBottom: 8 }}>
-                  2. Département
-                </label>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                  {Object.keys(GEO_SENEGAL[manualRegion]).map(dept => (
-                    <button
-                      key={dept}
-                      onClick={() => { setManualDept(dept); setManualCommune(''); }}
-                      style={{
-                        padding: '7px 14px', borderRadius: 20, fontSize: 13, cursor: 'pointer',
-                        border: `1px solid ${manualDept === dept ? 'var(--jade)' : 'rgba(255,255,255,0.12)'}`,
-                        background: manualDept === dept ? 'rgba(0,255,135,0.15)' : 'transparent',
-                        color: manualDept === dept ? 'var(--jade)' : 'rgba(255,255,255,0.7)',
-                        fontWeight: manualDept === dept ? 700 : 400,
-                        transition: 'all 0.15s',
-                      }}
-                    >{dept}</button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Étape 3 : Commune */}
-            {manualRegion && manualDept && GEO_SENEGAL[manualRegion]?.[manualDept] && (
-              <div style={{ marginBottom: 24 }}>
-                <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--jade)', letterSpacing: 1, textTransform: 'uppercase', display: 'block', marginBottom: 8 }}>
-                  3. Commune
-                </label>
-                <div style={{ maxHeight: 160, overflowY: 'auto', display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                  {GEO_SENEGAL[manualRegion][manualDept].map(com => (
-                    <button
-                      key={com}
-                      onClick={() => setManualCommune(com)}
-                      style={{
-                        padding: '7px 14px', borderRadius: 20, fontSize: 12, cursor: 'pointer',
-                        border: `1px solid ${manualCommune === com ? 'var(--jade)' : 'rgba(255,255,255,0.1)'}`,
-                        background: manualCommune === com ? 'rgba(0,255,135,0.15)' : 'transparent',
-                        color: manualCommune === com ? 'var(--jade)' : 'rgba(255,255,255,0.6)',
-                        fontWeight: manualCommune === com ? 700 : 400,
-                        transition: 'all 0.15s',
-                      }}
-                    >{com}</button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Résumé + Confirmer */}
-            {manualRegion && (
-              <button
-                onClick={() => {
-                  const label = [manualCommune, manualDept, manualRegion].filter(Boolean).join(', ');
-                  setLocation({
-                    address: [manualDept || manualRegion, manualRegion].filter(Boolean).join(', '),
-                    lat: 14.7167, lng: -17.4677, precision: 0,
-                    detailedAddress: label,
-                    region: manualRegion,
-                  });
-                  setLocStatus('found');
-                  setShowLocModal(false);
-                }}
-                style={{
-                  width: '100%', padding: '15px', borderRadius: 14, border: 'none',
-                  background: 'var(--jade)', color: '#060e09',
-                  fontSize: 14, fontWeight: 800, cursor: 'pointer',
-                  letterSpacing: 0.5,
-                  opacity: manualRegion ? 1 : 0.4,
-                }}
-              >
-                ✓ Confirmer — {[manualCommune || manualDept || manualRegion].join('')}
-              </button>
-            )}
-
-            {/* Bouton réessayer GPS */}
-            <button
-              onClick={() => { setShowLocModal(false); getDivineLocation(); }}
-              style={{
-                width: '100%', padding: '12px', borderRadius: 14, border: '1px solid rgba(255,255,255,0.12)',
-                background: 'transparent', color: 'rgba(255,255,255,0.5)',
-                fontSize: 13, cursor: 'pointer', marginTop: 10,
-              }}
-            >
-              🔄 Réessayer la géolocalisation GPS
-            </button>
-          </div>
-        </div>
-      )}
 
       <nav className="g-nav">
         <div className="g-nav-inner">
@@ -2236,12 +1941,23 @@ export default function AgriMarket() {
                     ) : (
                       <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 80 }}>🌾</div>
                     )}
+                    {/* Flèches drawer */}
                     {galleryImages.length > 1 && (
-                      <div className="g-gallery-dots">
-                        {galleryImages.map((_, i) => (
-                          <button key={i} onClick={() => setImgIdx(i)} className={`g-gdot ${imgIdx === i ? 'on' : ''}`} />
-                        ))}
-                      </div>
+                      <>
+                        <button
+                          onClick={() => setImgIdx(i => (i - 1 + galleryImages.length) % galleryImages.length)}
+                          style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', background: 'rgba(255,255,255,0.85)', border: 'none', borderRadius: '50%', width: 36, height: 36, fontSize: 20, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 8px rgba(0,0,0,0.18)', zIndex: 10 }}
+                        >‹</button>
+                        <button
+                          onClick={() => setImgIdx(i => (i + 1) % galleryImages.length)}
+                          style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'rgba(255,255,255,0.85)', border: 'none', borderRadius: '50%', width: 36, height: 36, fontSize: 20, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 8px rgba(0,0,0,0.18)', zIndex: 10 }}
+                        >›</button>
+                        <div className="g-gallery-dots">
+                          {galleryImages.map((_, i) => (
+                            <button key={i} onClick={() => setImgIdx(i)} className={`g-gdot ${imgIdx === i ? 'on' : ''}`} />
+                          ))}
+                        </div>
+                      </>
                     )}
                   </>
                 );
@@ -2265,7 +1981,7 @@ export default function AgriMarket() {
                   <div className="g-meta-icon">🌾</div>
                   <span className="g-meta-text">
                     {selected.farmer || 'Producteur local'}
-                    {selected.farmerPhone && <span>&ensp;·&ensp;<span>{selected.farmerPhone}</span></span>}
+                    {/* numéro masqué — visible uniquement via WhatsApp */}
                   </span>
                 </div>
                 {selected.stock !== undefined && (
@@ -2326,10 +2042,33 @@ export default function AgriMarket() {
                 <div className="g-recs-grid">
                   {section.items.map(r => (
                     <div key={r.id} className="g-rec" onClick={() => { setSelected(r); setImgIdx(0); drawerRef.current?.scrollTo({ top: 0, behavior: 'smooth' }); }}>
-                      <div className="g-rec-img">
-                        {r.images?.[0]
-                          ? <img src={r.images[0]} alt={r.name} style={{ objectFit: 'cover', width: '100%', height: '100%' }} />
-                          : <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22 }}>🌾</div>}
+                      <div className="g-rec-img" style={{ position: 'relative' }}>
+                        {(() => {
+                          const rimgs = (r.images ?? []).slice(0, 5);
+                          const ri = getRecImg(r.id);
+                          return (
+                            <>
+                              {rimgs[ri]
+                                ? <img src={rimgs[ri]} alt={r.name} style={{ objectFit: 'cover', width: '100%', height: '100%' }} />
+                                : <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22 }}>🌾</div>}
+                              {rimgs.length > 1 && (
+                                <div style={{ position: 'absolute', bottom: 3, left: 0, right: 0, display: 'flex', justifyContent: 'center', gap: 3 }}>
+                                  {rimgs.map((_, i) => (
+                                    <button
+                                      key={i}
+                                      onClick={e => setRecImg(r.id, i, e)}
+                                      style={{
+                                        width: i === ri ? 10 : 5, height: 5, borderRadius: 3, border: 'none', cursor: 'pointer', padding: 0,
+                                        background: i === ri ? '#fff' : 'rgba(255,255,255,0.45)',
+                                        transition: 'all 0.2s',
+                                      }}
+                                    />
+                                  ))}
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
                       </div>
                       <div style={{ minWidth: 0 }}>
                         <div className="g-rec-cat">{r.category}</div>

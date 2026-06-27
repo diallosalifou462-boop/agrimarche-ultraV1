@@ -1,20 +1,9 @@
-// app/sitemap.ts
-
 import { MetadataRoute } from 'next';
 import { collection, getDocs } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const baseUrl = 'https://agrimarche.sn';
-
-  // Récupérer tous les produits
-  const productsSnapshot = await getDocs(collection(db, 'products'));
-  const products = productsSnapshot.docs.map((doc) => ({
-    url: `${baseUrl}/main/products/${doc.id}`,
-    lastModified: doc.data().updatedAt?.toDate() || new Date(),
-    changeFrequency: 'weekly' as const,
-    priority: 0.7,
-  }));
 
   // Pages statiques
   const staticPages = [
@@ -50,5 +39,20 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     },
   ];
 
-  return [...staticPages, ...products];
+  // Récupérer tous les produits — si Firestore refuse l'accès (build sans utilisateur
+  // authentifié) on ignore simplement les produits plutôt que de faire échouer tout le build.
+  try {
+    const productsSnapshot = await getDocs(collection(db, 'products'));
+    const products = productsSnapshot.docs.map((doc) => ({
+      url: `${baseUrl}/main/products/${doc.id}`,
+      lastModified: doc.data().updatedAt?.toDate() || new Date(),
+      changeFrequency: 'weekly' as const,
+      priority: 0.7,
+    }));
+
+    return [...staticPages, ...products];
+  } catch (err) {
+    console.warn('sitemap: impossible de récupérer les produits depuis Firestore, sitemap statique uniquement.', err);
+    return staticPages;
+  }
 }

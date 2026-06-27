@@ -1,47 +1,67 @@
 'use client';
 
-import React from 'react';
-import Link from 'next/link';
 import { useEffect, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import {
-  collection,
-  query,
-  where,
-  orderBy,
-  doc,
-  updateDoc,
-  onSnapshot,
-  Timestamp,
-  getDoc,
+  collection, query, where, orderBy, onSnapshot, doc, updateDoc, Timestamp,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
-import {
-  CheckCircle,
-  XCircle,
-  Truck,
-  Clock,
-  Package,
-  ArrowLeft,
-  AlertTriangle,
-  MapPin,
-} from 'lucide-react';
-import DeliveryTracker from '@/components/DeliveryTracker';
-import { DELIVERY_STEPS } from '@/lib/deliveryTracking';
-import DeliveryMap from '@/components/DeliveryMap';
+import { Suspense } from 'react';
 
-export default function OrdersPage() {
-  const { user } = useAuth();
-  const [orders, setOrders] = useState<any[]>([]);
+interface Order {
+  id: string;
+  orderNumber: string;
+  // ─── STATUTS UNIFIÉS (identiques à page.tsx et checkout-page.tsx) ───────────
+  // en_attente → en_preparation → en_livraison → livre
+  //                                            ↘ annule (cancelledBy: 'client'|'seller')
+  status: string;
+  statusLabel: string;
+  total: number;
+  depositAmount: number;
+  remainingAmount: number;
+  paymentMethodName: string;
+  items: { productName: string; quantity: number; unit: string; productPrice: number; image?: string }[];
+  sellerName: string;
+  sellerPhone: string;
+  date: string;
+  deliveryTime: string;
+  createdAt: any;
+  cancelledBy?: string;
+  cancelledAt?: any;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SOURCE DE VÉRITÉ : mêmes clés que page.tsx (vendeur) et checkout-page.tsx
+// ─────────────────────────────────────────────────────────────────────────────
+const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string; icon: string }> = {
+  en_attente:     { label: 'En attente',        color: '#92400e', bg: '#fef3c7', icon: '⏳' },
+  en_preparation: { label: 'En préparation',    color: '#1e40af', bg: '#dbeafe', icon: '🔧' },
+  en_livraison:   { label: 'En livraison',      color: '#5b21b6', bg: '#ede9fe', icon: '🚚' },
+  livre:          { label: 'Livrée',            color: '#065f46', bg: '#d1fae5', icon: '📦' },
+  annule:         { label: 'Annulée',           color: '#991b1b', bg: '#fee2e2', icon: '❌' },
+};
+
+// Étapes du tracking (dans l'ordre du flux)
+const TRACKING_STEPS = [
+  { key: 'en_attente',     icon: '⏳', label: 'Commande reçue',           doneWhen: (_s: string) => true },
+  { key: 'en_preparation', icon: '🔧', label: 'Acceptée par le vendeur',   doneWhen: (s: string) => ['en_preparation','en_livraison','livre'].includes(s) },
+  { key: 'en_livraison',   icon: '🚚', label: 'En cours de livraison',     doneWhen: (s: string) => ['en_livraison','livre'].includes(s) },
+  { key: 'livre',          icon: '📦', label: 'Livrée',                    doneWhen: (s: string) => s === 'livre' },
+];
+
+function OrdersContent() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const { user, loading: authLoading } = useAuth();
+  const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
-  const [updating, setUpdating] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(searchParams.get('order'));
+  const [cancelling, setCancelling] = useState<string | null>(null);
 
-  // Sync temps réel
   useEffect(() => {
-    if (!user) {
-      setLoading(false);
-      return;
-    }
+    if (authLoading) return;
+    if (!user) { router.push('/auth/login?redirect=/account/orders'); return; }
 
     const q = query(
       collection(db, 'orders'),
@@ -49,379 +69,256 @@ export default function OrdersPage() {
       orderBy('createdAt', 'desc')
     );
 
-    const unsub = onSnapshot(
-      q,
-      (snap) => {
-        setOrders(
-          snap.docs.map((d) => ({
-            ...d.data(),
-            firestoreId: d.id,
-          }))
-        );
-        setLoading(false);
-      },
-      (err) => {
-        console.error(err);
-        setLoading(false);
-      }
-    );
+    const unsub = onSnapshot(q, snap => {
+      const data = snap.docs.map(d => ({ id: d.id, ...d.data() } as Order));
+      setOrders(data);
+      setLoading(false);
+      if (!selected && data.length > 0) setSelected(data[0].id);
+    });
 
     return () => unsub();
-  }, [user]);
+  }, [user, authLoading]);
 
-  // Annulation client
+  // ── Annulation par le client ─────────────────────────────────────────────
   const handleCancelOrder = async (orderId: string) => {
-    const ok = confirm(
-      '⚠️ Annuler cette commande ?\n\nLe vendeur en sera informé immédiatement.'
-    );
-    if (!ok) return;
-
-    setUpdating(orderId);
+    if (!confirm('Annuler cette commande ? Cette action est irréversible.')) return;
+    setCancelling(orderId);
     try {
-      const orderRef = doc(db, 'orders', orderId);
-      const orderSnap = await getDoc(orderRef);
-      const orderData = orderSnap.data();
-
-      await updateDoc(orderRef, {
-        status: 'annulee',
+      await updateDoc(doc(db, 'orders', orderId), {
+        status: 'annule',
         statusLabel: 'Annulée par le client',
         cancelledBy: 'client',
         cancelledAt: Timestamp.now(),
         updatedAt: new Date().toISOString(),
       });
-
-      if (orderData?.sellerId) {
-        await fetch('/api/notifications/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            userId: orderData.sellerId,
-            title: '❌ Commande annulée',
-            body: `${orderData.userName || 'Un client'} a annulé sa commande #${
-              orderData.orderNumber || orderId.slice(-8)
-            }`,
-            link: '/seller/orders',
-          }),
-        });
-      }
-    } catch (err) {
-      console.error(err);
-      alert("Erreur lors de l'annulation.");
+    } catch (e) {
+      console.error('Erreur annulation', e);
+      alert('Erreur lors de l\'annulation. Réessayez.');
     } finally {
-      setUpdating(null);
+      setCancelling(null);
     }
   };
 
-  // Confirmation réception
-  const handleConfirmDelivery = async (orderId: string) => {
-    const confirmed = confirm('✅ Confirmez-vous avoir reçu votre commande ?');
-    if (!confirmed) return;
+  const selectedOrder = orders.find(o => o.id === selected);
+  const status = selectedOrder ? (STATUS_CONFIG[selectedOrder.status] || STATUS_CONFIG.en_attente) : null;
 
-    setUpdating(orderId);
-    try {
-      const orderRef = doc(db, 'orders', orderId);
-      const orderSnap = await getDoc(orderRef);
-      const orderData = orderSnap.data();
+  if (loading || authLoading) return (
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#FAFAF8' }}>
+      <div style={{ width: 40, height: 40, border: '3px solid #C9A96E', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+    </div>
+  );
 
-      await updateDoc(orderRef, {
-        status: 'livree',
-        statusLabel: 'Livrée – confirmée par le client',
-        updatedAt: new Date().toISOString(),
-      });
-
-      if (orderData?.sellerId) {
-        await fetch('/api/notifications/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            userId: orderData.sellerId,
-            title: '✅ Commande livrée',
-            body: `${orderData.userName || 'Le client'} a confirmé la réception de sa commande #${
-              orderData.orderNumber || orderId.slice(-8)
-            }`,
-            link: '/seller/orders',
-          }),
-        });
-      }
-
-      alert('🎉 Merci ! Votre confirmation a été enregistrée.');
-    } catch (err) {
-      console.error(err);
-      alert('Erreur lors de la confirmation.');
-    } finally {
-      setUpdating(null);
-    }
-  };
-
-  const formatDate = (date: any) => {
-    if (!date) return 'Date inconnue';
-    if (date?.toDate) {
-      return date.toDate().toLocaleDateString('fr-FR', {
-        day: 'numeric',
-        month: 'long',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-    }
-    return date;
-  };
-
-  const getStatusInfo = (status: string): { label: string; color: string; icon: React.ReactElement } => {
-    const map: Record<string, { label: string; color: string; icon: React.ReactElement }> = {
-      en_attente: {
-        label: 'En attente',
-        color: 'bg-yellow-100 text-yellow-700',
-        icon: React.createElement(Clock, { size: 14, className: 'mr-1' }),
-      },
-      en_preparation: {
-        label: 'En préparation',
-        color: 'bg-blue-100 text-blue-700',
-        icon: React.createElement(Package, { size: 14, className: 'mr-1' }),
-      },
-      expediee: {
-        label: 'Expédiée',
-        color: 'bg-purple-100 text-purple-700',
-        icon: React.createElement(Truck, { size: 14, className: 'mr-1' }),
-      },
-      livree: {
-        label: 'Livrée',
-        color: 'bg-green-100 text-green-700',
-        icon: React.createElement(CheckCircle, { size: 14, className: 'mr-1' }),
-      },
-      annulee: {
-        label: 'Annulée',
-        color: 'bg-red-100 text-red-700',
-        icon: React.createElement(XCircle, { size: 14, className: 'mr-1' }),
-      },
-    };
-    return map[status] || { label: status, color: 'bg-gray-100 text-gray-700', icon: React.createElement(React.Fragment) };
-  };
-
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-12 h-12 border-4 border-emerald-600 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-gray-500">Chargement de vos commandes…</p>
-        </div>
-      </div>
-    );
-  }
+  if (orders.length === 0) return (
+    <div style={{ minHeight: '100vh', background: '#FAFAF8', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+      <div style={{ fontSize: 64, marginBottom: 16 }}>📦</div>
+      <h2 style={{ fontFamily: 'Georgia, serif', fontSize: 26, fontWeight: 300, color: '#1A1A1A', marginBottom: 8 }}>Aucune commande</h2>
+      <p style={{ color: '#9A9A9A', fontSize: 14, marginBottom: 32 }}>Vous n'avez pas encore passé de commande.</p>
+      <button
+        onClick={() => router.push('/main/products')}
+        style={{ background: 'linear-gradient(135deg, #C9A96E, #b8923a)', color: '#fff', border: 'none', borderRadius: 14, padding: '14px 32px', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}
+      >
+        Découvrir les produits
+      </button>
+    </div>
+  );
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div style={{ minHeight: '100vh', background: '#FAFAF8', fontFamily: 'DM Sans, sans-serif' }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300&display=swap');
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+        .order-item { cursor:pointer; transition: all 0.2s; border-radius:16px; padding:16px; border:1.5px solid transparent; }
+        .order-item:hover { background:#fff; border-color:rgba(201,169,110,0.3); }
+        .order-item.active { background:#fff; border-color:#C9A96E; box-shadow:0 4px 24px rgba(201,169,110,0.15); }
+        .wa-btn { display:flex; align-items:center; gap:8px; background:#25D366; color:#fff; border:none; border-radius:12px; padding:12px 20px; font-size:13px; font-weight:600; cursor:pointer; text-decoration:none; transition:opacity 0.2s; }
+        .wa-btn:hover { opacity:0.88; }
+        .track-step { display:flex; align-items:flex-start; gap:12px; padding:12px 0; }
+        .track-dot { width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; flex-shrink:0; font-size:13px; margin-top:2px; }
+        .cancel-btn { display:flex; align-items:center; gap:8px; background:#fff; color:#991b1b; border:1.5px solid #fca5a5; border-radius:12px; padding:11px 18px; font-size:13px; font-weight:600; cursor:pointer; transition:all 0.2s; }
+        .cancel-btn:hover { background:#fee2e2; }
+        .cancel-btn:disabled { opacity:0.5; cursor:not-allowed; }
+      `}</style>
+
       {/* Header */}
-      <div className="bg-white border-b border-gray-100 sticky top-0 z-10">
-        <div className="max-w-3xl mx-auto px-4 py-4 flex items-center justify-between">
-          <Link
-            href="/account"
-            className="flex items-center gap-2 text-gray-600 hover:text-emerald-600 transition"
-          >
-            <ArrowLeft size={20} />
-            <span className="font-medium">Mon compte</span>
-          </Link>
-          <h1 className="text-xl font-bold text-gray-900">📦 Mes commandes</h1>
-          <div className="w-20" />
-        </div>
-      </div>
-
-      <div className="max-w-3xl mx-auto p-4">
-        {orders.length === 0 ? (
-          <div className="bg-white rounded-2xl p-10 text-center shadow-sm mt-4">
-            <div className="text-6xl mb-4">📦</div>
-            <h2 className="text-xl font-bold text-gray-900 mb-2">Aucune commande</h2>
-            <p className="text-gray-500 text-sm mb-6">
-              Vous n'avez pas encore passé de commande.
-            </p>
-            <Link href="/main/products">
-              <button className="bg-emerald-600 text-white px-6 py-3 rounded-xl font-semibold hover:bg-emerald-700 transition">
-                Découvrir les produits
-              </button>
-            </Link>
+      <header style={{ position:'sticky', top:0, zIndex:50, background:'rgba(250,250,248,0.92)', backdropFilter:'blur(12px)', borderBottom:'1px solid rgba(201,169,110,0.15)', padding:'16px 20px' }}>
+        <div style={{ maxWidth:720, margin:'0 auto', display:'flex', alignItems:'center', gap:12 }}>
+          <button onClick={() => router.back()} style={{ width:38, height:38, borderRadius:'50%', background:'#fff', border:'1px solid rgba(201,169,110,0.2)', cursor:'pointer', fontSize:18 }}>←</button>
+          <div>
+            <h1 style={{ fontFamily:'Cormorant Garamond, Georgia, serif', fontSize:22, fontWeight:400, color:'#1A1A1A', margin:0 }}>Mes commandes</h1>
+            <p style={{ fontSize:11, color:'#9A9A9A', margin:0, letterSpacing:'0.08em' }}>{orders.length} COMMANDE{orders.length > 1 ? 'S' : ''}</p>
           </div>
-        ) : (
-          <div className="space-y-4 mt-4">
-            {orders.map((order) => {
-              const statusInfo = getStatusInfo(order.status);
-              const canCancel = ['en_attente', 'en_preparation'].includes(order.status);
-              const canConfirm = order.status === 'expediee';
-              const canTrack = order.status === 'expediee';
-              const isUpdating = updating === order.firestoreId;
-              const cancelledBySeller = order.status === 'annulee' && order.cancelledBy === 'seller';
-              const cancelledByClient = order.status === 'annulee' && order.cancelledBy === 'client';
+        </div>
+      </header>
 
-              return (
-                <div
-                  key={order.firestoreId}
-                  className="bg-white rounded-2xl p-5 shadow-sm hover:shadow-md transition border border-gray-100"
-                >
-                  {/* En-tête */}
-                  <div className="flex justify-between items-start mb-3">
-                    <div>
-                      <p className="font-bold text-gray-900">
-                        Commande #{order.orderNumber || order.id?.slice(-8).toUpperCase()}
-                      </p>
-                      <p className="text-xs text-gray-400 mt-1">{formatDate(order.createdAt)}</p>
-                    </div>
-                    <div
-                      className={`px-3 py-1 rounded-full text-xs font-semibold flex items-center ${statusInfo.color}`}
-                    >
-                      {statusInfo.icon}
-                      {statusInfo.label}
-                    </div>
+      <div style={{ maxWidth:720, margin:'0 auto', padding:'20px 16px', display:'flex', flexDirection:'column', gap:12 }}>
+
+        {orders.map(order => {
+          const st = STATUS_CONFIG[order.status] || STATUS_CONFIG.en_attente;
+          const isActive = order.id === selected;
+          // Le client peut annuler seulement si la commande n'est pas encore en livraison/livrée/déjà annulée
+          const canCancel = ['en_attente', 'en_preparation'].includes(order.status);
+
+          return (
+            <div key={order.id} className={`order-item ${isActive ? 'active' : ''}`} onClick={() => setSelected(order.id)}
+              style={{ animation: 'fadeIn 0.3s ease' }}>
+              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:12 }}>
+                <div style={{ flex:1 }}>
+                  <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
+                    <span style={{ fontSize:11, fontWeight:700, letterSpacing:'0.08em', color:'#C9A96E' }}>
+                      {order.orderNumber || order.id.slice(0,8).toUpperCase()}
+                    </span>
+                    <span style={{ fontSize:10, background: st.bg, color: st.color, borderRadius:99, padding:'2px 8px', fontWeight:600 }}>
+                      {st.icon} {st.label}
+                    </span>
+                    {/* Badge annulée par vendeur */}
+                    {order.status === 'annule' && order.cancelledBy === 'seller' && (
+                      <span style={{ fontSize:10, background:'#fee2e2', color:'#991b1b', borderRadius:99, padding:'2px 8px', fontWeight:600 }}>
+                        Refusée par le vendeur
+                      </span>
+                    )}
                   </div>
+                  <p style={{ margin:0, fontSize:13, color:'#4A4A4A' }}>
+                    {order.items?.length} article{(order.items?.length || 0) > 1 ? 's' : ''} · {order.sellerName}
+                  </p>
+                  <p style={{ margin:'4px 0 0', fontSize:11, color:'#9A9A9A' }}>{order.date}</p>
+                </div>
+                <div style={{ textAlign:'right', flexShrink:0 }}>
+                  <p style={{ margin:0, fontWeight:700, color:'#1A1A1A', fontSize:15 }}>{order.total?.toLocaleString()} <span style={{ fontSize:11, fontWeight:400, color:'#9A9A9A' }}>FCFA</span></p>
+                  <p style={{ margin:'2px 0 0', fontSize:10, color:'#9A9A9A' }}>{order.paymentMethodName}</p>
+                </div>
+              </div>
 
-                  {/* Annulée par le vendeur */}
-                  {cancelledBySeller && (
-                    <div className="mb-3 bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 flex items-start gap-2">
-                      <AlertTriangle size={16} className="text-rose-500 shrink-0 mt-0.5" />
+              {/* Détail expansible */}
+              {isActive && selectedOrder && status && (
+                <div style={{ marginTop:16, borderTop:'1px solid rgba(201,169,110,0.15)', paddingTop:16, animation:'fadeIn 0.25s ease' }}>
+
+                  {/* Alerte si vendeur a annulé */}
+                  {selectedOrder.status === 'annule' && selectedOrder.cancelledBy === 'seller' && (
+                    <div style={{ background:'#fee2e2', border:'1px solid #fca5a5', borderRadius:12, padding:'12px 16px', marginBottom:16, display:'flex', alignItems:'flex-start', gap:10 }}>
+                      <span style={{ fontSize:20 }}>❌</span>
                       <div>
-                        <p className="text-sm font-bold text-rose-700">Commande refusée par le vendeur</p>
-                        <p className="text-xs text-rose-500 mt-0.5">
-                          Le vendeur n'a pas pu traiter votre commande. Vous pouvez en passer une nouvelle
-                          ci-dessous.
-                        </p>
+                        <p style={{ margin:0, fontSize:13, fontWeight:700, color:'#991b1b' }}>Commande refusée par le vendeur</p>
+                        <p style={{ margin:'4px 0 0', fontSize:12, color:'#b91c1c' }}>Le vendeur n'a pas pu traiter votre commande. Vous pouvez commander à nouveau.</p>
                       </div>
                     </div>
                   )}
 
-                  {/* Annulée par le client */}
-                  {cancelledByClient && (
-                    <div className="mb-3 bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 flex items-center gap-2">
-                      <XCircle size={15} className="text-gray-400 shrink-0" />
-                      <p className="text-xs text-gray-500 font-medium">
-                        Vous avez annulé cette commande.
-                      </p>
+                  {/* Statut visuel */}
+                  <div style={{ background: status.bg, borderRadius:12, padding:'12px 16px', marginBottom:16, display:'flex', alignItems:'center', gap:10 }}>
+                    <span style={{ fontSize:22 }}>{status.icon}</span>
+                    <div>
+                      <p style={{ margin:0, fontSize:13, fontWeight:700, color: status.color }}>{status.label}</p>
+                      <p style={{ margin:0, fontSize:11, color: status.color, opacity:0.75 }}>{selectedOrder.statusLabel}</p>
+                    </div>
+                  </div>
+
+                  {/* Suivi étapes (masqué si annulée) */}
+                  {selectedOrder.status !== 'annule' && (
+                    <div style={{ marginBottom:16 }}>
+                      {TRACKING_STEPS.map((step, i) => {
+                        const done = step.doneWhen(selectedOrder.status);
+                        return (
+                          <div key={step.key} className="track-step">
+                            <div className="track-dot" style={{ background: done ? '#d1fae5' : '#f3f4f6', color: done ? '#065f46' : '#9A9A9A' }}>
+                              {step.icon}
+                            </div>
+                            <div>
+                              <p style={{ margin:0, fontSize:13, fontWeight: done ? 600 : 400, color: done ? '#1A1A1A' : '#9A9A9A' }}>{step.label}</p>
+                              {done && i === 0 && <p style={{ margin:0, fontSize:11, color:'#9A9A9A' }}>{selectedOrder.date}</p>}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
 
-                  {/* Produits */}
-                  <div className="border-t border-gray-100 pt-3 mt-2 space-y-2">
-                    {order.items?.map((item: any, idx: number) => (
-                      <div key={idx} className="flex justify-between text-sm">
-                        <span className="text-gray-600">
-                          {item.quantity}x {item.productName}
-                        </span>
-                        <span className="font-medium text-gray-800">
-                          {(item.price * item.quantity).toLocaleString()} FCFA
-                        </span>
+                  {/* Articles */}
+                  <div style={{ marginBottom:16 }}>
+                    <p style={{ margin:'0 0 8px', fontSize:11, fontWeight:700, letterSpacing:'0.08em', color:'#9A9A9A', textTransform:'uppercase' }}>Articles</p>
+                    {selectedOrder.items?.map((item, i) => (
+                      <div key={i} style={{ display:'flex', alignItems:'center', gap:12, padding:'8px 0', borderBottom: i < selectedOrder.items.length-1 ? '1px solid #f3f4f6' : 'none' }}>
+                        <div style={{ width:40, height:40, borderRadius:10, background:'#f3f4f6', overflow:'hidden', flexShrink:0 }}>
+                          {item.image
+                            ? <img src={item.image} alt={item.productName} style={{ width:'100%', height:'100%', objectFit:'cover' }} />
+                            : <div style={{ width:'100%', height:'100%', display:'flex', alignItems:'center', justifyContent:'center', fontSize:20 }}>🌾</div>
+                          }
+                        </div>
+                        <div style={{ flex:1 }}>
+                          <p style={{ margin:0, fontSize:13, color:'#1A1A1A', fontWeight:500 }}>{item.productName}</p>
+                          <p style={{ margin:0, fontSize:11, color:'#9A9A9A' }}>{item.quantity} {item.unit} · {item.productPrice?.toLocaleString()} FCFA/{item.unit}</p>
+                        </div>
+                        <p style={{ margin:0, fontSize:13, fontWeight:600, color:'#1A1A1A' }}>{(item.productPrice * item.quantity)?.toLocaleString()} FCFA</p>
                       </div>
                     ))}
                   </div>
 
-                  {/* Total + actions */}
-                  <div className="border-t border-gray-100 pt-3 mt-3">
-                    <div className="flex justify-between items-center mb-3">
-                      <div>
-                        <p className="text-xs text-gray-500">Total</p>
-                        <p className="font-bold text-emerald-600 text-lg">
-                          {order.total?.toLocaleString()} FCFA
-                        </p>
-                      </div>
-                      {order.status === 'livree' && (
-                        <div className="flex items-center gap-1 text-green-600 text-xs font-medium bg-green-50 px-3 py-1 rounded-full">
-                          <CheckCircle size={12} />
-                          Livrée
-                        </div>
-                      )}
+                  {/* Récap paiement */}
+                  <div style={{ background:'#FAFAF8', borderRadius:12, padding:'14px 16px', marginBottom:16, border:'1px solid rgba(201,169,110,0.15)' }}>
+                    <div style={{ display:'flex', justifyContent:'space-between', marginBottom:6 }}>
+                      <span style={{ fontSize:12, color:'#9A9A9A' }}>Acompte payé (25%)</span>
+                      <span style={{ fontSize:12, fontWeight:600, color:'#065f46' }}>{selectedOrder.depositAmount?.toLocaleString()} FCFA ✓</span>
                     </div>
-
-                    {/* Suivi de livraison */}
-                    {order.deliverySteps && (
-                      <div className="mt-4">
-                        <DeliveryTracker
-                          steps={DELIVERY_STEPS.map((step, idx) => ({
-                            ...step,
-                            completed:
-                              order.deliverySteps[
-                                step.label.toLowerCase().replace(/ /g, '_').replace(/[^a-z_]/g, '')
-                              ]?.completed || false,
-                            timestamp:
-                              order.deliverySteps[
-                                step.label.toLowerCase().replace(/ /g, '_').replace(/[^a-z_]/g, '')
-                              ]?.timestamp || null,
-                          }))}
-                          currentStatus={order.deliveryStatus || 'pending'}
-                          estimatedDate={order.estimatedDelivery}
-                        />
-                      </div>
-                    )}
-
-                    {/* Carte de livraison */}
-                    {order.sellerLocation?.lat && order.customerLocation?.lat && (
-                      <div className="mt-4 pt-4 border-t border-gray-100">
-                        <h4 className="text-xs font-semibold text-gray-600 mb-2 flex items-center gap-1">
-                          🗺️ Parcours de livraison
-                        </h4>
-                        <DeliveryMap
-                          pickupLocation={{
-                            lat: order.sellerLocation.lat,
-                            lng: order.sellerLocation.lng,
-                            address: order.sellerLocation.address || 'Boutique du vendeur',
-                          }}
-                          deliveryLocation={{
-                            lat: order.customerLocation.lat,
-                            lng: order.customerLocation.lng,
-                            address: order.customerLocation.address || 'Votre adresse',
-                          }}
-                        />
-                      </div>
-                    )}
-
-                    {/* Boutons d'action */}
-                    <div className="flex gap-3">
-                      {canCancel && (
-                        <button
-                          onClick={() => handleCancelOrder(order.firestoreId)}
-                          disabled={isUpdating}
-                          className="flex-1 bg-red-500 hover:bg-red-600 text-white py-2.5 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition disabled:opacity-50"
-                        >
-                          {isUpdating ? (
-                            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                          ) : (
-                            <XCircle size={16} />
-                          )}
-                          {isUpdating ? 'En cours…' : 'Annuler la commande'}
-                        </button>
-                      )}
-
-                      {canTrack && (
-                        <Link href={`/tracking/${order.firestoreId}`} className="flex-1">
-                          <button className="w-full bg-purple-600 hover:bg-purple-700 text-white py-2.5 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition">
-                            <MapPin size={16} />
-                            Suivre mon colis
-                          </button>
-                        </Link>
-                      )}
-
-                      {canConfirm && (
-                        <button
-                          onClick={() => handleConfirmDelivery(order.firestoreId)}
-                          disabled={isUpdating}
-                          className="flex-1 bg-green-500 hover:bg-green-600 text-white py-2.5 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition disabled:opacity-50"
-                        >
-                          <CheckCircle size={16} />
-                          Confirmer réception
-                        </button>
-                      )}
-
-                      {order.status === 'annulee' && (
-                        <Link href="/main/products" className="flex-1">
-                          <button className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2.5 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition">
-                            <Package size={16} />
-                            Commander à nouveau
-                          </button>
-                        </Link>
-                      )}
+                    <div style={{ display:'flex', justifyContent:'space-between' }}>
+                      <span style={{ fontSize:12, color:'#9A9A9A' }}>Solde à la livraison</span>
+                      <span style={{ fontSize:12, fontWeight:600, color: selectedOrder.status === 'livre' ? '#9A9A9A' : '#92400e' }}>
+                        {selectedOrder.status === 'livre' ? '✓ Réglé' : `${selectedOrder.remainingAmount?.toLocaleString()} FCFA`}
+                      </span>
+                    </div>
+                    <div style={{ height:1, background:'rgba(201,169,110,0.2)', margin:'10px 0' }} />
+                    <div style={{ display:'flex', justifyContent:'space-between' }}>
+                      <span style={{ fontSize:13, fontWeight:600, color:'#1A1A1A' }}>Total</span>
+                      <span style={{ fontSize:14, fontWeight:700, color:'#1A1A1A' }}>{selectedOrder.total?.toLocaleString()} FCFA</span>
                     </div>
                   </div>
+
+                  {/* Actions */}
+                  <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+                    {/* Contacter le vendeur via WhatsApp */}
+                    {selectedOrder.sellerPhone && (
+                      <a
+                        href={`https://wa.me/${selectedOrder.sellerPhone.replace(/\D/g,'')}?text=${encodeURIComponent(`Bonjour, je vous contacte pour ma commande ${selectedOrder.orderNumber || selectedOrder.id.slice(0,8).toUpperCase()}.`)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="wa-btn"
+                      >
+                        <svg width={18} height={18} viewBox="0 0 24 24" fill="currentColor">
+                          <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.149-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.095 3.2 5.076 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/>
+                          <path d="M12 0C5.373 0 0 5.373 0 12c0 2.125.558 4.121 1.531 5.856L.073 23.27a.75.75 0 00.918.882l5.57-1.461A11.944 11.944 0 0012 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 21.75a9.73 9.73 0 01-4.964-1.363l-.355-.212-3.676.965.978-3.576-.232-.368A9.713 9.713 0 012.25 12C2.25 6.615 6.615 2.25 12 2.25S21.75 6.615 21.75 12 17.385 21.75 12 21.75z"/>
+                        </svg>
+                        Contacter le vendeur
+                      </a>
+                    )}
+
+                    {/* Annulation client (seulement si commande encore annulable) */}
+                    {canCancel && (
+                      <button
+                        className="cancel-btn"
+                        disabled={cancelling === selectedOrder.id}
+                        onClick={e => { e.stopPropagation(); handleCancelOrder(selectedOrder.id); }}
+                      >
+                        {cancelling === selectedOrder.id
+                          ? <><span style={{ width:14, height:14, border:'2px solid #991b1b', borderTopColor:'transparent', borderRadius:'50%', display:'inline-block', animation:'spin 0.8s linear infinite' }} /> Annulation…</>
+                          : <>✕ Annuler la commande</>
+                        }
+                      </button>
+                    )}
+                  </div>
                 </div>
-              );
-            })}
-          </div>
-        )}
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
+  );
+}
+
+export default function OrdersPage() {
+  return (
+    <Suspense fallback={null}>
+      <OrdersContent />
+    </Suspense>
   );
 }

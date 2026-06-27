@@ -487,38 +487,27 @@ const StatCard = ({ icon, label, value, change, color }: { icon: React.ReactNode
 );
 
 // ============================================================
-// UTILITAIRE : COMPRESSION IMAGE CANVAS (upload rapide)
-// Réduit une image à max 1200px et qualité 0.82 avant Firebase Storage.
-// Gain typique : 2 Mo → 150-300 Ko, upload 5-10x plus rapide.
+// HELPER — RESIZE IMAGE AVANT UPLOAD (sans perte de qualité)
 // ============================================================
 
-function compressImage(file: File, maxDim = 1200, quality = 0.82): Promise<Blob> {
-  return new Promise((resolve, reject) => {
+async function resizeImageForUpload(file: File, maxWidth = 1400): Promise<Blob> {
+  return new Promise((resolve) => {
     const img = new Image();
-    const objectUrl = URL.createObjectURL(file);
+    const url = URL.createObjectURL(file);
     img.onload = () => {
-      URL.revokeObjectURL(objectUrl);
-      let { width, height } = img;
-      if (width > maxDim || height > maxDim) {
-        if (width >= height) { height = Math.round((height * maxDim) / width); width = maxDim; }
-        else                 { width  = Math.round((width  * maxDim) / height); height = maxDim; }
-      }
+      URL.revokeObjectURL(url);
+      // Si l'image est déjà assez petite, on l'envoie telle quelle
+      if (img.width <= maxWidth) { resolve(file); return; }
+      const scale  = maxWidth / img.width;
       const canvas = document.createElement('canvas');
-      canvas.width  = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) { reject(new Error('Canvas non disponible')); return; }
-      ctx.drawImage(img, 0, 0, width, height);
-      // Conserve WebP si supporté, sinon JPEG
-      const outType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
-      canvas.toBlob(
-        blob => blob ? resolve(blob) : reject(new Error('Compression échouée')),
-        outType,
-        quality,
-      );
+      canvas.width  = maxWidth;
+      canvas.height = Math.round(img.height * scale);
+      canvas.getContext('2d')!.drawImage(img, 0, 0, canvas.width, canvas.height);
+      // qualité 1.0 = aucune perte, juste resize
+      canvas.toBlob(blob => resolve(blob ?? file), file.type, 1.0);
     };
-    img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error('Image illisible')); };
-    img.src = objectUrl;
+    img.onerror = () => resolve(file); // fallback silencieux
+    img.src = url;
   });
 }
 
@@ -1081,12 +1070,7 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
       // SMS channel — envoi via Africa's Talking
       let smsCount = 0;
       if (broadcastForm.channels.sms) {
-        const smsTargets = targetUsers.filter(u => {
-          if (!u.phone) return false;
-          const cleaned = String(u.phone).replace(/[^\d+]/g, '');
-          // Rejette les numéros trop courts, "N/A", espaces seuls, etc.
-          return cleaned.replace(/^\+/, '').length >= 9;
-        });
+        const smsTargets = targetUsers.filter(u => u.phone);
         const smsErrors: string[] = [];
         for (const u of smsTargets) {
           try {
@@ -1099,14 +1083,8 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
               }),
             });
             if (res.ok) smsCount++;
-            else {
-              const err = await res.json().catch(() => ({}));
-              const errMsg = err?.error ?? `HTTP ${res.status}`;
-              console.warn(`[SMS] Échec pour ${u.phone} (uid: ${u.uid ?? u.id}): ${errMsg}`);
-              smsErrors.push(`${u.phone}: ${errMsg}`);
-            }
+            else { const err = await res.json().catch(()=>({})); smsErrors.push(err?.error ?? `HTTP ${res.status}`); }
           } catch (fetchErr: any) {
-            console.warn(`[SMS] Erreur réseau pour ${u.phone}:`, fetchErr?.message);
             smsErrors.push(fetchErr?.message ?? 'Erreur réseau');
           }
         }
@@ -3349,25 +3327,29 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                           <button
                             disabled={promoSaving || !promoForm.productId}
                             onClick={async () => {
-                              if (!promoForm.productId || !selectedProduct) return;
+                              // Recalcul local au moment du clic — indépendant du scope IIFE
+                              const prod = products.find(p => p.id === promoForm.productId);
+                              if (!promoForm.productId || !prod) return;
+                              const origPrice  = prod.price ?? 0;
+                              const discPrice  = Math.round(origPrice * (1 - promoForm.discountPercent / 100));
+                              const savingsAmt = origPrice - discPrice;
                               setPromoSaving(true);
                               try {
-                                // Toujours recalculé depuis le prix ACTUEL du produit, jamais figé
                                 const payload = {
                                   type: 'promotion',
                                   productId: promoForm.productId,
-                                  title: selectedProduct.name,
-                                  subtitle: `${selectedProduct.category} · ${selectedProduct.region ?? ''}`,
+                                  title: prod.name,
+                                  subtitle: `${prod.category} · ${prod.region ?? ''}`,
                                   badge: promoForm.badge,
-                                  imageUrl: selectedProduct.images?.[0] ?? '',
+                                  imageUrl: prod.images?.[0] ?? '',
                                   linkUrl: `/main/products?id=${promoForm.productId}`,
                                   placement: promoForm.placement,
                                   active: promoForm.active,
                                   priority: promoForm.priority,
                                   discountPercent: promoForm.discountPercent,
-                                  originalPrice,
-                                  discountedPrice,
-                                  savings,
+                                  originalPrice: origPrice,
+                                  discountedPrice: discPrice,
+                                  savings: savingsAmt,
                                   updatedAt: serverTimestamp(),
                                 };
                                 if (editingPromoId) {
@@ -3628,43 +3610,22 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                         <button
                           disabled={pubSaving || pubUploading || !pubForm.partnerName || (!pubForm.imageFile && !editingPubId)}
                           onClick={async () => {
-                            if (!pubForm.partnerName) { toast.error('Le nom du partenaire est requis'); return; }
-                            if (!editingPubId && !pubForm.imageFile) { toast.error('Veuillez sélectionner une image'); return; }
+                            if (!pubForm.partnerName) return;
+                            if (!editingPubId && !pubForm.imageFile) return;
                             try {
                               let downloadURL = pubForm.imageUrl;
                               let newPath: string | null = null;
 
-                              // ── Upload avec compression canvas ──────────────────
+                              // Upload uniquement si une nouvelle image a été choisie
                               if (pubForm.imageFile) {
                                 setPubUploading(true);
-                                let blob: Blob;
-                                try {
-                                  // Compression : max 1200px, qualité 0.82 → ~150-300 Ko au lieu de 2 Mo
-                                  blob = await compressImage(pubForm.imageFile, 1200, 0.82);
-                                } catch {
-                                  // Si la compression échoue (SVG, fichier corrompu) on upload l'original
-                                  blob = pubForm.imageFile;
-                                }
-                                const safePartner = pubForm.partnerName.replace(/[^a-zA-Z0-9_-]/g, '_');
-                                const ext = pubForm.imageFile.type === 'image/png' ? 'png' : 'jpg';
-                                newPath = `ads/publicites/${Date.now()}_${safePartner}.${ext}`;
-                                try {
-                                  const storageRef = ref(storage, newPath);
-                                  await uploadBytes(storageRef, blob);
-                                  downloadURL = await getDownloadURL(storageRef);
-                                } catch (storageErr: any) {
-                                  console.error('[Storage] Erreur upload:', storageErr?.code, storageErr?.message);
-                                  if (storageErr?.code === 'storage/unauthorized') {
-                                    toast.error('Accès refusé — vérifiez les règles Firebase Storage (ads/publicites/)');
-                                  } else if (storageErr?.code === 'storage/canceled') {
-                                    toast.error('Upload annulé');
-                                  } else {
-                                    toast.error(`Erreur upload : ${storageErr?.message ?? storageErr?.code ?? 'inconnue'}`);
-                                  }
-                                  return;
-                                } finally {
-                                  setPubUploading(false);
-                                }
+                                const ext  = pubForm.imageFile.name.split('.').pop();
+                                newPath = `ads/publicites/${Date.now()}_${pubForm.partnerName.replace(/\s+/g,'_')}.${ext}`;
+                                const storageRef = ref(storage, newPath);
+                                const resized = await resizeImageForUpload(pubForm.imageFile);
+                                await uploadBytes(storageRef, resized);
+                                downloadURL = await getDownloadURL(storageRef);
+                                setPubUploading(false);
                               }
 
                               setPubSaving(true);
@@ -3699,9 +3660,9 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                               setEditingPubId(null);
                               setEditingPubOldPath(null);
                               setPubForm({ title:'', partnerName:'', imageFile:null, imagePreview:'', imageUrl:'', linkUrl:'', placement:'banner', active:true, priority:0 });
-                            } catch (err: any) {
-                              console.error('[Publicité] Erreur générale:', err);
-                              toast.error(`Erreur : ${err?.message ?? 'inconnue'}`);
+                            } catch (err) {
+                              console.error(err);
+                              toast.error('Erreur lors de l\'upload');
                             } finally {
                               setPubUploading(false);
                               setPubSaving(false);
@@ -3718,7 +3679,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                           }}
                         >
                           {pubUploading
-                            ? <><span style={{ width:16,height:16,border:'2px solid rgba(255,255,255,0.3)',borderTopColor:'#fff',borderRadius:'50%',display:'inline-block',animation:'spin 1s linear infinite' }}/> Compression &amp; upload…</>
+                            ? <><span style={{ width:16,height:16,border:'2px solid rgba(255,255,255,0.3)',borderTopColor:'#fff',borderRadius:'50%',display:'inline-block',animation:'spin 1s linear infinite' }}/> Upload en cours…</>
                             : pubSaving
                             ? <><span style={{ width:16,height:16,border:'2px solid rgba(255,255,255,0.3)',borderTopColor:'#fff',borderRadius:'50%',display:'inline-block',animation:'spin 1s linear infinite' }}/> Enregistrement…</>
                             : <><Globe size={16}/> {editingPubId ? 'Mettre à jour la bannière' : 'Publier la bannière'}</>

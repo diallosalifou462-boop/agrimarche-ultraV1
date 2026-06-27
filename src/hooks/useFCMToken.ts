@@ -132,7 +132,7 @@ export function useFCMToken() {
       console.warn('Utilisateur non connecté');
       return null;
     }
-
+console.log("FCM STEP 1 - requestPermission lancé");
     // --- Branche native (Android/iOS via Capacitor) ---
     if (isNative) {
       try {
@@ -174,6 +174,7 @@ export function useFCMToken() {
 
     try {
       const perm = await Notification.requestPermission();
+      console.log("FCM STEP 3 - service worker prêt");
       setPermission(perm);
 
       if (perm !== 'granted') {
@@ -182,12 +183,14 @@ export function useFCMToken() {
       }
 
       const swRegistration = await navigator.serviceWorker.ready;
+      console.log("FCM STEP 4 - demande token");
       const messaging = getMessaging();
+      console.log("FCM STEP 4 - demande token");
       const fcmToken = await getToken(messaging, {
         vapidKey: process.env.NEXT_PUBLIC_VAPID_KEY,
         serviceWorkerRegistration: swRegistration,
       });
-
+console.log("FCM STEP 5 - token =", fcmToken);
       if (fcmToken) {
         await saveTokenToFirestore(fcmToken, 'web');
         setToken(fcmToken);
@@ -197,7 +200,7 @@ export function useFCMToken() {
         return null;
       }
     } catch (error) {
-      console.error('Erreur lors de la demande de permission:', error);
+      console.error('FCM ERROR =', error);
       return null;
     }
   }, [isNative, isSupportedBrowser, user, saveTokenToFirestore]);

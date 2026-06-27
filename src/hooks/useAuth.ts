@@ -13,17 +13,21 @@ import {
 import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 import { auth, db } from '@/lib/firebase/firebase';
 
+// ─── Helper : numéro → email synthétique ─────────────────
+export function phoneToEmail(phone: string): string {
+  return `${phone.replace(/\D/g, '')}@agrimarche.sn`;
+}
+
 export function useAuth() {
-  // ✅ CORRECTION CRUCIALE : Typage correct avec User | null
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser]       = useState<User | null>(null);
   const [profile, setProfile] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
+  // ─── Chargement profil Firestore ──────────────────────
   const fetchUserProfile = async (uid: string, email: string | null) => {
     try {
-      const userRef = doc(db, 'users', uid);
+      const userRef  = doc(db, 'users', uid);
       const userSnap = await getDoc(userRef);
-      
       if (userSnap.exists()) {
         setProfile(userSnap.data());
       } else {
@@ -43,86 +47,81 @@ export function useAuth() {
     }
   };
 
+  // ─── Mise à jour profil ───────────────────────────────
   const updateUserProfile = async (data: { displayName?: string; phone?: string }) => {
     if (!user) throw new Error('Aucun utilisateur connecté');
-    
-    try {
-      if (data.displayName) {
-        await updateProfile(user, { displayName: data.displayName });
-      }
-      
-      const userRef = doc(db, 'users', user.uid);
-      await updateDoc(userRef, data);
-      setProfile((prev: any) => ({ ...prev, ...data }));
-    } catch (error) {
-      console.error('Erreur mise à jour:', error);
-      throw error;
-    }
+    if (data.displayName) await updateProfile(user, { displayName: data.displayName });
+    const userRef = doc(db, 'users', user.uid);
+    await updateDoc(userRef, data);
+    setProfile((prev: any) => ({ ...prev, ...data }));
   };
 
+  // ─── Reset mot de passe (legacy email — non utilisé en prod) ──
   const resetPassword = async (email: string) => {
-    // actionCodeSettings : le lien dans l'email redirige vers notre propre page
-    // /auth/reset-password (au lieu de la page générique Firebase), avec le code
-    // de réinitialisation (oobCode) passé automatiquement en query param par Firebase.
-    const actionCodeSettings = {
-      url:
-        typeof window !== 'undefined'
-          ? `${window.location.origin}/auth/reset-password`
-          : '/auth/reset-password',
-      handleCodeInApp: false,
-    };
-    return sendPasswordResetEmail(auth, email, actionCodeSettings);
+    return sendPasswordResetEmail(auth, email);
   };
 
+  // ─── Observer Firebase Auth ───────────────────────────
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
-      // ✅ Mise à jour correcte après avoir corrigé le useState
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       setUser(firebaseUser);
-      
       if (firebaseUser) {
-        fetchUserProfile(firebaseUser.uid, firebaseUser.email);
+        await fetchUserProfile(firebaseUser.uid, firebaseUser.email);
       } else {
         setProfile(null);
       }
-      
       setLoading(false);
     });
-
     return () => unsubscribe();
   }, []);
 
-  const signIn = async (email: string, password: string) => {
+  // ─── Connexion ────────────────────────────────────────
+  // Accepte soit un email réel, soit un numéro de téléphone.
+  // Si c'est un numéro, on le convertit en email synthétique.
+  const signIn = async (emailOrPhone: string, password: string) => {
+    const email = emailOrPhone.includes('@')
+      ? emailOrPhone
+      : phoneToEmail(emailOrPhone);
     const result = await signInWithEmailAndPassword(auth, email, password);
     await fetchUserProfile(result.user.uid, result.user.email);
     return result;
   };
 
+  // ─── Inscription ──────────────────────────────────────
+  // `extra` contient phone, région, département, commune, phoneVerified, etc.
   const signUp = async (
-    email: string,
+    emailOrPhone: string,
     password: string,
     name: string,
-    extra?: Record<string, any>
+    extra?: Record<string, any>,
   ) => {
+    const email = emailOrPhone.includes('@')
+      ? emailOrPhone
+      : phoneToEmail(emailOrPhone);
+
     const result = await createUserWithEmailAndPassword(auth, email, password);
-    
     await updateProfile(result.user, { displayName: name });
-    
-    const userRef = doc(db, 'users', result.user.uid);
+
     const userProfile = {
-      uid: result.user.uid,
-      email: email,
-      displayName: name,
-      phone: '',
-      role: 'client',
-      createdAt: new Date().toISOString(),
-      ...extra,
+      uid:           result.user.uid,
+      email,
+      displayName:   name,
+      phone:         extra?.phone        ?? '',
+      phoneVerified: extra?.phoneVerified ?? false,
+      role:          extra?.role         ?? 'client',
+      region:        extra?.region       ?? '',
+      departement:   extra?.departement  ?? '',
+      commune:       extra?.commune      ?? '',
+      quartier:      extra?.quartier     ?? '',
+      createdAt:     new Date().toISOString(),
     };
-    await setDoc(userRef, userProfile);
-    
+
+    await setDoc(doc(db, 'users', result.user.uid), userProfile);
     setProfile(userProfile);
     return result;
   };
 
+  // ─── Déconnexion ──────────────────────────────────────
   const logout = async () => {
     await signOut(auth);
     setProfile(null);
@@ -138,5 +137,6 @@ export function useAuth() {
     logout,
     updateUserProfile,
     resetPassword,
+    phoneToEmail,
   };
 }
