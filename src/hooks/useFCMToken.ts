@@ -265,3 +265,4 @@ console.log("FCM STEP 5 - token =", fcmToken);
     onMessageReceived,
   };
 }
+

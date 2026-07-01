@@ -180,8 +180,8 @@ function TrackingMap({
 const STEPS = [
   { key: 'confirmee',      label: 'Confirmée'    },
   { key: 'en_preparation', label: 'Préparation'  },
-  { key: 'expediee',       label: 'En route'     },
-  { key: 'livree',         label: 'Livrée'       },
+  { key: 'en_livraison',       label: 'En route'     },
+  { key: 'livre',         label: 'Livrée'       },
 ];
 
 function Stepper({ status }: { status: string }) {
@@ -346,7 +346,7 @@ export default function TrackingClientPage() {
     ? Math.round((Date.now() - lastUpdate.getTime()) / 1000) + tick
     : null;
   const isLive      = secAgo !== null && secAgo < 30;
-  const isDelivered = order.status === 'livree';
+  const isDelivered = order.status === 'livre';
 
   // ─────────────────────────────────────────────────────────────────────────────
   return (

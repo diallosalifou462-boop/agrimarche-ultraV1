@@ -133,3 +133,4 @@ export class AfricaOptimization {
 if (typeof window !== 'undefined') {
   AfricaOptimization.init();
 }
+

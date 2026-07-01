@@ -5,3 +5,4 @@ export const productDetailsFeatures = [
   'gallery support',
   'location display'
 ];
+

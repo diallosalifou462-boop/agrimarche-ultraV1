@@ -122,3 +122,4 @@ export function SellerAIInsights({ products = [], orders = [], earnings = {} }: 
     </div>
   );
 }
+

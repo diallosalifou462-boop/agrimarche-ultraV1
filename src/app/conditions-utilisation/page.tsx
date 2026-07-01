@@ -129,3 +129,4 @@ const list: React.CSSProperties = {
   flexDirection: 'column',
   gap: 6,
 };
+

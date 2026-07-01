@@ -89,3 +89,4 @@ export function PaymentSelector({ orderId, total, onSuccess, onError }: PaymentS
     </div>
   );
 }
+

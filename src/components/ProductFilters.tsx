@@ -130,3 +130,4 @@ export function ProductFilters({ filters, onFilterChange }: ProductFiltersProps)
     </div>
   );
 }
+

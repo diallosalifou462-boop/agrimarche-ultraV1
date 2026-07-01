@@ -40,3 +40,4 @@ export function AdminGuard({ children }: { children: React.ReactNode }) {
   // Admin confirmé ✅
   return <>{children}</>;
 }
+

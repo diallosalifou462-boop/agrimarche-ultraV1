@@ -52,3 +52,4 @@ export function AIRecommendations({ cart = [], viewed = [], category = '' }: {
     </div>
   );
 }
+

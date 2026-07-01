@@ -159,3 +159,4 @@ async function cleanupInvalidTokens(invalidTokens: string[]) {
     if (!snap.empty) await batch.commit();
   }
 }
+

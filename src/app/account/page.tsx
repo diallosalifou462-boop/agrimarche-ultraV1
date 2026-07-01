@@ -10,7 +10,8 @@ import {
   where,
   orderBy,
   doc,
-  updateDoc,
+  getDoc,
+  writeBatch,
   onSnapshot,
   Timestamp,
 } from 'firebase/firestore';
@@ -33,16 +34,53 @@ interface SellerRating {
   reviewCount: number;
 }
 
-// ─── Statuts ────────────────────────────────────────────────────────────────
+// ─── NORMALISATION DES ANCIENS STATUTS FIRESTORE ────────────────────────────
+// Certains anciens documents ont encore : 'expediee', 'livree', 'annulee',
+// 'pending', 'shipped', 'delivered', 'cancelled'. On les migre à la lecture
+// sans toucher Firestore, pour rester rétro-compatible.
+const LEGACY_STATUS: Record<string, string> = {
+  expediee:  'en_livraison',
+  livree:    'livre',
+  annulee:   'annule',
+  pending:   'en_attente',
+  preparing: 'en_preparation',
+  shipped:   'en_livraison',
+  delivered: 'livre',
+  cancelled: 'annule',
+};
+function normalizeStatus(s: string): string {
+  return LEGACY_STATUS[s] ?? s;
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── SOURCE DE VÉRITÉ DES STATUTS ────────────────────────────────────────────
+// ✅ FIX : clés harmonisées avec seller-orders et account/orders
+// Avant : 'expediee', 'livree', 'annulee' → toutes les commandes s'affichaient "En attente"
+// Après : 'en_livraison', 'livre', 'annule' (cohérent avec les 2 autres pages)
+// ─────────────────────────────────────────────────────────────────────────────
 const statusConfig: Record<string, { label: string; dot: string; pill: string }> = {
   en_attente:     { label: 'En attente',     dot: 'bg-amber-400',   pill: 'bg-amber-50 text-amber-700 ring-amber-200' },
   en_preparation: { label: 'En préparation', dot: 'bg-sky-400',     pill: 'bg-sky-50 text-sky-700 ring-sky-200' },
-  expediee:       { label: 'Expédiée',       dot: 'bg-violet-400',  pill: 'bg-violet-50 text-violet-700 ring-violet-200' },
-  livree:         { label: 'Livrée',         dot: 'bg-emerald-400', pill: 'bg-emerald-50 text-emerald-700 ring-emerald-200' },
-  annulee:        { label: 'Annulée',        dot: 'bg-rose-400',    pill: 'bg-rose-50 text-rose-700 ring-rose-200' },
+  en_livraison:   { label: 'En livraison',   dot: 'bg-violet-400',  pill: 'bg-violet-50 text-violet-700 ring-violet-200' },
+  livre:          { label: 'Livrée',         dot: 'bg-emerald-400', pill: 'bg-emerald-50 text-emerald-700 ring-emerald-200' },
+  annule:         { label: 'Annulée',        dot: 'bg-rose-400',    pill: 'bg-rose-50 text-rose-700 ring-rose-200' },
 };
 const getStatus = (s: string) =>
   statusConfig[s] || { label: s, dot: 'bg-gray-400', pill: 'bg-gray-50 text-gray-700 ring-gray-200' };
+
+// ✅ FIX : vérifie si seller_orders existe avant de l'inclure dans le batch
+// car batch.update() sur un doc inexistant fait échouer TOUT le batch (y compris orders)
+async function clientUpdateOrder(orderId: string, payload: Record<string, any>) {
+  const batch = writeBatch(db);
+  // set+merge crée le doc s'il n'existe pas, le met à jour s'il existe
+  batch.set(doc(db, 'orders', orderId), payload, { merge: true });
+  const sellerOrderRef = doc(db, 'seller_orders', orderId);
+  const sellerOrderSnap = await getDoc(sellerOrderRef);
+  if (sellerOrderSnap.exists()) {
+    batch.set(sellerOrderRef, payload, { merge: true });
+  }
+  return batch.commit();
+}
 
 export default function AccountPage() {
   const { user, profile, loading, logout, updateUserProfile } = useAuth();
@@ -63,11 +101,8 @@ export default function AccountPage() {
   useEffect(() => {
     if (!user) return;
 
-    const sellers = [...new Set(orders.map(o => o.sellerId).filter(Boolean))];
+    const sellers = [...new Set(orders.map((o: any) => o.sellerId).filter(Boolean))] as string[];
 
-    // ✅ on garde toutes les fonctions de désabonnement pour les nettoyer
-    //    correctement — avant, le `return` était piégé dans le forEach et
-    //    n'était jamais appelé, ce qui accumulait les listeners Firestore.
     const unsubs: Array<() => void> = sellers.map(sellerId => {
       const reviewsQuery = query(
         collection(db, 'reviews'),
@@ -106,7 +141,14 @@ export default function AccountPage() {
     );
 
     const unsub = onSnapshot(q, (snap) => {
-      setOrders(snap.docs.map(d => ({ id: d.id, ...d.data(), total: d.data().total || d.data().amount || 0 })));
+      const ordersData = snap.docs.map(d => {
+        const raw = d.data().status || 'en_attente';
+        const normalized = normalizeStatus(raw);
+        console.log(`[AgriMarché/Account] Order ${d.id.slice(-6)} | raw="${raw}" → "${normalized}"`);
+        return { id: d.id, ...d.data(), status: normalized, total: d.data().total || d.data().amount || 0 };
+      });
+      console.log(`[AgriMarché/Account] Stats | total=${ordersData.length} | en_cours=${ordersData.filter(o=>['en_attente','en_preparation','en_livraison'].includes(o.status)).length} | livrées=${ordersData.filter(o=>o.status==='livre').length} | annulées=${ordersData.filter(o=>o.status==='annule').length}`);
+      setOrders(ordersData);
       setLoadingOrders(false);
     }, (err) => { console.error(err); setLoadingOrders(false); });
 
@@ -119,28 +161,31 @@ export default function AccountPage() {
     if (profile) {
       setFormData({
         displayName: profile.displayName || '',
-        phone: profile.phone || '',
-        city: profile?.sellerInfo?.city || '',
-        address: profile?.sellerInfo?.shopName || '',
+        phone:       profile.phone || '',
+        city:        profile?.sellerInfo?.city || '',
+        address:     profile?.sellerInfo?.shopName || '',
       });
     }
   }, [profile]);
 
-  // ── Annulation CLIENT → updateDoc ──────────────────────────────────────
+  // ── Annulation CLIENT ────────────────────────────────────────────────────
   const handleCancelOrder = async (orderId: string) => {
     if (!confirm('⚠️ Annuler cette commande ?')) return;
     setUpdating(orderId);
     try {
-      await updateDoc(doc(db, 'orders', orderId), {
-        status: 'annulee',
+      await clientUpdateOrder(orderId, {
+        status:      'annule',
         statusLabel: 'Annulée par le client',
         cancelledBy: 'client',
         cancelledAt: Timestamp.now(),
-        updatedAt: new Date().toISOString(),
+        updatedAt:   new Date().toISOString(),
       });
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
-      alert('Erreur lors de l\'annulation.');
+      const isOffline = !navigator.onLine || e?.code === 'unavailable' || e?.message?.includes('offline');
+      alert(isOffline
+        ? '📶 Pas de connexion internet. Reconnecte-toi et réessaie.'
+        : 'Erreur lors de l\'annulation : ' + (e?.message || e));
     } finally {
       setUpdating(null);
     }
@@ -151,14 +196,17 @@ export default function AccountPage() {
     if (!confirm('✅ Confirmez-vous avoir reçu cette commande ?')) return;
     setUpdating(orderId);
     try {
-      await updateDoc(doc(db, 'orders', orderId), {
-        status: 'livree',
+      await clientUpdateOrder(orderId, {
+        status:      'livre',
         statusLabel: 'Livrée – confirmée par le client',
-        updatedAt: new Date().toISOString(),
+        updatedAt:   new Date().toISOString(),
       });
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
-      alert('Erreur lors de la confirmation.');
+      const isOffline = !navigator.onLine || e?.code === 'unavailable' || e?.message?.includes('offline');
+      alert(isOffline
+        ? '📶 Pas de connexion internet. Reconnecte-toi et réessaie.'
+        : 'Erreur lors de la confirmation : ' + (e?.message || e));
     } finally {
       setUpdating(null);
     }
@@ -181,11 +229,12 @@ export default function AccountPage() {
 
   const handleLogout = async () => { await logout(); router.push('/'); };
 
+  // ✅ FIX : stats recalculées avec les bonnes clés de statut
   const stats = {
     total:    orders.length,
-    enCours:  orders.filter(o => ['en_attente', 'en_preparation', 'expediee'].includes(o.status)).length,
-    livrees:  orders.filter(o => o.status === 'livree').length,
-    annulees: orders.filter(o => o.status === 'annulee').length,
+    enCours:  orders.filter(o => ['en_attente', 'en_preparation', 'en_livraison'].includes(o.status)).length,
+    livrees:  orders.filter(o => o.status === 'livre').length,
+    annulees: orders.filter(o => o.status === 'annule').length,
   };
 
   const userRole = profile?.role || 'client';
@@ -203,23 +252,15 @@ export default function AccountPage() {
   if (!user) return null;
   const initial = user.email?.charAt(0).toUpperCase() ?? '?';
 
-  // Fonction pour afficher les étoiles
   const renderStars = (rating: number) => {
-    const fullStars = Math.floor(rating);
-    const hasHalfStar = rating % 1 >= 0.5;
-    const emptyStars = 5 - fullStars - (hasHalfStar ? 1 : 0);
-    
+    const fullStars  = Math.floor(rating);
+    const hasHalf    = rating % 1 >= 0.5;
+    const emptyStars = 5 - fullStars - (hasHalf ? 1 : 0);
     return (
       <div className="flex items-center gap-0.5">
-        {[...Array(fullStars)].map((_, i) => (
-          <Star key={`full-${i}`} size={10} className="text-amber-500 fill-amber-500" />
-        ))}
-        {hasHalfStar && (
-          <Star size={10} className="text-amber-500 fill-amber-500" />
-        )}
-        {[...Array(emptyStars)].map((_, i) => (
-          <Star key={`empty-${i}`} size={10} className="text-gray-300" />
-        ))}
+        {[...Array(fullStars)].map((_, i)  => <Star key={`f${i}`} size={10} className="text-amber-500 fill-amber-500" />)}
+        {hasHalf                            && <Star key="h"       size={10} className="text-amber-500 fill-amber-500" />}
+        {[...Array(emptyStars)].map((_, i) => <Star key={`e${i}`} size={10} className="text-gray-300" />)}
       </div>
     );
   };
@@ -335,7 +376,7 @@ export default function AccountPage() {
           )}
         </div>
 
-        {/* COMMANDES AVEC NOTE DU VENDEUR */}
+        {/* COMMANDES */}
         <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
           <div className="flex items-center justify-between px-5 pt-5 pb-3">
             <h2 className="text-sm font-bold text-gray-700 uppercase tracking-widest flex items-center gap-2">
@@ -369,10 +410,11 @@ export default function AccountPage() {
               <div className="space-y-3">
                 {orders.slice(0, 3).map((order) => {
                   const s = getStatus(order.status);
+                  // ✅ FIX : canConfirm vérifie 'en_livraison' (cohérent avec statusConfig)
                   const canCancel  = ['en_attente', 'en_preparation'].includes(order.status);
-                  const canConfirm = order.status === 'expediee';
+                  const canConfirm = order.status === 'en_livraison';
                   const isUpdating = updating === order.id;
-                  const cancelledBySeller = order.status === 'annulee' && order.cancelledBy === 'seller';
+                  const cancelledBySeller = order.status === 'annule' && order.cancelledBy === 'seller';
                   const sellerRating = sellerRatings.get(order.sellerId);
 
                   return (
@@ -387,7 +429,6 @@ export default function AccountPage() {
                           <p className="text-base font-black text-emerald-700 mt-1">
                             {(order.total || order.amount || 0).toLocaleString()} <span className="text-xs font-semibold">FCFA</span>
                           </p>
-                          {/* ⭐ Affichage de la note du vendeur */}
                           {sellerRating && sellerRating.reviewCount > 0 && (
                             <div className="flex items-center gap-1 mt-1">
                               {renderStars(sellerRating.averageRating)}
@@ -402,7 +443,7 @@ export default function AccountPage() {
                         </span>
                       </div>
 
-                      {/* ── Annulée par le VENDEUR → message d'alerte ── */}
+                      {/* Annulée par le vendeur */}
                       {cancelledBySeller && (
                         <div className="mx-4 mb-3 bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 flex items-start gap-2">
                           <AlertTriangle size={15} className="text-rose-500 shrink-0 mt-0.5" />
@@ -438,15 +479,12 @@ export default function AccountPage() {
                         </div>
                       )}
 
-                      {order.status === 'livree' && (
+                      {order.status === 'livre' && (
                         <div className="mx-4 mb-4 space-y-2">
                           <div className="bg-emerald-50 rounded-xl px-4 py-2.5 flex items-center gap-2">
                             <CheckCircle size={14} className="text-emerald-500 shrink-0" />
-                            <span className="text-xs text-emerald-700 font-semibold">
-                              Livrée avec succès
-                            </span>
+                            <span className="text-xs text-emerald-700 font-semibold">Livrée avec succès</span>
                           </div>
-
                           <button
                             onClick={() => router.push(`/review/${order.id}`)}
                             className="w-full bg-yellow-400 hover:bg-yellow-500 text-black py-2 rounded-xl text-sm font-bold"
@@ -456,7 +494,7 @@ export default function AccountPage() {
                         </div>
                       )}
 
-                      {order.status === 'annulee' && (
+                      {order.status === 'annule' && (
                         <div className="px-4 pb-4">
                           <Link href="/main/products" className="flex items-center justify-center gap-2 border-2 border-emerald-500 text-emerald-600 py-2.5 rounded-xl text-xs font-bold">
                             Commander à nouveau <ArrowRight size={12} />

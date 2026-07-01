@@ -47,7 +47,7 @@ export default function AssignDeliveryPage() {
 
   // Charger les commandes non assignées ou en livraison
   useEffect(() => {
-    const q = query(collection(db, 'orders'), where('status', 'in', ['en_preparation', 'expediee']));
+    const q = query(collection(db, 'orders'), where('status', 'in', ['en_preparation', 'en_livraison']));
     const unsub = onSnapshot(q, (snapshot) => {
       const ordersData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Order[];
       setOrders(ordersData);
@@ -169,9 +169,9 @@ export default function AssignDeliveryPage() {
                   <div className="text-right">
                     <p className="font-semibold text-emerald-600">{order.amount?.toLocaleString()} FCFA</p>
                     <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${
-                      order.status === 'expediee' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
+                      order.status === 'en_livraison' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
                     }`}>
-                      {order.status === 'expediee' ? 'En livraison' : 'Prête'}
+                      {order.status === 'en_livraison' ? 'En livraison' : 'Prête'}
                     </span>
                   </div>
                 </div>

@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { collection, onSnapshot, query, where } from 'firebase/firestore';
+import { collection, onSnapshot, query, where, doc, updateDoc, increment } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
 import { logEvent } from 'firebase/analytics';
 import { analytics } from '@/lib/firebase/firebase';
@@ -22,7 +22,7 @@ const CATEGORIES = [
   { label: 'Produits laitiers', icon: '', color: '#B0A090' },
   { label: 'Légumineuses',      icon: '', color: '#7D6A3E' },
   { label: 'Engrais',           icon: '', color: '#2ECC71' },
-  { label: 'Boissons locales',  icon: '', color: '#E74C3C' },
+  { label: 'Elevage',  icon: '', color: '#E74C3C' },
 ];
 
 const REGIONS_SENEGAL = [
@@ -511,7 +511,9 @@ export default function AgriMarket() {
           .sort((a: any, b: any) => (b.priority ?? 0) - (a.priority ?? 0));
         setAds(list);
         setAdIdx(0);
-      }
+      },
+      // Erreur silencieuse — ads optionnelles, ne pas crasher si permission manquante
+      (err) => { console.warn('ads listener ignoré:', err.code); }
     );
     return () => u();
   }, []);
@@ -657,10 +659,15 @@ export default function AgriMarket() {
     setWishlist(prev => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s; });
   };
   
-  const wa = (name: string, phone?: string, e?: React.MouseEvent) => {
+  const wa = (name: string, phone?: string, productId?: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
     if (analytics) {
       logEvent(analytics, 'whatsapp_click', { product_name: name });
+    }
+    if (productId) {
+      updateDoc(doc(db, 'products', productId), {
+        whatsappClicks: increment(1),
+      }).catch(err => console.error('Erreur increment whatsappClicks:', err));
     }
     window.open(`https://wa.me/${phone?.replace(/\D/g,'') || WA_NUMBER}?text=${encodeURIComponent(`Bonjour, je suis intéressé par "${name}".`)}`, '_blank');
   };
@@ -1869,7 +1876,7 @@ export default function AgriMarket() {
                       </div>
                     )}
                     <div className="g-card-actions">
-                      <button onClick={e => { wa(p.name, p.farmerPhone, e); }} className="g-wa-btn">
+                      <button onClick={e => { wa(p.name, p.farmerPhone, p.id, e); }} className="g-wa-btn">
                         <WaIcon s={10} /> CONTACTER
                       </button>
                       <button onClick={e => addCart(p, e)} className={`g-add-btn ${addedIds.has(p.id) ? 'done' : ''}`}>
@@ -1994,7 +2001,7 @@ export default function AgriMarket() {
             </div>
 
             <div className="g-dc-actions">
-              <button onClick={() => wa(selected.name, selected.farmerPhone)} className="g-dwa">
+              <button onClick={() => wa(selected.name, selected.farmerPhone, selected.id)} className="g-dwa">
                 <WaIcon s={16} /> Commander
               </button>
               <button onClick={() => addCart(selected)} className="g-dcart">

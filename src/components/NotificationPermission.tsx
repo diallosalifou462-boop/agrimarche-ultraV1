@@ -42,3 +42,4 @@ export const NotificationPermission: React.FC = () => {
     </div>
   );
 };
+

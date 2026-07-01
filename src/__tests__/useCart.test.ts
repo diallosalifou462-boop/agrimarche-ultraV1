@@ -171,3 +171,4 @@ describe('useCart', () => {
     expect(result.current.cart.itemCount).toBe(3);
   });
 });
+

@@ -329,7 +329,7 @@ export default function AdminDeliveryDashboard() {
   // Live active orders
   useEffect(() => {
     if (!user) return;
-    const q = query(collection(db, 'orders'), where('status', '==', 'expediee'));
+    const q = query(collection(db, 'orders'), where('status', '==', 'en_livraison'));
     const unsub = onSnapshot(q, (snap) => {
       const data = snap.docs.map(d => ({ id: d.id, ...d.data() } as Order));
       setActiveOrders(data);
@@ -343,7 +343,7 @@ export default function AdminDeliveryDashboard() {
   // Recent delivered
   useEffect(() => {
     if (!user) return;
-    const q = query(collection(db, 'orders'), where('status', '==', 'livree'));
+    const q = query(collection(db, 'orders'), where('status', '==', 'livre'));
     const unsub = onSnapshot(q, (snap) => {
       const data = snap.docs
         .map(d => ({ id: d.id, ...d.data() } as Order))

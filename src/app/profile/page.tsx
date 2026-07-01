@@ -38,7 +38,7 @@ interface Order {
   quantity: string;
   seller: string;
   date: string;
-  status: 'en_cours' | 'livree' | 'annulee';
+  status: 'en_cours' | 'livre' | 'annule';
 }
 
 interface UserFormData {
@@ -99,7 +99,7 @@ export default function AccountPage() {
         quantity: '5 kg',
         seller: 'Riziculture Nord',
         date: '20 Mai 2026',
-        status: 'livree',
+        status: 'livre',
       },
     ]);
 
@@ -234,7 +234,7 @@ export default function AccountPage() {
         order.id === orderId
           ? {
               ...order,
-              status: 'livree',
+              status: 'livre',
             }
           : order
       )
@@ -257,7 +257,7 @@ export default function AccountPage() {
         order.id === orderId
           ? {
               ...order,
-              status: 'annulee',
+              status: 'annule',
             }
           : order
       )
@@ -279,12 +279,12 @@ export default function AccountPage() {
 
     livrees:
       orders.filter(
-        (o) => o.status === 'livree'
+        (o) => o.status === 'livre'
       ).length,
 
     annulees:
       orders.filter(
-        (o) => o.status === 'annulee'
+        (o) => o.status === 'annule'
       ).length,
   };
 
@@ -712,7 +712,7 @@ export default function AccountPage() {
                   )}
 
                   {order.status ===
-                    'livree' && (
+                    'livre' && (
 
                     <span className="bg-green-100 text-green-700 px-3 py-1 rounded-full text-sm font-semibold">
 
@@ -723,7 +723,7 @@ export default function AccountPage() {
                   )}
 
                   {order.status ===
-                    'annulee' && (
+                    'annule' && (
 
                     <span className="bg-red-100 text-red-700 px-3 py-1 rounded-full text-sm font-semibold">
 
@@ -773,7 +773,7 @@ export default function AccountPage() {
                 )}
 
                 {order.status ===
-                  'annulee' && (
+                  'annule' && (
 
                   <button className="w-full border-2 border-green-600 text-green-600 py-3 rounded-xl font-semibold mt-3">
 

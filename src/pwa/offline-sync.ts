@@ -125,3 +125,4 @@ export class OfflineSyncManager {
 }
 
 export const offlineSync = OfflineSyncManager.getInstance();
+

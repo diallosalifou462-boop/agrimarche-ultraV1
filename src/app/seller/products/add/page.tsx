@@ -16,7 +16,7 @@ import {
 const CATEGORIES = [
   'Fruits', 'Légumes', 'Céréales', 'Tubercules',
   'Machines agricoles', 'Condiments', 'Poissons',
-  'Produits laitiers', 'Légumineuses', 'Engrais', 'Boissons locales',
+  'Produits laitiers', 'Légumineuses', 'Engrais', 'Elevage', 'Boissons', 'Produits transformés', 'Semences & Agricole'
 ];
 
 const UNITS = ['kg', 'g', 'tonne', 'litre', 'unité', 'sac', 'botte', 'caisse', 'carton', 'panier'];
@@ -581,3 +581,4 @@ export default function AddProductPage() {
     </div>
   );
 }
+

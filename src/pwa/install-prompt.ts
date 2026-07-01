@@ -71,3 +71,4 @@ export class InstallPromptManager {
 }
 
 export const installPrompt = InstallPromptManager.getInstance();
+

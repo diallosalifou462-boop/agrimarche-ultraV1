@@ -4,3 +4,4 @@ export const uploadFeatures = {
   firebaseStorage: true,
   optimized: true
 };
+

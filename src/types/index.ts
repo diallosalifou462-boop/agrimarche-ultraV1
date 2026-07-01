@@ -138,3 +138,4 @@ export interface SellerEarnings {
   change: number;
   history: Array<{ date: string; amount: number }>;
 }
+

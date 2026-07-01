@@ -299,3 +299,4 @@ function buildEmailHtml({
 export async function GET() {
   return NextResponse.json({ message: 'API notifications en ligne. Utilisez POST.' });
 }
+

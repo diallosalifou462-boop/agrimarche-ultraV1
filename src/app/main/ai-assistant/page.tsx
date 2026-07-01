@@ -1157,3 +1157,4 @@ const BASE_CSS = `
     .xp-toast, .send-btn--active, .locked-cta, .progress-fill { transition: none; }
   }
 `;
+

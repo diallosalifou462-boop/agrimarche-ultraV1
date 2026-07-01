@@ -26,7 +26,7 @@ export async function POST(request: Request) {
       deliveryName: deliveryName || '',
       deliveryPhone: deliveryPhone || '',
       assignedAt: new Date().toISOString(),
-      status: 'expediee', // Garde le statut expédiée
+      status: 'en_livraison', // Garde le statut expédiée
       updatedAt: new Date().toISOString(),
     });
     

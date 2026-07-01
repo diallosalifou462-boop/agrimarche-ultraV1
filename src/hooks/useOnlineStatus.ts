@@ -52,3 +52,4 @@ export function useOnlineStatus() {
 
   return { isOnline, wasOffline, offlineDuration, formatOfflineDuration };
 }
+

@@ -68,3 +68,4 @@ Format JSON de ta réponse :
 }
 
 export const agent = new IntelligentAgent();
+

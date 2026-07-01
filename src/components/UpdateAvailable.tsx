@@ -61,3 +61,4 @@ export const UpdateAvailable: React.FC = () => {
     </div>
   );
 };
+

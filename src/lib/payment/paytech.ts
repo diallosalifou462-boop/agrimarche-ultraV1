@@ -78,3 +78,4 @@ export const PAYMENT_METHODS = [
     color: '#FF6600',
   },
 ] as const;
+

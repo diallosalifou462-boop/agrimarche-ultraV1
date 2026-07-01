@@ -118,3 +118,4 @@ export class ServiceWorkerRegistration {
 
 const swRegistration = ServiceWorkerRegistration.getInstance();
 export default swRegistration;
+

@@ -437,7 +437,7 @@ export default function DeliveryDashboard() {
   // Listen orders — actives + terminées du jour
   useEffect(() => {
     if (!user) return;
-    const q = query(collection(db, 'orders'), where('status', 'in', ['expediee', 'livree']));
+    const q = query(collection(db, 'orders'), where('status', 'in', ['en_livraison', 'livre']));
     const unsub = onSnapshot(q, (snap) => {
       setOrders(snap.docs.map(d => ({ id: d.id, ...d.data() } as Order)));
       setLoading(false);
@@ -463,7 +463,7 @@ export default function DeliveryDashboard() {
       const { latitude, longitude, accuracy } = pos.coords;
       setCurrentLocation({ lat: latitude, lng: longitude });
       setGpsAccuracy(accuracy ?? null);
-      const activeOrders = ordersRef.current.filter(o => o.status === 'expediee');
+      const activeOrders = ordersRef.current.filter(o => o.status === 'en_livraison');
       await Promise.all(activeOrders.map(order =>
         updateDoc(doc(db, 'orders', order.id), {
           'tracking.currentLocation': { lat: latitude, lng: longitude },
@@ -481,7 +481,7 @@ export default function DeliveryDashboard() {
     setWatchId(null);
     setSharingLocation(false);
     setLocationError(null);
-    const activeOrders = ordersRef.current.filter(o => o.status === 'expediee');
+    const activeOrders = ordersRef.current.filter(o => o.status === 'en_livraison');
     await Promise.all(activeOrders.map(order =>
       updateDoc(doc(db, 'orders', order.id), { 'tracking.enabled': false }).catch(console.error)
     ));
@@ -491,7 +491,7 @@ export default function DeliveryDashboard() {
     if (!confirm('Confirmer la livraison ?')) return;
     try {
       await updateDoc(doc(db, 'orders', orderId), {
-        status: 'livree', statusLabel: 'Livrée',
+        status: 'livre', statusLabel: 'Livrée',
         deliveredAt: serverTimestamp(), 'tracking.enabled': false,
       });
     } catch { alert('Erreur lors de la validation'); }
@@ -515,8 +515,8 @@ export default function DeliveryDashboard() {
 
   if (!user || profile?.role !== 'delivery') return null;
 
-  const activeDeliveries = orders.filter(o => o.status === 'expediee');
-  const completedDeliveries = orders.filter(o => o.status === 'livree');
+  const activeDeliveries = orders.filter(o => o.status === 'en_livraison');
+  const completedDeliveries = orders.filter(o => o.status === 'livre');
 
   return (
     <div style={{ minHeight: '100vh', background: '#f8fafc', fontFamily: "'Inter', system-ui, sans-serif" }}>
@@ -646,3 +646,4 @@ export default function DeliveryDashboard() {
     </div>
   );
 }
+

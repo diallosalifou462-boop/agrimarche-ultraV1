@@ -25,3 +25,4 @@ export function useInstallPrompt() {
 
   return { isInstallable, isInstalled, install };
 }
+

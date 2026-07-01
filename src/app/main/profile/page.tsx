@@ -57,7 +57,7 @@ export default function AccountPage() {
       quantity: '5 kg',
       seller: 'Riziculture Nord',
       date: '20 Mai 2026',
-      status: 'livree',
+      status: 'livre',
     },
     {
       id: 3,
@@ -66,7 +66,7 @@ export default function AccountPage() {
       quantity: '1 kg',
       seller: 'Maraîchers Bio',
       date: '18 Mai 2026',
-      status: 'annulee',
+      status: 'annule',
     },
   ]);
 
@@ -110,14 +110,14 @@ export default function AccountPage() {
   // Gestion des actions commandes
   const handleConfirmOrder = (orderId: number) => {
     setOrders(orders.map(order => 
-      order.id === orderId ? { ...order, status: 'livree' } : order
+      order.id === orderId ? { ...order, status: 'livre' } : order
     ));
     alert(`✅ Commande ${orderId} confirmée !`);
   };
 
   const handleCancelOrder = (orderId: number) => {
     setOrders(orders.map(order => 
-      order.id === orderId ? { ...order, status: 'annulee' } : order
+      order.id === orderId ? { ...order, status: 'annule' } : order
     ));
     alert(`❌ Commande ${orderId} annulée`);
   };
@@ -362,13 +362,13 @@ export default function AccountPage() {
                       En attente
                     </span>
                   )}
-                  {order.status === 'livree' && (
+                  {order.status === 'livre' && (
                     <span className="bg-green-100 text-green-700 px-3 py-1.5 rounded-full text-sm font-semibold flex items-center gap-1">
                       <CheckCircle size={14} />
                       Livrée
                     </span>
                   )}
-                  {order.status === 'annulee' && (
+                  {order.status === 'annule' && (
                     <span className="bg-red-100 text-red-700 px-3 py-1.5 rounded-full text-sm font-semibold flex items-center gap-1">
                       <XCircle size={14} />
                       Annulée
@@ -397,7 +397,7 @@ export default function AccountPage() {
                 )}
                 
                 {/* BOUTON RECOMMANDER - Pour les commandes annulées */}
-                {order.status === 'annulee' && (
+                {order.status === 'annule' && (
                   <div className="mt-3 pt-2 border-t border-gray-200">
                     <button
                       onClick={() => handleReorder(order.id)}
@@ -410,7 +410,7 @@ export default function AccountPage() {
                 )}
                 
                 {/* BOUTON AVIS - Pour les commandes livrées */}
-                {order.status === 'livree' && (
+                {order.status === 'livre' && (
                   <div className="mt-3 pt-2 border-t border-gray-200">
                     <button
                       onClick={() => handleLeaveReview(order.id)}

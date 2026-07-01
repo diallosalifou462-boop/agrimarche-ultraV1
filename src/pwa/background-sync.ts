@@ -45,3 +45,4 @@ export class BackgroundSyncManager {
 }
 
 export const backgroundSync = BackgroundSyncManager.getInstance();
+
