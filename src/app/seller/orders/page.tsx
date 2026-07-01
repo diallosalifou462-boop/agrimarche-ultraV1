@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type JSX } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   ShoppingBag, Search, MessageCircle, CheckCircle, XCircle,
@@ -8,11 +8,10 @@ import {
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import {
-  collection, query, where, doc, updateDoc, onSnapshot, Timestamp, getDoc,
+  collection, query, where, doc, updateDoc, onSnapshot, Timestamp, getDoc, writeBatch,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
-import DeliveryUpdateButton from './DeliveryUpdateButton';
-import React from 'react'; // ✅ Ajout de l'import React
+import DeliveryUpdateButton from '@/components/DeliveryUpdateButton';
 
 interface Order {
   id: string;
@@ -27,24 +26,51 @@ interface Order {
   userId: string;
   createdAt?: any;
   orderNumber?: string;
-  cancelledBy?: string;   // 'client' | 'seller'
+  cancelledBy?: string;
   cancelledAt?: any;
+  deliveryStatus?: string;
 }
 
+// ─── NORMALISATION DES ANCIENS STATUTS FIRESTORE ────────────────────────────
+// Anciens docs Firestore : 'expediee' → 'en_livraison', 'livree' → 'livre', etc.
 // ─────────────────────────────────────────────────────────────────────────────
-// STATUTS UNIFIÉS — identiques dans checkout-page.tsx et orders-page.tsx
-//   en_attente → en_preparation → en_livraison → livre   (flux normal)
-//                                              ↘ annule  (vendeur ou client)
+const LEGACY_STATUS: Record<string, string> = {
+  expediee:  'en_livraison',
+  livree:    'livre',
+  annulee:   'annule',
+  pending:   'en_attente',
+  preparing: 'en_preparation',
+  shipped:   'en_livraison',
+  delivered: 'livre',
+  cancelled: 'annule',
+};
+function normalizeStatus(s: string): string {
+  return LEGACY_STATUS[s] ?? s;
+}
+
+// ─── SOURCE DE VÉRITÉ DES STATUTS ────────────────────────────────────────────
+// en_attente → en_preparation → en_livraison → livre
+//                                            ↘ annule (cancelledBy: 'client'|'seller')
+// Ces clés DOIVENT être identiques dans les 3 pages (seller, account, account/orders)
 // ─────────────────────────────────────────────────────────────────────────────
 const getStatusInfo = (status: string) => {
-  const map: Record<string, { label: string; color: string; icon: React.ReactNode }> = {
-    en_attente:     { label: 'En attente',     color: 'bg-amber-100 text-amber-700',   icon: React.createElement(Clock,       { size: 14, className: "mr-1" }) },
-    en_preparation: { label: 'En préparation', color: 'bg-blue-100 text-blue-700',    icon: React.createElement(Package,     { size: 14, className: "mr-1" }) },
-    en_livraison:   { label: 'En livraison',   color: 'bg-purple-100 text-purple-700', icon: React.createElement(Truck,       { size: 14, className: "mr-1" }) },
-    livre:          { label: 'Livrée',         color: 'bg-green-100 text-green-700',  icon: React.createElement(CheckCircle, { size: 14, className: "mr-1" }) },
-    annule:         { label: 'Annulée',        color: 'bg-red-100 text-red-700',      icon: React.createElement(XCircle,     { size: 14, className: "mr-1" }) },
+  const map: Record<string, { label: string; color: string; icon: JSX.Element }> = {
+    en_attente:     { label: 'En attente',     color: 'bg-amber-100 text-amber-700',   icon: <Clock size={14} className="mr-1" /> },
+    en_preparation: { label: 'En préparation', color: 'bg-blue-100 text-blue-700',    icon: <Package size={14} className="mr-1" /> },
+    en_livraison:   { label: 'En livraison',   color: 'bg-purple-100 text-purple-700', icon: <Truck size={14} className="mr-1" /> },
+    livre:          { label: 'Livrée',         color: 'bg-green-100 text-green-700',  icon: <CheckCircle size={14} className="mr-1" /> },
+    annule:         { label: 'Annulée',        color: 'bg-red-100 text-red-700',      icon: <XCircle size={14} className="mr-1" /> },
   };
-  return map[status] || { label: status, color: 'bg-gray-100 text-gray-700', icon: React.createElement(React.Fragment) };
+  return map[status] || { label: status, color: 'bg-gray-100 text-gray-700', icon: <></> };
+};
+
+// Mapping status → deliveryStatus (aligné avec DeliveryUpdateButton)
+const STATUS_TO_DELIVERY: Record<string, string> = {
+  en_attente:     'pending',
+  en_preparation: 'preparing',
+  en_livraison:   'shipped',
+  livre:          'delivered',
+  annule:         'pending',
 };
 
 export default function SellerOrdersPage() {
@@ -53,12 +79,11 @@ export default function SellerOrdersPage() {
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState<string | null>(null);
   const { user, loading: authLoading } = useAuth();
-
-  // ── Sync temps réel ──────────────────────────────────────────────────────
   const router = useRouter();
 
+  // ── Sync temps réel ──────────────────────────────────────────────────────
   useEffect(() => {
-    if (authLoading) return; // Attendre que l'auth soit prête
+    if (authLoading) return;
     if (!user) { setLoading(false); router.replace('/auth/login'); return; }
 
     const q = query(collection(db, 'orders'), where('sellerId', '==', user.uid));
@@ -66,21 +91,25 @@ export default function SellerOrdersPage() {
     const unsub = onSnapshot(q, (snap) => {
       const data = snap.docs.map(d => {
         const dd = d.data();
+        const raw = dd.status || 'en_attente';
+        const normalized = normalizeStatus(raw);
+        console.log(`[AgriMarché/SellerOrders] Order ${d.id.slice(-6)} | raw="${raw}" → "${normalized}" | amount=${dd.total || 0}`);
         return {
           id: d.id,
-          customerName:  dd.userName || 'Client inconnu',
-          customerPhone: dd.userPhone || 'Non renseigné',
-          amount:        dd.total || 0,
-          status:        dd.status || 'en_attente',
-          statusLabel:   dd.statusLabel,
-          date:          dd.date || new Date().toLocaleDateString('fr-FR'),
-          products:      dd.items || [],
-          sellerId:      dd.sellerId || '',
-          userId:        dd.userId || '',
-          createdAt:     dd.createdAt,
-          orderNumber:   dd.orderNumber,
-          cancelledBy:   dd.cancelledBy,
-          cancelledAt:   dd.cancelledAt,
+          customerName:   dd.userName || 'Client inconnu',
+          customerPhone:  dd.userPhone || 'Non renseigné',
+          amount:         dd.total || 0,
+          status:         normalized,
+          statusLabel:    dd.statusLabel,
+          date:           dd.date || new Date().toLocaleDateString('fr-FR'),
+          products:       dd.items || [],
+          sellerId:       dd.sellerId || '',
+          userId:         dd.userId || '',
+          createdAt:      dd.createdAt,
+          orderNumber:    dd.orderNumber,
+          cancelledBy:    dd.cancelledBy,
+          cancelledAt:    dd.cancelledAt,
+          deliveryStatus: dd.deliveryStatus || 'pending',
         } as Order;
       });
 
@@ -94,59 +123,57 @@ export default function SellerOrdersPage() {
     }, (err) => { console.error(err); setLoading(false); });
 
     return () => unsub();
-  }, [user, authLoading, router]);
+  }, [user, authLoading]);
 
   // ── Mise à jour statut (vendeur) ─────────────────────────────────────────
+  // ✅ FIX : writeBatch pour synchroniser orders + seller_orders en une seule opération atomique
   const updateStatus = async (id: string, newStatus: string, statusLabel: string) => {
     setUpdating(id);
     try {
-      const orderRef = doc(db, 'orders', id);
-      
-      // Récupérer la commande pour avoir les infos client
+      const orderRef      = doc(db, 'orders', id);
+      const sellerOrderRef = doc(db, 'seller_orders', id);
+
       const orderSnap = await getDoc(orderRef);
       const orderData = orderSnap.data();
-      
+
       const payload: Record<string, any> = {
-        status: newStatus,
+        status:         newStatus,
         statusLabel,
-        updatedAt: new Date().toISOString(),
+        deliveryStatus: STATUS_TO_DELIVERY[newStatus] || 'pending',
+        updatedAt:      new Date().toISOString(),
       };
-      // Si le vendeur annule, on trace qui a annulé
+
       if (newStatus === 'annule') {
-        payload.cancelledBy  = 'seller';   // ← le client verra l'alerte
-        payload.cancelledAt  = Timestamp.now();
+        payload.cancelledBy = 'seller';
+        payload.cancelledAt = Timestamp.now();
       }
-      await updateDoc(orderRef, payload);
-      
-      // 🔔 NOTIFICATION AU CLIENT (quand en livraison)
+
+      // ✅ set+merge évite "No document to update" si le doc n'existe que dans seller_orders
+      const batch = writeBatch(db);
+      batch.set(orderRef, payload, { merge: true });
+
+      const sellerOrderSnap = await getDoc(sellerOrderRef);
+      if (sellerOrderSnap.exists()) {
+        batch.set(sellerOrderRef, payload, { merge: true });
+      }
+
+      await batch.commit();
+
+      // 🔔 Notification client — expédition
       if (newStatus === 'en_livraison' && orderData?.userId) {
         await fetch('/api/notifications/send', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             userId: orderData.userId,
-            title: '🚚 Commande en livraison',
+            title: '🚚 Commande expédiée',
             body: `Votre commande #${orderData.orderNumber || id.slice(-8)} est en route !`,
             link: '/account/orders',
           }),
         });
       }
-      
-      // 🔔 NOTIFICATION AU CLIENT (quand livrée)
-      if (newStatus === 'livre' && orderData?.userId) {
-        await fetch('/api/notifications/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            userId: orderData.userId,
-            title: '📦 Commande livrée',
-            body: `Votre commande #${orderData.orderNumber || id.slice(-8)} a été livrée. Merci !`,
-            link: '/account/orders',
-          }),
-        });
-      }
-      
-      // 🔔 NOTIFICATION AU CLIENT (quand le vendeur annule)
+
+      // 🔔 Notification client — refus vendeur
       if (newStatus === 'annule' && orderData?.userId) {
         await fetch('/api/notifications/send', {
           method: 'POST',
@@ -159,10 +186,13 @@ export default function SellerOrdersPage() {
           }),
         });
       }
-      
-    } catch (err) {
+
+    } catch (err: any) {
       console.error(err);
-      alert('Erreur lors de la mise à jour');
+      const isOffline = !navigator.onLine || err?.code === 'unavailable' || err?.message?.includes('offline');
+      alert(isOffline
+        ? '📶 Pas de connexion internet. Reconnecte-toi et réessaie.'
+        : 'Erreur lors de la mise à jour : ' + (err?.message || err));
     } finally {
       setUpdating(null);
     }
@@ -175,49 +205,40 @@ export default function SellerOrdersPage() {
   );
 
   if (loading) return (
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-      <div className="text-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-emerald-600 mx-auto" />
-        <p className="mt-4 text-gray-600">Chargement des commandes…</p>
-      </div>
+    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <div className="w-10 h-10 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin" />
     </div>
   );
 
   return (
-    <div className="min-h-screen bg-gray-50 p-4 md:p-6">
-      <div className="max-w-5xl mx-auto space-y-6">
+    <div className="min-h-screen bg-gray-50">
+      <div className="max-w-2xl mx-auto px-4 py-8">
 
-        {/* Header */}
-        <div className="bg-gradient-to-r from-emerald-600 to-green-600 rounded-2xl p-4 text-white shadow-lg">
-          <div className="flex items-center justify-between flex-wrap gap-3">
-            <div>
-              <p className="font-bold text-lg flex items-center gap-2">
-                <ShoppingBag className="w-5 h-5" />
-                🚚 Commandes en temps réel
-              </p>
-              <p className="text-emerald-100 text-sm mt-1">Répondez rapidement pour gagner plus de clients.</p>
-            </div>
-            <div className="bg-white/20 px-4 py-2 rounded-xl text-sm font-semibold">AgriMarché Sénégal</div>
-          </div>
+        {/* En-tête */}
+        <div className="mb-6">
+          <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
+            <ShoppingBag className="text-emerald-600" /> Mes commandes
+          </h1>
+          <p className="text-sm text-gray-500 mt-1">{filteredOrders.length} commande{filteredOrders.length !== 1 ? 's' : ''}</p>
         </div>
 
         {/* Recherche */}
-        <div className="relative max-w-md">
-          <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+        <div className="relative mb-6">
+          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
           <input
             type="text"
-            placeholder="Rechercher client, commande ou numéro…"
+            placeholder="Rechercher par client ou N° commande…"
             value={searchTerm}
             onChange={e => setSearchTerm(e.target.value)}
-            className="w-full pl-10 pr-4 py-3 border border-gray-200 rounded-xl focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 outline-none bg-white"
+            className="w-full pl-10 pr-4 py-3 rounded-xl border border-gray-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-300"
           />
         </div>
 
         {/* Liste */}
         <div className="space-y-4">
           {filteredOrders.length > 0 ? filteredOrders.map((order) => {
-            const statusInfo      = getStatusInfo(order.status);
-            const isUpdating      = updating === order.id;
+            const statusInfo   = getStatusInfo(order.status);
+            const isUpdating   = updating === order.id;
             const isCancelledByClient = order.status === 'annule' && order.cancelledBy === 'client';
             const isCancelledBySeller = order.status === 'annule' && order.cancelledBy === 'seller';
             const isCancelled         = order.status === 'annule';
@@ -231,7 +252,7 @@ export default function SellerOrdersPage() {
                   'border-gray-100'
                 }`}
               >
-                {/* ── Annulée par le CLIENT → alerte vendeur bien visible ── */}
+                {/* Alerte annulation client */}
                 {isCancelledByClient && (
                   <div className="mb-4 bg-orange-100 border border-orange-300 rounded-xl px-4 py-3 flex items-start gap-2">
                     <UserX size={16} className="text-orange-600 shrink-0 mt-0.5" />
@@ -274,7 +295,7 @@ export default function SellerOrdersPage() {
                   </div>
                 </div>
 
-                {/* Produits (masqués si annulé par client pour éviter tout traitement) */}
+                {/* Produits (masqués si annulé) */}
                 {order.products?.length > 0 && !isCancelled && (
                   <div className="mt-4 pt-4 border-t border-gray-100">
                     <p className="text-sm font-semibold text-gray-700 mb-2">Produits :</p>
@@ -291,7 +312,6 @@ export default function SellerOrdersPage() {
                   </div>
                 )}
 
-                {/* Produits masqués si annulé par client */}
                 {isCancelledByClient && order.products?.length > 0 && (
                   <div className="mt-3 pt-3 border-t border-orange-100">
                     <p className="text-xs text-orange-500 italic">
@@ -325,7 +345,7 @@ export default function SellerOrdersPage() {
                     {order.status === 'en_preparation' && (
                       <>
                         <button
-                          onClick={() => updateStatus(order.id, 'en_livraison', 'En cours de livraison')}
+                          onClick={() => updateStatus(order.id, 'en_livraison', 'En livraison')}
                           disabled={isUpdating}
                           className="px-4 py-2 bg-purple-500 text-white rounded-xl text-sm font-medium hover:bg-purple-600 transition disabled:opacity-50"
                         >
@@ -343,7 +363,7 @@ export default function SellerOrdersPage() {
 
                     {order.status === 'en_livraison' && (
                       <button
-                        onClick={() => updateStatus(order.id, 'livre', 'Livrée avec succès')}
+                        onClick={() => updateStatus(order.id, 'livre', 'Livrée')}
                         disabled={isUpdating}
                         className="px-4 py-2 bg-green-500 text-white rounded-xl text-sm font-medium hover:bg-green-600 transition disabled:opacity-50"
                       >
@@ -362,24 +382,21 @@ export default function SellerOrdersPage() {
                       </a>
                     )}
 
-                    {/* ✅ AJOUTE LE BOUTON DE SUIVI ICI */}
-                    <DeliveryUpdateButton
-                      orderId={order.id}
-                      currentStep={(order as any).deliveryStatus || 'pending'}
-                      onUpdate={() => {
-                        // Recharger la page pour voir le nouveau statut
-                        window.location.reload();
-                      }}
-                    />
+                    {order.status === 'en_livraison' && (
+                      <DeliveryUpdateButton
+                        orderId={order.id}
+                        currentStep={order.deliveryStatus || 'pending'}
+                      />
+                    )}
                   </div>
                 )}
 
-                {/* Message si annulée — aucune action disponible */}
+                {/* Message si annulée */}
                 {isCancelled && (
                   <div className="mt-4 pt-4 border-t border-red-100 flex items-center gap-2">
                     <XCircle size={15} className="text-red-400 shrink-0" />
                     <p className="text-sm text-red-500">
-                    {isCancelledByClient ? 'Annulée par le client — aucune action requise.' : 'Commande refusée — aucune action requise.'}
+                      {isCancelledByClient ? 'Annulée par le client — aucune action requise.' : 'Commande refusée — aucune action requise.'}
                     </p>
                   </div>
                 )}
