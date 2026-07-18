@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AgriMarché — Hors ligne</title>
+
+<style>
+  *{
+    margin:0;
+    padding:0;
+    box-sizing:border-box;
+  }
+
+  body{
+    min-height:100vh;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    padding:32px 20px;
+    background:#FAFAF7;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,sans-serif;
+    text-align:center;
+  }
+
+  .logo{
+    width:100px;
+    margin-bottom:12px;
+  }
+
+  .bars{
+    display:flex;
+    align-items:flex-end;
+    gap:4px;
+    height:32px;
+    margin-bottom:20px;
+  }
+
+  .bar{
+    width:8px;
+    background:#DC2626;
+    border-radius:3px;
+    animation:signal 1.6s infinite ease-in-out;
+  }
+
+  .bar:nth-child(1){
+    height:8px;
+    animation-delay:0s;
+  }
+
+  .bar:nth-child(2){
+    height:14px;
+    animation-delay:.15s;
+  }
+
+  .bar:nth-child(3){
+    height:20px;
+    animation-delay:.30s;
+  }
+
+  .bar:nth-child(4){
+    height:26px;
+    animation-delay:.45s;
+  }
+
+  @keyframes signal{
+    0%,100%{
+      opacity:.15;
+    }
+    50%{
+      opacity:1;
+    }
+  }
+
+  h1{
+    color:#1B5E20;
+    font-size:24px;
+    font-weight:800;
+    margin-bottom:10px;
+  }
+
+  p{
+    max-width:340px;
+    color:#6B7280;
+    line-height:1.6;
+    font-size:15px;
+  }
+
+  button{
+    margin-top:30px;
+    padding:14px 34px;
+    border:none;
+    border-radius:14px;
+    background:#1B5E20;
+    color:white;
+    font-size:16px;
+    font-weight:700;
+    cursor:pointer;
+    transition:.2s;
+  }
+
+  button:hover{
+    background:#154d19;
+  }
+
+  button:disabled{
+    opacity:.6;
+    cursor:not-allowed;
+  }
+
+  .astuce{
+    margin-top:35px;
+    background:white;
+    border:1px solid rgba(245,158,11,.25);
+    border-radius:14px;
+    padding:18px;
+    max-width:350px;
+    text-align:left;
+  }
+
+  .astuce h3{
+    color:#F59E0B;
+    font-size:14px;
+    margin-bottom:8px;
+  }
+
+  .astuce p{
+    color:#374151;
+    font-size:13px;
+  }
+</style>
+
+</head>
+
+<body>
+
+<img
+  src="/logo-agrimarche.png"
+  alt="AgriMarché"
+  class="logo"
+/>
+
+<div class="bars">
+  <div class="bar"></div>
+  <div class="bar"></div>
+  <div class="bar"></div>
+  <div class="bar"></div>
+</div>
+
+<h1>Pas de connexion Internet</h1>
+
+<p>
+Vos données restent enregistrées sur votre appareil.
+Elles seront synchronisées automatiquement dès que la connexion reviendra.
+</p>
+
+<button id="retry">
+Réessayer
+</button>
+
+<div class="astuce">
+<h3>💡 Astuce connexion</h3>
+
+<p>
+En zone rurale, la data mobile est parfois plus stable que le Wi-Fi.
+Si vous utilisez Orange ou Free, essayez de désactiver le Wi-Fi puis d'utiliser les données mobiles.
+Avec Expresso, vérifiez également votre crédit.
+</p>
+
+</div>
+
+<script>
+
+const btn=document.getElementById("retry");
+
+btn.onclick=()=>{
+
+    btn.disabled=true;
+    btn.innerText="Vérification...";
+
+    setTimeout(()=>{
+        location.reload();
+    },700);
+
+};
+
+window.addEventListener("online",()=>{
+    location.reload();
+});
+
+</script>
+
+</body>
+</html>

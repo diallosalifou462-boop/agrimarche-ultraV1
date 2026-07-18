@@ -1,0 +1,519 @@
+<!DOCTYPE html><html lang="fr"><head><meta charSet="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/><link rel="stylesheet" href="/_next/static/chunks/2hkfpm1hehfk9.css" data-precedence="next"/><link rel="preload" as="script" fetchPriority="low" href="/_next/static/chunks/2zjueh7t2vecu.js"/><script src="/_next/static/chunks/0m2o2n2b98626.js" async=""></script><script src="/_next/static/chunks/0iec5q4ack_04.js" async=""></script><script src="/_next/static/chunks/2cwdg20ig2v9m.js" async=""></script><script src="/_next/static/chunks/27jktro2p5rq9.js" async=""></script><script src="/_next/static/chunks/turbopack-1iud38xblmpzv.js" async=""></script><script src="/_next/static/chunks/04j50wy62dj74.js" async=""></script><script src="/_next/static/chunks/2wvtdqvwkfcd0.js" async=""></script><script src="/_next/static/chunks/1-8s9_t85wwr4.js" async=""></script><script src="/_next/static/chunks/3rj1yc81ak5gv.js" async=""></script><script src="/_next/static/chunks/2tpgrqwlydrqz.js" async=""></script><script src="/_next/static/chunks/12zvfqm12h31x.js" async=""></script><script src="/_next/static/chunks/27u1-f8wuur2b.js" async=""></script><title>AgriMarché Sénégal</title><meta name="description" content="La marketplace agricole du Sénégal"/><script src="/_next/static/chunks/0cz1d0mv5g_q7.js" noModule=""></script></head><body><div hidden=""><!--$--><!--/$--></div><div class="unlock-root"><div class="spinner"></div><style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  /* ── ROOT ─────────────────────────────────────────────────────────────── */
+  .unlock-root {
+    min-height: 100vh;
+    background: radial-gradient(ellipse at 30% 20%, #0a1f0e 0%, #060e09 60%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 16px;
+    font-family: 'DM Sans', system-ui, sans-serif;
+    position: relative;
+    gap: 20px;
+  }
+
+  .ambient-glow {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(ellipse at 70% 80%, rgba(139,92,246,.07) 0%, transparent 55%),
+      radial-gradient(ellipse at 10% 10%, rgba(0,255,135,.04) 0%, transparent 50%);
+  }
+
+  /* ── CARD ─────────────────────────────────────────────────────────────── */
+  .card-wrap {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    max-width: 448px;
+    background: #0d1a10;
+    border: 1px solid #1a2e1e;
+    border-radius: 24px;
+    overflow: hidden;
+    box-shadow:
+      0 48px 96px rgba(0,0,0,.55),
+      0 0 0 1px rgba(0,255,135,.04);
+  }
+
+  .card-body {
+    padding: 32px 32px 40px;
+  }
+
+  /* ── PROGRESS BAR ─────────────────────────────────────────────────────── */
+  .progress-bar {
+    height: 3px;
+    transition: background 0.4s;
+  }
+  .progress-bar--pay {
+    background: linear-gradient(90deg, #8b5cf6 0%, #6d28d9 50%, #00ff87 100%);
+    width: 33%;
+  }
+  .progress-bar--code {
+    background: linear-gradient(90deg, #1e90e6, #00c8ff);
+    width: 66%;
+  }
+  .progress-bar--success {
+    background: linear-gradient(90deg, #00ff87, #00c96b);
+    width: 100%;
+  }
+
+  /* ── STEP INDICATORS ──────────────────────────────────────────────────── */
+  .steps-nav {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    padding: 18px 32px 0;
+    position: relative;
+  }
+  .steps-nav__line {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 160px;
+    height: 1px;
+    background: #1a2e1e;
+    z-index: 0;
+    margin-top: 9px;
+  }
+  .step-dot {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    border: 1.5px solid #1a2e1e;
+    background: #0d1a10;
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1;
+    transition: all 0.3s;
+    margin: 0 28px;
+  }
+  .step-dot--active {
+    border-color: #00ff87;
+    background: rgba(0,255,135,.1);
+    box-shadow: 0 0 0 4px rgba(0,255,135,.1);
+  }
+  .step-dot--done {
+    border-color: #00ff87;
+    background: rgba(0,255,135,.15);
+  }
+  .step-dot__num {
+    font-size: 11px;
+    font-weight: 700;
+    color: #4a6b50;
+  }
+  .step-dot--active .step-dot__num,
+  .step-dot--done .step-dot__num {
+    color: #00ff87;
+  }
+
+  /* ── STEP HEADER ──────────────────────────────────────────────────────── */
+  .step-header {
+    text-align: center;
+    margin-bottom: 28px;
+    margin-top: 8px;
+  }
+  .avatar {
+    width: 72px; height: 72px;
+    border-radius: 50%;
+    margin: 0 auto 18px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 30px;
+  }
+  .avatar--gradient-purple {
+    background: linear-gradient(135deg, #8b5cf6, #00ff87);
+    box-shadow: 0 8px 32px rgba(139,92,246,.3);
+  }
+  .avatar--gradient-blue {
+    background: linear-gradient(135deg, #1e90e6, #0070cc);
+    box-shadow: 0 8px 24px rgba(30,144,230,.3);
+  }
+  .step-header__title {
+    font-size: 26px;
+    font-weight: 800;
+    color: #e8f5e9;
+    letter-spacing: -0.5px;
+    margin-bottom: 8px;
+    line-height: 1.2;
+  }
+  .step-header__sub {
+    font-size: 14px;
+    color: #6b8a71;
+    line-height: 1.65;
+    max-width: 300px;
+    margin: 0 auto;
+  }
+
+  /* ── PRICE BOX ────────────────────────────────────────────────────────── */
+  .price-box {
+    background: rgba(0,255,135,.04);
+    border: 1px solid rgba(0,255,135,.12);
+    border-radius: 16px;
+    padding: 20px 24px;
+    text-align: center;
+    margin-bottom: 24px;
+  }
+  .price-box__label {
+    font-size: 12px;
+    color: #6b8a71;
+    letter-spacing: .4px;
+    margin-bottom: 6px;
+  }
+  .price-box__amount {
+    font-size: 44px;
+    font-weight: 900;
+    color: #00ff87;
+    letter-spacing: -2px;
+    line-height: 1;
+  }
+  .price-box__currency {
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: 0;
+    margin-left: 6px;
+  }
+  .price-box__sub {
+    font-size: 12px;
+    color: #4a6b50;
+    margin-top: 8px;
+  }
+
+  /* ── FEATURE LIST ─────────────────────────────────────────────────────── */
+  .feature-list {
+    list-style: none;
+    margin-bottom: 24px;
+  }
+  .feature-list__item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 0;
+    border-bottom: 1px solid rgba(26,46,30,.7);
+  }
+  .feature-list__item:last-child { border-bottom: none; }
+  .feature-list__icon { font-size: 15px; flex-shrink: 0; }
+  .feature-list__label { font-size: 13.5px; color: #b2cfb8; flex: 1; }
+  .feature-list__check { color: #00ff87; font-size: 12px; margin-left: auto; }
+
+  /* ── WAVE BUTTON ──────────────────────────────────────────────────────── */
+  .btn-wave {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    width: 100%;
+    padding: 16px 0;
+    background: linear-gradient(135deg, #1e90e6, #0070cc);
+    color: #fff;
+    font-weight: 700;
+    font-size: 15.5px;
+    border-radius: 14px;
+    border: none;
+    cursor: pointer;
+    box-shadow: 0 8px 28px rgba(30,144,230,.35);
+    transition: transform .18s, box-shadow .18s;
+    font-family: inherit;
+  }
+  .btn-wave:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 14px 40px rgba(30,144,230,.45);
+  }
+  .btn-wave:active { transform: translateY(0); }
+
+  /* ── INFO BOX ─────────────────────────────────────────────────────────── */
+  .info-box {
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-top: 20px;
+    font-size: 12.5px;
+    line-height: 1.7;
+  }
+  .info-box--green {
+    background: rgba(0,255,135,.04);
+    border: 1px solid rgba(0,255,135,.1);
+    color: #6b8a71;
+  }
+  .info-box--blue {
+    background: rgba(30,144,230,.06);
+    border: 1px solid rgba(30,144,230,.15);
+    color: #7ab8e8;
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    margin-top: 0;
+    margin-bottom: 22px;
+  }
+  .info-box--purple {
+    background: rgba(139,92,246,.05);
+    border: 1px solid rgba(139,92,246,.12);
+    color: #9b84e8;
+    margin-top: 0;
+  }
+  .info-box__heading {
+    display: block;
+    color: #b2cfb8;
+    margin-bottom: 4px;
+  }
+  .info-box__steps {
+    padding-left: 16px;
+  }
+  .info-box__steps li { margin-top: 2px; }
+  .info-box__icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+  .code-format {
+    color: #a8d4f0;
+    font-family: monospace;
+    letter-spacing: .5px;
+  }
+
+  /* ── FIELD ────────────────────────────────────────────────────────────── */
+  .field { margin-bottom: 14px; }
+  .field__label {
+    display: block;
+    font-size: 11px;
+    font-weight: 700;
+    color: #6b8a71;
+    letter-spacing: .6px;
+    margin-bottom: 8px;
+  }
+  .field__input {
+    display: block;
+    width: 100%;
+    height: 52px;
+    background: #0a1610;
+    border: 1.5px solid #1a2e1e;
+    border-radius: 12px;
+    padding: 0 16px;
+    color: #e8f5e9;
+    font-size: 15px;
+    font-family: 'DM Mono', monospace;
+    letter-spacing: 1.5px;
+    outline: none;
+    transition: border-color .2s, box-shadow .2s;
+  }
+  .field__input:focus {
+    border-color: rgba(0,255,135,.45);
+    box-shadow: 0 0 0 3px rgba(0,255,135,.07);
+  }
+  .field__input--error {
+    border-color: rgba(239,68,68,.55) !important;
+    box-shadow: 0 0 0 3px rgba(239,68,68,.07);
+  }
+  .field__input::placeholder { color: #2e4733; letter-spacing: 1px; }
+
+  /* ── ERROR BOX ────────────────────────────────────────────────────────── */
+  .error-box {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    background: rgba(239,68,68,.08);
+    border: 1px solid rgba(239,68,68,.2);
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin-bottom: 14px;
+    font-size: 13px;
+    color: #f87171;
+    line-height: 1.5;
+  }
+
+  /* ── VERIFY BUTTON ────────────────────────────────────────────────────── */
+  .btn-verify {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 52px;
+    border-radius: 12px;
+    border: none;
+    background: linear-gradient(135deg, #00ff87, #00c96b);
+    color: #060e09;
+    font-weight: 700;
+    font-size: 15px;
+    cursor: pointer;
+    font-family: inherit;
+    box-shadow: 0 6px 24px rgba(0,255,135,.3);
+    transition: transform .18s, box-shadow .18s;
+    margin-bottom: 16px;
+  }
+  .btn-verify:hover:not(.btn-verify--disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 32px rgba(0,255,135,.4);
+  }
+  .btn-verify--disabled {
+    background: #1a2e1e;
+    color: #6b8a71;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+
+  /* ── BACK CONTROLS ────────────────────────────────────────────────────── */
+  .back-link {
+    display: block;
+    text-align: center;
+    margin-top: 18px;
+    font-size: 13px;
+    color: #4a6b50;
+    text-decoration: none;
+    transition: color .2s;
+  }
+  .back-link:hover { color: #6b8a71; }
+
+  .back-btn {
+    background: none;
+    border: none;
+    color: #6b8a71;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: inherit;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    transition: color .2s;
+  }
+  .back-btn:hover { color: #b2cfb8; }
+
+  /* ── SUCCESS ──────────────────────────────────────────────────────────── */
+  .success-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 8px 0;
+    text-align: center;
+  }
+  .success-icon {
+    width: 80px; height: 80px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #00ff87, #00c96b);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 34px;
+    box-shadow:
+      0 0 0 16px rgba(0,255,135,.07),
+      0 10px 40px rgba(0,255,135,.35);
+    animation: successPop .5s cubic-bezier(.22,.68,0,1.2) forwards;
+    margin-bottom: 22px;
+  }
+  .success-title {
+    font-size: 28px;
+    font-weight: 800;
+    color: #00ff87;
+    letter-spacing: -0.5px;
+    margin-bottom: 10px;
+  }
+  .success-sub {
+    font-size: 14.5px;
+    color: #b2cfb8;
+    line-height: 1.75;
+    margin-bottom: 28px;
+  }
+  .success-features {
+    list-style: none;
+    width: 100%;
+    background: rgba(0,255,135,.04);
+    border: 1px solid rgba(0,255,135,.13);
+    border-radius: 14px;
+    padding: 14px 18px;
+    margin-bottom: 26px;
+    text-align: left;
+  }
+  .success-features__item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 0;
+    border-bottom: 1px solid rgba(0,255,135,.07);
+    font-size: 13.5px;
+    color: #b2cfb8;
+  }
+  .success-features__item:last-child { border-bottom: none; }
+  .success-features__check { color: #00ff87; font-size: 13px; flex-shrink: 0; }
+
+  /* ── CTAs ─────────────────────────────────────────────────────────────── */
+  .cta {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    width: 100%;
+    padding: 16px 0;
+    border-radius: 14px;
+    font-weight: 700;
+    font-size: 15.5px;
+    text-decoration: none;
+    transition: transform .18s, box-shadow .18s;
+  }
+  .cta:hover { transform: translateY(-2px); }
+  .cta--green {
+    background: linear-gradient(135deg, #00ff87, #00c96b);
+    color: #060e09;
+    box-shadow: 0 8px 28px rgba(0,255,135,.3);
+  }
+  .cta--purple {
+    background: linear-gradient(135deg, #8b5cf6, #6d28d9);
+    color: #fff;
+    box-shadow: 0 8px 28px rgba(139,92,246,.35);
+  }
+
+  /* ── AUTH GATE ────────────────────────────────────────────────────────── */
+  .auth-gate {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    max-width: 340px;
+    text-align: center;
+  }
+  .auth-gate__icon { font-size: 52px; }
+  .auth-gate__title {
+    font-size: 20px;
+    font-weight: 800;
+    color: #e8f5e9;
+  }
+  .auth-gate__body {
+    font-size: 14px;
+    color: #6b8a71;
+    line-height: 1.65;
+    max-width: 280px;
+  }
+
+  /* ── SPINNER ──────────────────────────────────────────────────────────── */
+  .spinner {
+    width: 44px; height: 44px;
+    border-radius: 50%;
+    border: 3px solid #00ff87;
+    border-top-color: transparent;
+    animation: spin .8s linear infinite;
+  }
+
+  /* ── FOOTER ───────────────────────────────────────────────────────────── */
+  .unlock-footer {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: #2d4a32;
+  }
+
+  /* ── ANIMATIONS ───────────────────────────────────────────────────────── */
+  @keyframes successPop {
+    from { transform: scale(.6); opacity: 0; }
+    to   { transform: scale(1);  opacity: 1; }
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── RESPONSIVE ───────────────────────────────────────────────────────── */
+  @media (max-width: 480px) {
+    .card-body { padding: 24px 20px 32px; }
+    .step-header__title { font-size: 22px; }
+    .price-box__amount { font-size: 38px; }
+    .steps-nav { padding: 16px 20px 0; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .success-icon { animation: none; }
+    .spinner { animation: none; border-color: #00ff87; }
+    .btn-wave, .btn-verify, .cta { transition: none; }
+  }
+</style></div><!--$--><!--/$--><script src="/_next/static/chunks/2zjueh7t2vecu.js" id="_R_" async=""></script><script>(self.__next_f=self.__next_f||[]).push([0])</script><script>self.__next_f.push([1,"1:\"$Sreact.fragment\"\n2:I[57951,[\"/_next/static/chunks/04j50wy62dj74.js\",\"/_next/static/chunks/2wvtdqvwkfcd0.js\",\"/_next/static/chunks/1-8s9_t85wwr4.js\",\"/_next/static/chunks/3rj1yc81ak5gv.js\",\"/_next/static/chunks/2tpgrqwlydrqz.js\",\"/_next/static/chunks/12zvfqm12h31x.js\"],\"AuthProvider\"]\n3:I[5539,[\"/_next/static/chunks/04j50wy62dj74.js\",\"/_next/static/chunks/2wvtdqvwkfcd0.js\",\"/_next/static/chunks/1-8s9_t85wwr4.js\",\"/_next/static/chunks/3rj1yc81ak5gv.js\",\"/_next/static/chunks/2tpgrqwlydrqz.js\",\"/_next/static/chunks/12zvfqm12h31x.js\"],\"CartProvider\"]\n4:I[96610,[\"/_next/static/chunks/04j50wy62dj74.js\",\"/_next/static/chunks/2wvtdqvwkfcd0.js\",\"/_next/static/chunks/1-8s9_t85wwr4.js\",\"/_next/static/chunks/3rj1yc81ak5gv.js\",\"/_next/static/chunks/2tpgrqwlydrqz.js\",\"/_next/static/chunks/12zvfqm12h31x.js\"],\"NotificationProvider\"]\n5:I[51693,[\"/_next/static/chunks/04j50wy62dj74.js\",\"/_next/static/chunks/2wvtdqvwkfcd0.js\",\"/_next/static/chunks/1-8s9_t85wwr4.js\",\"/_next/static/chunks/3rj1yc81ak5gv.js\",\"/_next/static/chunks/2tpgrqwlydrqz.js\",\"/_next/static/chunks/12zvfqm12h31x.js\"],\"default\"]\n6:I[39756,[\"/_next/static/chunks/04j50wy62dj74.js\",\"/_next/static/chunks/2wvtdqvwkfcd0.js\",\"/_next/static/chunks/1-8s9_t85wwr4.js\",\"/_next/static/chunks/3rj1yc81ak5gv.js\",\"/_next/static/chunks/2tpgrqwlydrqz.js\",\"/_next/static/chunks/12zvfqm12h31x.js\"],\"default\"]\n7:I[37457,[\"/_next/static/chunks/04j50wy62dj74.js\",\"/_next/static/chunks/2wvtdqvwkfcd0.js\",\"/_next/static/chunks/1-8s9_t85wwr4.js\",\"/_next/static/chunks/3rj1yc81ak5gv.js\",\"/_next/static/chunks/2tpgrqwlydrqz.js\",\"/_next/static/chunks/12zvfqm12h31x.js\"],\"default\"]\n8:I[47257,[\"/_next/static/chunks/04j50wy62dj74.js\",\"/_next/static/chunks/2wvtdqvwkfcd0.js\",\"/_next/static/chunks/1-8s9_t85wwr4.js\",\"/_next/static/chunks/3rj1yc81ak5gv.js\",\"/_next/static/chunks/2tpgrqwlydrqz.js\",\"/_next/static/chunks/12zvfqm12h31x.js\"],\"ClientPageRoot\"]\n9:I[10013,[\"/_next/static/chunks/04j50wy62dj74.js\",\"/_next/static/chunks/2wvtdqvwkfcd0.js\",\"/_next/static/chunks/1-8s9_t85wwr4.js\",\"/_next/static/chunks/3rj1yc81ak5gv.js\",\"/_next/static/chunks/2tpgrqwlydrqz.js\",\"/_next/static/chunks/12zvfqm12h31x.js\",\"/_next/static/chunks/27u1-f8wuur2b.js\"],\"default\"]\nc:I[97367,[\"/_next/static/chunks/04j50wy62dj74.js\",\"/_next/static/chunks/2wvtdqvwkfcd0.js\",\"/_next/static/chunks/1-8s9_t85wwr4.js\",\"/_next/static/chunks/3rj1yc81ak5gv.js\",\"/_next/static/chunks/2tpgrqwlydrqz.js\",\"/_next/static/chunks/12zvfqm12h31x.js\"],\"OutletBoundary\"]\nd:\"$Sreact.suspense\"\n10:I[97367,[\"/_next/static/chunks/04j50wy62dj74.js\",\"/_next/static/chunks/2wvtdqvwkfcd0.js\",\"/_next/static/chunks/1-8s9_t85wwr4.js\",\"/_next/static/chunks/3rj1yc81ak5gv.js\",\"/_next/static/chunks/2tpgrqwlydrqz.js\",\"/_next/static/chunks/12zvfqm12h31x.js\"],\"ViewportBoundary\"]\n12:I[97367,[\"/_next/static/chunks/04j50wy62dj74.js\",\"/_next/static/chunks/2wvtdqvwkfcd0.js\",\"/_next/static/chunks/1-8s9_t85wwr4.js\",\"/_next/static/chunks/3rj1yc81ak5gv.js\",\"/_next/static/chunks/2tpgrqwlydrqz.js\",\"/_next/static/chunks/12zvfqm12h31x.js\"],\"MetadataBoundary\"]\n14:I[68027,[\"/_next/static/chunks/04j50wy62dj74.js\",\"/_next/static/chunks/2wvtdqvwkfcd0.js\",\"/_next/static/chunks/1-8s9_t85wwr4.js\",\"/_next/static/chunks/3rj1yc81ak5gv.js\",\"/_next/static/chunks/2tpgrqwlydrqz.js\",\"/_next/static/chunks/12zvfqm12h31x.js\"],\"default\",1]\n:HL[\"/_next/static/chunks/2hkfpm1hehfk9.css\",\"style\"]\n"])</script><script>self.__next_f.push([1,"0:{\"P\":null,\"c\":[\"\",\"main\",\"unlock-ia\"],\"q\":\"\",\"i\":false,\"f\":[[[\"\",{\"children\":[\"main\",{\"children\":[\"unlock-ia\",{\"children\":[\"__PAGE__\",{}]}]}]},\"$undefined\",\"$undefined\",16],[[\"$\",\"$1\",\"c\",{\"children\":[[[\"$\",\"link\",\"0\",{\"rel\":\"stylesheet\",\"href\":\"/_next/static/chunks/2hkfpm1hehfk9.css\",\"precedence\":\"next\",\"crossOrigin\":\"$undefined\",\"nonce\":\"$undefined\"}],[\"$\",\"script\",\"script-0\",{\"src\":\"/_next/static/chunks/04j50wy62dj74.js\",\"async\":true,\"nonce\":\"$undefined\"}],[\"$\",\"script\",\"script-1\",{\"src\":\"/_next/static/chunks/2wvtdqvwkfcd0.js\",\"async\":true,\"nonce\":\"$undefined\"}],[\"$\",\"script\",\"script-2\",{\"src\":\"/_next/static/chunks/1-8s9_t85wwr4.js\",\"async\":true,\"nonce\":\"$undefined\"}],[\"$\",\"script\",\"script-3\",{\"src\":\"/_next/static/chunks/3rj1yc81ak5gv.js\",\"async\":true,\"nonce\":\"$undefined\"}],[\"$\",\"script\",\"script-4\",{\"src\":\"/_next/static/chunks/2tpgrqwlydrqz.js\",\"async\":true,\"nonce\":\"$undefined\"}],[\"$\",\"script\",\"script-5\",{\"src\":\"/_next/static/chunks/12zvfqm12h31x.js\",\"async\":true,\"nonce\":\"$undefined\"}]],[\"$\",\"html\",null,{\"lang\":\"fr\",\"children\":[\"$\",\"body\",null,{\"children\":[\"$\",\"$L2\",null,{\"children\":[\"$\",\"$L3\",null,{\"children\":[\"$\",\"$L4\",null,{\"children\":[[\"$\",\"$L5\",null,{}],[\"$\",\"$L6\",null,{\"parallelRouterKey\":\"children\",\"error\":\"$undefined\",\"errorStyles\":\"$undefined\",\"errorScripts\":\"$undefined\",\"template\":[\"$\",\"$L7\",null,{}],\"templateStyles\":\"$undefined\",\"templateScripts\":\"$undefined\",\"notFound\":[[[\"$\",\"title\",null,{\"children\":\"404: This page could not be found.\"}],[\"$\",\"div\",null,{\"style\":{\"fontFamily\":\"system-ui,\\\"Segoe UI\\\",Roboto,Helvetica,Arial,sans-serif,\\\"Apple Color Emoji\\\",\\\"Segoe UI Emoji\\\"\",\"height\":\"100vh\",\"textAlign\":\"center\",\"display\":\"flex\",\"flexDirection\":\"column\",\"alignItems\":\"center\",\"justifyContent\":\"center\"},\"children\":[\"$\",\"div\",null,{\"children\":[[\"$\",\"style\",null,{\"dangerouslySetInnerHTML\":{\"__html\":\"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}\"}}],[\"$\",\"h1\",null,{\"className\":\"next-error-h1\",\"style\":{\"display\":\"inline-block\",\"margin\":\"0 20px 0 0\",\"padding\":\"0 23px 0 0\",\"fontSize\":24,\"fontWeight\":500,\"verticalAlign\":\"top\",\"lineHeight\":\"49px\"},\"children\":404}],[\"$\",\"div\",null,{\"style\":{\"display\":\"inline-block\"},\"children\":[\"$\",\"h2\",null,{\"style\":{\"fontSize\":14,\"fontWeight\":400,\"lineHeight\":\"49px\",\"margin\":0},\"children\":\"This page could not be found.\"}]}]]}]}]],[]],\"forbidden\":\"$undefined\",\"unauthorized\":\"$undefined\"}]]}]}]}]}]}]]}],{\"children\":[[\"$\",\"$1\",\"c\",{\"children\":[null,[\"$\",\"$L6\",null,{\"parallelRouterKey\":\"children\",\"error\":\"$undefined\",\"errorStyles\":\"$undefined\",\"errorScripts\":\"$undefined\",\"template\":[\"$\",\"$L7\",null,{}],\"templateStyles\":\"$undefined\",\"templateScripts\":\"$undefined\",\"notFound\":\"$undefined\",\"forbidden\":\"$undefined\",\"unauthorized\":\"$undefined\"}]]}],{\"children\":[[\"$\",\"$1\",\"c\",{\"children\":[null,[\"$\",\"$L6\",null,{\"parallelRouterKey\":\"children\",\"error\":\"$undefined\",\"errorStyles\":\"$undefined\",\"errorScripts\":\"$undefined\",\"template\":[\"$\",\"$L7\",null,{}],\"templateStyles\":\"$undefined\",\"templateScripts\":\"$undefined\",\"notFound\":\"$undefined\",\"forbidden\":\"$undefined\",\"unauthorized\":\"$undefined\"}]]}],{\"children\":[[\"$\",\"$1\",\"c\",{\"children\":[[\"$\",\"$L8\",null,{\"Component\":\"$9\",\"serverProvidedParams\":{\"searchParams\":{},\"params\":{},\"promises\":[\"$@a\",\"$@b\"]}}],[[\"$\",\"script\",\"script-0\",{\"src\":\"/_next/static/chunks/27u1-f8wuur2b.js\",\"async\":true,\"nonce\":\"$undefined\"}]],[\"$\",\"$Lc\",null,{\"children\":[\"$\",\"$d\",null,{\"name\":\"Next.MetadataOutlet\",\"children\":\"$@e\"}]}]]}],{},null,false,null]},null,false,\"$@f\"]},null,false,\"$@f\"]},null,false,null],[\"$\",\"$1\",\"h\",{\"children\":[null,[\"$\",\"$L10\",null,{\"children\":\"$L11\"}],[\"$\",\"div\",null,{\"hidden\":true,\"children\":[\"$\",\"$L12\",null,{\"children\":[\"$\",\"$d\",null,{\"name\":\"Next.Metadata\",\"children\":\"$L13\"}]}]}],null]}],false]],\"m\":\"$undefined\",\"G\":[\"$14\",[[\"$\",\"link\",\"0\",{\"rel\":\"stylesheet\",\"href\":\"/_next/static/chunks/2hkfpm1hehfk9.css\",\"precedence\":\"next\",\"crossOrigin\":\"$undefined\",\"nonce\":\"$undefined\"}]]],\"S\":true,\"h\":null,\"s\":\"$undefined\",\"l\":\"$undefined\",\"p\":\"$undefined\",\"d\":\"$undefined\",\"b\":\"aAteGxvpMDW3AF4vNj0fp\"}\n"])</script><script>self.__next_f.push([1,"15:[]\nf:\"$W15\"\na:{}\nb:\"$0:f:0:1:1:children:1:children:1:children:0:props:children:0:props:serverProvidedParams:params\"\n"])</script><script>self.__next_f.push([1,"11:[[\"$\",\"meta\",\"0\",{\"charSet\":\"utf-8\"}],[\"$\",\"meta\",\"1\",{\"name\":\"viewport\",\"content\":\"width=device-width, initial-scale=1, viewport-fit=cover\"}]]\n"])</script><script>self.__next_f.push([1,"e:null\n13:[[\"$\",\"title\",\"0\",{\"children\":\"AgriMarché Sénégal\"}],[\"$\",\"meta\",\"1\",{\"name\":\"description\",\"content\":\"La marketplace agricole du Sénégal\"}]]\n"])</script></body></html>

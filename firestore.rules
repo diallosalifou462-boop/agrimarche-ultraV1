@@ -1,0 +1,523 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================
+    // FONCTIONS UTILITAIRES
+    // =========================================================
+
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuth() && request.auth.uid == userId;
+    }
+
+    // Rôle lu depuis Firestore (users/{uid}.role) — l'app ne définit
+    // jamais request.auth.token.role, elle écrit le rôle dans Firestore.
+    function getUserRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function hasRole(role) {
+      return isAuth() && getUserRole() == role;
+    }
+
+    function isAdmin() {
+      return hasRole('admin');
+    }
+
+    function isSeller() {
+      return hasRole('seller') || isAdmin();
+    }
+
+    function isDeliverer() {
+      return hasRole('delivery') || isAdmin();
+    }
+
+    function hasFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function doesNotChange(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    function onlyChanges(fields) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(fields);
+    }
+
+    function isReasonableSize() {
+      return request.resource.size < 10240; // 10 KB max par document
+    }
+
+    // ✅ Deux flux de checkout coexistent dans l'app avec des noms de champ
+    // différents pour l'adresse de livraison : checkout/page.tsx envoie
+    // "customerLocation", products/checkout/page.tsx envoie "deliveryAddress".
+    // On accepte l'un ou l'autre plutôt que d'en exiger un précis.
+    function hasDeliveryInfo() {
+      return request.resource.data.keys().hasAny(['deliveryAddress', 'customerLocation']);
+    }
+
+    // ✅ Le panier stocke l'objet produit complet (nom, description,
+    // catégorie, tableau d'URLs d'images...) pour chaque article — la limite
+    // générique de 10 Ko est trop stricte dès qu'il y a plusieurs articles.
+    // On reste très en dessous du plafond réel de Firestore (1 Mo/document).
+    function isReasonableCartSize() {
+      return request.resource.size < 512000; // 500 Ko
+    }
+
+    // ✅ HYBRIDE : le client ne peut plus s'auto-annuler qu'avant que le
+    // vendeur ait commencé la préparation (en_attente). Au-delà, seul le
+    // vendeur ou l'admin peut changer le statut (le client passe par le
+    // support AgriMarché, qui agit via un compte admin).
+    //
+    // ⚠️ FIX : ces listes doivent couvrir EXACTEMENT les mêmes clés que
+    // LEGACY_STATUS dans src/lib/orderStatus.ts. Avant, elles ne
+    // contenaient que les valeurs canoniques + 1-2 synonymes anglais —
+    // mais normalizeStatus() (utilisé côté client pour AFFICHER le bouton
+    // Annuler/Confirmer) reconnaît aussi des variantes comme 'en attente'
+    // ou 'en livraison' (sans underscore, anciennes commandes pré-
+    // unification). Résultat : le bouton s'affichait (statut normalisé
+    // côté client) mais Firestore refusait l'écriture (valeur brute non
+    // reconnue ici) → "j'annule mais ça ne passe pas". On liste donc ici
+    // toutes les valeurs BRUTES possibles pour ces deux statuts, en
+    // minuscule (comparaison insensible à la casse via status.lower()
+    // pour couvrir aussi 'En attente', 'PENDING', etc.).
+    function isSelfCancellableStatus(status) {
+      return status.lower() in ['en_attente', 'pending', 'en attente'];
+    }
+
+    function isInDeliveryStatus(status) {
+      return status.lower() in ['en_livraison', 'expediee', 'shipped', 'en livraison'];
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // ⚠️ FIX CRITIQUE : isSelfCancellableStatus() et isInDeliveryStatus()
+    // ci-dessus étaient DÉFINIES mais JAMAIS APPELÉES nulle part dans les
+    // règles — les commentaires du code (account/orders/page.tsx notamment)
+    // affirmaient à tort qu'elles gataient l'update. En réalité, la règle
+    // `update` de orders/seller_orders se limitait à isOwner(userId), sans
+    // aucune restriction de champ ni de statut : un client pouvait changer
+    // n'importe quel champ (total, sellerId, status vers n'importe quelle
+    // valeur, à n'importe quel moment) depuis les devtools du navigateur.
+    //
+    // Les 3 fonctions suivantes couvrent EXACTEMENT les 4 écritures client
+    // recensées dans tout le code (checkout/page.tsx + les 4 copies de
+    // clientUpdateOrder() dans orders/page.tsx, account/page.tsx,
+    // account/orders/page.tsx, main/account/page.tsx) — aucune de plus,
+    // aucune de moins, vérifié champ par champ.
+    // ─────────────────────────────────────────────────────────────────
+
+    // checkout/page.tsx : deux écritures immédiates par l'acheteur juste
+    // après addDoc(orders) — jamais un changement de statut.
+    function isOrderCompletionUpdate() {
+      return onlyChanges(['firestoreId', 'orderNumber', 'estimatedDelivery'])
+        || onlyChanges(['deliveryStatus', 'deliverySteps']);
+    }
+
+    // Annulation client (les 4 clientUpdateOrder()) : uniquement depuis un
+    // statut encore modifiable, vers 'annule', sur ces champs précis.
+    //
+    // ⚠️ FIX : resource.data.get('status', 'en_attente') et NON
+    // resource.data.status. Le code client (account/page.tsx,
+    // account/orders/page.tsx, main/account/page.tsx) affiche "En attente"
+    // dès que le champ status est absent : `d.data().status || 'en_attente'`.
+    // Sans ce même filet ici, resource.data.status vaut `null` pour ces
+    // commandes (souvent d'anciennes commandes créées avant l'ajout
+    // systématique du champ, cf. src/lib/integration/agrimarche-live.ts qui
+    // n'en écrit pas toujours), `null in [...]` est faux, et l'annulation
+    // est refusée alors même que l'app affiche "En attente" — l'app et la
+    // règle doivent appliquer EXACTEMENT le même défaut.
+    function isCancelUpdate() {
+      return onlyChanges(['status', 'statusLabel', 'cancelledBy', 'cancelledAt', 'updatedAt'])
+        && request.resource.data.status == 'annule'
+        && isSelfCancellableStatus(resource.data.get('status', 'en_attente'));
+    }
+
+    // Confirmation de réception client : uniquement depuis un statut "en
+    // livraison", vers 'livre', sur ces champs précis.
+    function isConfirmDeliveryUpdate() {
+      return onlyChanges(['status', 'statusLabel', 'updatedAt'])
+        && request.resource.data.status == 'livre'
+        && isInDeliveryStatus(resource.data.get('status', 'en_attente'));
+    }
+
+    // ✅ stock : null = illimité (cf. placeholder "Laisser vide = illimité"
+    // dans seller/products/add/page.tsx), sinon entier >= 0.
+    function isValidStock() {
+      return request.resource.data.stock == null
+        || (request.resource.data.stock is int && request.resource.data.stock >= 0);
+    }
+
+    // ✅ Assoupli : accepte aussi le cas où le doc existant n'a pas encore
+    // de champ role (comptes créés avant son ajout, ou juste après la
+    // migration auth téléphone) — on ne bloque que le passage vers un rôle
+    // à privilèges (admin/delivery), qui reste réservé à l'admin.
+    function isClientToSellerUpgrade() {
+      return request.resource.data.role == 'seller'
+        && resource.data.get('role', 'client') != 'admin'
+        && resource.data.get('role', 'client') != 'delivery';
+    }
+
+    // =========================================================
+    // UTILISATEURS
+    // =========================================================
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+
+      // ✅ FIX : autorise aussi role == 'seller' à la création. Le formulaire
+      // "Devenir vendeur" (seller/register/page.tsx) fait un setDoc merge sur
+      // users/{uid} ; si ce doc n'existe pas encore (ex : compte auth
+      // téléphone récent qui n'a jamais eu de doc users créé automatiquement
+      // à l'inscription), Firestore traite l'écriture comme une CREATION, pas
+      // une update — et l'ancienne règle exigeait role == 'client', donc ça
+      // bloquait tout nouvel utilisateur qui devenait vendeur direct.
+      // ✅ FIX : deux cas de création distincts.
+      //   1. Auto-inscription (OTP WhatsApp, formulaire "Devenir vendeur") :
+      //      l'utilisateur crée SON PROPRE doc, role limité à client/seller.
+      //   2. Création par un admin pour un tiers (ex : admin/create-delivery,
+      //      qui crée un compte 'delivery') : isOwner(userId) est FAUX ici
+      //      (l'admin crée un doc dont l'id n'est pas son propre uid), donc
+      //      il faut explicitement autoriser isAdmin() — avant, la seule
+      //      branche isOwner() faisait échouer toute création de compte
+      //      livreur avec "Missing or insufficient permissions", et même la
+      //      branche isOwner() n'acceptait pas role == 'delivery'.
+      allow create: if (isOwner(userId)
+                          && hasFields(['email', 'createdAt', 'role'])
+                          && request.resource.data.role in ['client', 'seller']
+                          && isReasonableSize())
+                    || (isAdmin()
+                          && hasFields(['email', 'createdAt', 'role'])
+                          && isReasonableSize());
+
+      // Mise à jour : soi-même (ne peut pas changer son rôle/uid/email/date
+      // de création), l'admin (tout droit, ex : changer un rôle), ou le
+      // serveur via Admin SDK pour les champs techniques (xp, fcmTokens,
+      // hasAIAccess...) qui contourne de toute façon ces règles.
+      allow update: if isAdmin()
+                    || (isOwner(userId)
+                        && doesNotChange(['uid', 'email', 'createdAt'])
+                        && (doesNotChange(['role']) || isClientToSellerUpgrade()));
+
+      allow delete: if isAdmin();
+
+      // Jetons FCM (sous-collection réellement utilisée par l'app,
+      // cf. useFCMToken / lib/firebase/messaging.ts)
+      match /tokens/{tokenId} {
+        allow read, write: if isOwner(userId) || isAdmin();
+      }
+
+      // Historique de conversation avec l'assistant IA
+      match /chatMessages/{messageId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId) && isReasonableSize();
+        allow update: if false;
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+    }
+
+    // Requête collectionGroup('tokens') utilisée par le dashboard admin
+    // pour diffuser les notifications push à tous les utilisateurs.
+    match /{path=**}/tokens/{tokenId} {
+      allow read: if isAdmin();
+    }
+
+    // =========================================================
+    // PRODUITS
+    // =========================================================
+    match /products/{productId} {
+      allow read: if true;
+
+      // ✅ Assoupli : plus de validation stricte des champs (name/price/stock/
+      // category...), qui bloquait la création si un champ manquait ou avait
+      // un format inattendu côté formulaire. On garde juste l'essentiel :
+      // il faut être vendeur (ou admin) et être le sellerId déclaré.
+      allow create: if isSeller()
+        && request.resource.data.sellerId == request.auth.uid;
+
+      allow update: if (isSeller() && resource.data.sellerId == request.auth.uid
+                        && doesNotChange(['sellerId', 'createdAt']) && isValidStock())
+                    || isAdmin()
+                    // Décrément de stock à l'achat (checkout/page.tsx) : n'importe
+                    // quel acheteur connecté, limité strictement au champ stock.
+                    || (isAuth() && onlyChanges(['stock']) && isValidStock())
+                    // Compteur de clics WhatsApp (main/products/page.tsx) : cette
+                    // page est publique, sans garde de connexion — donc même un
+                    // visiteur NON connecté peut déclencher cet incrément.
+                    || onlyChanges(['whatsappClicks']);
+
+      // ✅ FIX : le vendeur peut supprimer SES PROPRES produits
+      // (seller/products/page.tsx a un vrai bouton supprimer pour lui) —
+      // avant, seul l'admin le pouvait, donc ça échouait silencieusement.
+      allow delete: if (isSeller() && resource.data.sellerId == request.auth.uid) || isAdmin();
+    }
+
+    // =========================================================
+    // STOCKS (compteur temps réel séparé — hooks/useStock.ts)
+    // =========================================================
+    match /stocks/{productId} {
+      allow read: if true;
+      allow create: if isSeller();
+      // Écriture par incrément : vendeur (réassort) ou tout utilisateur
+      // connecté (décrément lors d'un achat), limité au champ quantity.
+      allow update: if isAuth() && onlyChanges(['quantity']);
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================
+    // COMMANDES
+    // =========================================================
+    match /orders/{orderId} {
+      allow read: if isAdmin()
+                  || isOwner(resource.data.userId)
+                  || (isSeller() && resource.data.sellerId == request.auth.uid)
+                  // Un livreur voit les commandes qui lui sont déjà assignées...
+                  || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid)
+                  // ...ainsi que celles encore 'en_attente' (jamais assignées à ce stade —
+                  // assignDelivery() ne pose delivererId qu'en même temps que le passage à
+                  // 'en_preparation'), nécessaire pour la liste "commandes disponibles".
+                  // ⚠️ Basé sur `status` (champ du where() de la requête) et non `delivererId`
+                  // (absent du where()) : une requête list() ne peut être autorisée que si
+                  // Firestore peut prouver la règle à partir des seuls champs filtrés par la
+                  // requête elle-même — "les règles ne sont pas des filtres". La version
+                  // précédente (`delivererId == null`) faisait échouer la requête list()
+                  // entière pour tout compte livreur réel (ne fonctionnait que pour un admin,
+                  // dont la règle ne dépend pas de resource.data).
+                  || (isDeliverer() && resource.data.status == 'en_attente');
+
+      // ✅ Assoupli : plus d'exigences sur les champs (items/total/status/
+      // livraison...), qui bloquaient le checkout dès qu'un flux envoyait
+      // un format légèrement différent. On garde juste : connecté, et
+      // userId = soi-même (sinon on pourrait créer des commandes au nom
+      // d'un autre utilisateur).
+      allow create: if isAuth()
+        && request.resource.data.userId == request.auth.uid;
+
+      // ✅ Assoupli : l'acheteur peut annuler ('annule') ou confirmer la
+      // réception ('livre') quel que soit le statut actuel de la commande
+      // (avant ça bloquait si le statut ne correspondait pas exactement à
+      // 'en_attente' ou à un statut "en livraison"). Le vendeur/l'admin
+      // gardent un accès complet pour accepter/faire évoluer la commande.
+      // 🔒 FIX : l'acheteur (isOwner) ne peut plus modifier n'importe quel
+      // champ à n'importe quel moment — seulement les 3 écritures légitimes
+      // identifiées dans le code (finalisation checkout / annulation /
+      // confirmation de réception), chacune avec sa propre garde de statut.
+      // Vendeur et admin gardent un accès complet (nécessaire pour faire
+      // évoluer la commande à travers tout le cycle : préparation, envoi,
+      // remboursement partiel, etc.).
+      allow update: if (isOwner(resource.data.userId)
+                          && (isOrderCompletionUpdate() || isCancelUpdate() || isConfirmDeliveryUpdate()))
+                    || (isSeller() && resource.data.sellerId == request.auth.uid)
+                    || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid)
+                    || (isDeliverer() && resource.data.get('delivererId', null) == null)
+                    || isAdmin();
+
+      allow delete: if false;
+    }
+
+    // Miroir de orders côté vendeur (writeBatch sur orders + seller_orders)
+    match /seller_orders/{orderId} {
+      // ✅ FIX : clientUpdateOrder() (account-page.tsx) fait un getDoc() sur ce
+      // chemin AVANT le batch, pour savoir si le miroir seller_orders existe.
+      // Si le doc n'existe pas, `resource` vaut null et toute référence à
+      // resource.data plantait l'évaluation → permission-denied, ce qui
+      // faisait échouer l'annulation/la confirmation dès cette lecture,
+      // avant même d'arriver au batch.commit(). On autorise donc la lecture
+      // d'un doc absent (elle renverra juste exists()==false côté client).
+      allow read: if resource == null
+                  || isAdmin()
+                  || isOwner(resource.data.userId)
+                  || (isSeller() && resource.data.sellerId == request.auth.uid);
+
+      // ✅ Assoupli, en miroir de /orders : plus d'exigence de champs à la
+      // création, et l'acheteur peut mettre à jour le statut (annuler /
+      // confirmer réception) quel que soit le statut courant.
+      allow create: if isAdmin()
+                  || (isAuth() && request.resource.data.sellerId != null);
+
+      // 🔒 FIX : même restriction que sur /orders — le client ne peut plus
+      // pousser n'importe quel champ sur le miroir vendeur. Note :
+      // isOrderCompletionUpdate() n'est PAS applicable ici — checkout ne
+      // mirrore jamais firestoreId/orderNumber/estimatedDelivery/
+      // deliveryStatus/deliverySteps vers seller_orders (vérifié : seul
+      // clientUpdateOrder() écrit ici côté acheteur, avec le payload
+      // annulation/confirmation uniquement).
+      allow update: if (isOwner(resource.data.userId)
+                          && (isCancelUpdate() || isConfirmDeliveryUpdate()))
+                    || (isSeller() && resource.data.sellerId == request.auth.uid)
+                    || isAdmin();
+
+      allow delete: if false;
+    }
+
+    // =========================================================
+    // PAIEMENTS
+    // =========================================================
+    match /payments/{paymentId} {
+      allow read: if isAdmin() || isOwner(resource.data.userId);
+
+      allow create: if isAuth()
+        && hasFields(['userId', 'orderId', 'amount', 'method', 'status', 'createdAt'])
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.amount is number
+        && request.resource.data.amount > 0
+        && isReasonableSize();
+
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // =========================================================
+    // PANIER
+    // =========================================================
+    match /carts/{userId} {
+      allow read: if isOwner(userId);
+      allow write: if isOwner(userId) && isReasonableCartSize();
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // =========================================================
+    // LIVRAISONS
+    // =========================================================
+    match /deliveries/{deliveryId} {
+      allow read: if isAdmin()
+                  || isOwner(resource.data.userId)
+                  || (isDeliverer() && resource.data.delivererId == request.auth.uid);
+
+      allow create: if isAdmin();
+
+      allow update: if isAdmin()
+                    || (isDeliverer()
+                        && resource.data.delivererId == request.auth.uid
+                        && doesNotChange(['userId', 'orderId', 'createdAt']));
+
+      allow delete: if false;
+    }
+
+    // =========================================================
+    // NOTIFICATIONS
+    // Collection PLATE avec un champ userId (et non une sous-collection
+    // notifications/{userId}/items/{id}).
+    // =========================================================
+    match /notifications/{notifId} {
+      allow read: if isAdmin() || isOwner(resource.data.userId);
+      allow create: if isAdmin();
+      allow update: if isAdmin()
+                    || (isOwner(resource.data.userId) && onlyChanges(['read', 'readAt']));
+      allow delete: if isOwner(resource.data.userId) || isAdmin();
+    }
+
+    // =========================================================
+    // DIFFUSIONS ADMIN (broadcasts)
+    // =========================================================
+    match /broadcasts/{broadcastId} {
+      allow read: if isAuth();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // =========================================================
+    // FILE D'ATTENTE DE SYNC OFFLINE
+    // =========================================================
+    match /syncQueue/{userId}/items/{itemId} {
+      allow read, delete: if isOwner(userId);
+      allow create: if isOwner(userId) && isReasonableSize();
+      allow update: if false;
+    }
+
+    // =========================================================
+    // ANALYTICS — admin uniquement
+    // =========================================================
+    match /analytics/{document=**} {
+      allow read, write: if isAdmin();
+    }
+
+    // =========================================================
+    // CONFIGURATION PUBLIQUE (prix livraison, zones, etc.)
+    // =========================================================
+    match /config/{document} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // =========================================================
+    // PRIX DU MARCHÉ (assistant IA — market_prices/latest)
+    // =========================================================
+    match /market_prices/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // =========================================================
+    // PUBLICITÉS / PROMOS — lecture publique, écriture admin
+    // =========================================================
+    match /ads/{adId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // =========================================================
+    // VENDEURS (comptes publics)
+    // =========================================================
+    match /sellers/{sellerId} {
+      allow read: if true;
+      // ✅ Assoupli : on ne vérifie plus hasRole('seller') ni les champs
+      // (name/phone/location) à la création. Problème d'œuf-et-de-poule :
+      // le doc sellers est créé dans le même batch que le passage du rôle
+      // client → seller sur users/{uid}, donc au moment où cette règle
+      // s'évaluait, le rôle lu en base était encore 'client' → échec
+      // systématique. On garde juste isOwner(sellerId).
+      allow create: if isOwner(sellerId);
+      allow update: if (isOwner(sellerId) && doesNotChange(['createdAt', 'uid']))
+                    || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================
+    // AVIS / NOTES
+    // =========================================================
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow create: if isAuth()
+                    && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.rating is int
+                    && request.resource.data.rating >= 1
+                    && request.resource.data.rating <= 5
+                    && isReasonableSize();
+      allow update: if isOwner(resource.data.userId)
+                    && doesNotChange(['userId', 'productId', 'createdAt']);
+      allow delete: if isOwner(resource.data.userId) || isAdmin();
+    }
+
+    // =========================================================
+    // FINANCEMENTS / MICRO-CRÉDITS (module admin "Financements")
+    // Créés et gérés exclusivement depuis le dashboard admin.
+    // =========================================================
+    match /loans/{loanId} {
+      allow read, write: if isAdmin();
+    }
+
+    // =========================================================
+    // CODES D'ACCÈS IA (déverrouillage de l'assistant, unlock-ia)
+    // =========================================================
+    match /accessCodes/{code} {
+      allow read: if isAuth();
+      allow create: if isAdmin();
+      allow update: if isAuth()
+                    && resource.data.used == false
+                    && onlyChanges(['used', 'usedBy', 'usedAt'])
+                    && request.resource.data.used == true
+                    && request.resource.data.usedBy == request.auth.uid;
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================
+    // TOUT LE RESTE — INTERDIT PAR DÉFAUT
+    // =========================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

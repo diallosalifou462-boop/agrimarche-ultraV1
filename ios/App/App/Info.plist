@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CAPACITOR_DEBUG</key>
+	<string>$(CAPACITOR_DEBUG)</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+        <string>AgriMarché</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>AgriMarché a besoin d'accéder à l'appareil photo pour prendre des photos de vos produits.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>AgriMarché a besoin d'accéder à vos photos pour illustrer vos annonces.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>AgriMarché a besoin d'enregistrer des photos dans votre galerie.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>AgriMarché utilise votre position pour vous montrer les produits et acheteurs proches de vous.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+	<key>UIMainStoryboardFile</key>
+	<string>Main</string>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>armv7</string>
+	</array>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<true/>
+	<!-- ⚠️ FIX : Firebase Phone Auth (OTP SMS) a besoin d'un schéma d'URL
+	     personnalisé pour rediriger vers l'app quand sa vérification de
+	     secours par reCAPTCHA (via Safari) doit se déclencher — ce qui
+	     arrive dès que la vérification silencieuse par push (APNs) échoue
+	     ou n'est pas configurée. Sans ce schéma, le SDK natif Firebase n'a
+	     nulle part où rediriger et faisait planter toute l'application
+	     (crash natif, pas juste une erreur JS) — typiquement observé sur
+	     "Mot de passe oublié" lors d'un renvoi de code SMS. Le schéma doit
+	     être exactement l'identifiant du bundle de l'app. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

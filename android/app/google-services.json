@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "21462709831",
+    "project_id": "agrimarche-24e37",
+    "storage_bucket": "agrimarche-24e37.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:21462709831:android:428397bf50de14bb4ba362",
+        "android_client_info": {
+          "package_name": "com.agrimarche.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAiuiuIKpYXMvpSHWBsyLHq6ilOmUu1rXw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,0 +1,88 @@
+workflows:
+  ios-agrimarche:
+    name: AgriMarché iOS
+
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+
+    environment:
+      xcode: latest
+      node: latest
+
+      ios_signing:
+        provisioning_profiles:
+          - profile: agrimarche_appstore_profil
+            environment_variable: PROFILE_PATH
+        certificates:
+          - certificate: ios_distribution
+            environment_variable: CERT_PATH
+
+      vars:
+        BUNDLE_ID: com.agrimarche.app
+        XCODE_PROJECT: ios/App/App.xcodeproj
+        XCODE_SCHEME: App
+        TEAM_ID: KAMMWG3VQH
+
+    integrations:
+      app_store_connect: codemagic
+
+    scripts:
+      - name: Install dependencies
+        script: |
+          npm ci
+
+      - name: Build web
+        script: |
+          npm run build
+
+      - name: Sync Capacitor
+        script: |
+          npx cap sync ios
+
+      - name: Set up code signing
+        script: |
+          set -e
+          # Installe le certificat dans le trousseau de la VM de build
+          keychain initialize
+          keychain add-certificates
+
+          # Injecte le profil de provisioning sur le(s) target(s) dont le bundle ID
+          # correspond au profil (donc uniquement "App" ici). Contrairement à un
+          # override en ligne de commande sur xcodebuild, qui s'applique à tort à
+          # tous les targets, y compris les packages SPM comme Firebase / Facebook /
+          # Google, provoquant l'erreur "does not support provisioning profiles".
+          xcode-project use-profiles \
+            --project "$XCODE_PROJECT"
+
+      - name: Archive
+        script: |
+          set -e
+          xcodebuild archive \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -archivePath "$HOME/build/App.xcarchive" \
+            -destination "generic/platform=iOS" \
+            CURRENT_PROJECT_VERSION=$PROJECT_BUILD_NUMBER
+
+      - name: Export IPA
+        script: |
+          set -e
+          mkdir -p build/ios/ipa
+          xcodebuild -exportArchive \
+            -archivePath "$HOME/build/App.xcarchive" \
+            -exportPath build/ios/ipa \
+            -exportOptionsPlist "$HOME/export_options.plist"
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+
+    publishing:
+      email:
+        recipients:
+          - diallosalifou462@gmail.com
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        submit_to_app_store: false

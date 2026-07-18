@@ -1,0 +1,47 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Agrimarche — Configuration Netlify
+# Déployez le frontend Next.js directement ici.
+# Le backend Express (backend/) doit être déployé séparément
+# sur Railway, Render ou Fly.io, puis configurez NEXT_PUBLIC_BACKEND_URL.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[build]
+  command   = "npm run build"
+  publish   = ".next"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+# ─── Headers de sécurité (complément au next.config.js) ──────────────────────
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    Cache-Control        = "no-cache, no-store, must-revalidate"
+    Service-Worker-Allowed = "/"
+
+[[headers]]
+  for = "/manifest.json"
+  [headers.values]
+    Content-Type  = "application/manifest+json"
+    Cache-Control = "public, max-age=3600"
+
+[[headers]]
+  for = "/icons/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/_next/static/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# ─── Redirects ────────────────────────────────────────────────────────────────
+# Next.js SSR gère déjà le routing — pas de fallback statique nécessaire.
+# Garde uniquement les redirects utilitaires.
+[[redirects]]
+  from   = "/app"
+  to     = "/main/products"
+  status = 301
