@@ -87,15 +87,37 @@ export default function AgriMarket() {
   const { cart, addToCart } = useCart();
   const { user, profile, loading: authLoading, logout } = useAuth();
 
+  // ⚡ FIX (vitesse perçue) : lecture SYNCHRONE du cache local au tout
+  // premier rendu (avant même le premier paint) — sur toute ouverture après
+  // la première, les produits de la dernière visite s'affichent
+  // instantanément (0ms perçu, aucun skeleton visible), pendant que
+  // Firestore va chercher les données fraîches en silence et les remplace
+  // dès qu'elles arrivent. `useState(() => ...)` avec une fonction est un
+  // "initializer paresseux" React : il ne s'exécute qu'une fois, au montage,
+  // jamais à chaque re-render.
+  const readProductsCache = (): ProductData[] => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const raw = localStorage.getItem('agrimarche_products_cache');
+      return raw ? (JSON.parse(raw) as ProductData[]) : [];
+    } catch { return []; }
+  };
+
   const [mounted,            setMounted]            = useState(false);
-  const [products,           setProducts]           = useState<ProductData[]>([]);
-  const [productsLoaded,     setProductsLoaded]     = useState(false);
+  const [products,           setProducts]           = useState<ProductData[]>(readProductsCache);
+  const [productsLoaded,     setProductsLoaded]     = useState(() => readProductsCache().length > 0);
+  // ⚠️ FIX : voir le useEffect du listener 'products' plus bas — avant,
+  // une erreur Firestore (permission-denied, règles, réseau...) ne faisait
+  // qu'un console.error sans jamais sortir la page du skeleton de
+  // chargement, qui tournait donc à l'infini ("recherche en boucle").
+  const [loadError,          setLoadError]          = useState(false);
+  const [retryTick,          setRetryTick]          = useState(0);
   const [pageLimit,          setPageLimit]          = useState(PAGE_SIZE);
   const [loadingMore,        setLoadingMore]        = useState(false);
   const [hasMore,            setHasMore]            = useState(true);
   const [freshProducts,      setFreshProducts]      = useState<ProductData[]>([]);
   const [popularProducts,    setPopularProducts]    = useState<ProductData[]>([]);
-  const [filtered,           setFiltered]           = useState<ProductData[]>([]);
+  const [filtered,           setFiltered]           = useState<ProductData[]>(readProductsCache);
   const [search,             setSearch]             = useState('');
   const [cat,                setCat]                = useState('Tous');
   const [sort,               setSort]               = useState<'default'|'asc'|'desc'>('default');
@@ -135,55 +157,95 @@ export default function AgriMarket() {
     return () => window.removeEventListener('scroll', fn);
   }, []);
 
+  // ⚡ Détection silencieuse d'un chargement bloqué (6s au lieu de 10 — on
+  // veut que l'app réagisse vite). Ne montre AUCUN écran d'erreur : ça
+  // déclenche juste la reprise automatique ci-dessous.
   useEffect(() => {
-    // On attend que l'authentification soit résolue (authLoading === false)
-    // et qu'un utilisateur soit bien connecté avant d'ouvrir le listener :
-    // sans ça, onSnapshot se lance avec auth.currentUser == null et les
-    // règles Firestore rejettent la requête (permission-denied).
-    // ⚠️ Retiré : le blocage sur !user empêchait les visiteurs sans compte
-    // de voir les produits. Si les règles Firestore exigent une auth pour
-    // lire 'products', il faudra les assouplir côté Firebase, sinon cet
-    // appel échouera silencieusement pour les invités.
-    if (authLoading) return;
+    if (productsLoaded) return;
+    const t = setTimeout(() => {
+      console.warn('[products] Chargement bloqué (6s) — reprise automatique en arrière-plan');
+      setLoadError(true);
+    }, 6000);
+    return () => clearTimeout(t);
+  }, [productsLoaded, retryTick]);
+
+  // ⚡ FIX (fluidité) : plus de bouton "Réessayer" qui casse l'expérience —
+  // en cas d'échec, l'app retente TOUTE SEULE en arrière-plan, de plus en
+  // plus vite au début (1s, 2s, 4s...) sans jamais dépasser 10s entre deux
+  // tentatives, jusqu'à ce que ça marche. L'utilisateur n'a jamais besoin
+  // d'intervenir ; le skeleton reste affiché pendant les tentatives
+  // silencieuses au lieu d'un écran d'erreur qui casse la fluidité.
+  useEffect(() => {
+    if (!loadError) return;
+    const attempt = Math.min(retryTick, 4); // plafonne la progression du délai
+    const delay = Math.min(1000 * 2 ** attempt, 10000);
+    const t = setTimeout(() => {
+      setProductsLoaded(false);
+      setLoadError(false);
+      setRetryTick(v => v + 1);
+    }, delay);
+    return () => clearTimeout(t);
+  }, [loadError, retryTick]);
+
+  useEffect(() => {
+    // ⚡ FIX (vitesse) : les produits sont un catalogue PUBLIC — les invités
+    // doivent pouvoir les voir sans compte (voir commentaire ci-dessous).
+    // Attendre `authLoading` avant même de démarrer cette requête forçait
+    // deux opérations totalement indépendantes (restaurer la session ET
+    // charger le catalogue) à s'exécuter en SÉRIE au lieu d'EN PARALLÈLE —
+    // ajoutant inutilement tout le temps de résolution de l'auth au délai
+    // avant le premier affichage des produits. On démarre donc la requête
+    // immédiatement, dès le montage.
+    //
+    // (Si les règles Firestore exigent un minimum d'authentification pour
+    // lire 'products', il faut les assouplir côté Firebase — voir plus bas.)
 
     const u = onSnapshot(query(collection(db, 'products'), limit(pageLimit)), snap => {
       const d = snap.docs.map(doc => ({ id: doc.id, ...doc.data() })) as ProductData[];
       setProducts(d); setFiltered(d);
       setProductsLoaded(true);
+      setLoadError(false);
       setLoadingMore(false);
       // S'il y a moins de résultats que la limite demandée, on a atteint la fin du catalogue.
       setHasMore(d.length >= pageLimit);
+      // ⚡ Cache local synchrone (voir hydratation instantanée plus haut) :
+      // la prochaine ouverture de cette page affichera ces produits dès le
+      // tout premier rendu, en 0ms perçu, avant même que Firestore réponde.
+      try { localStorage.setItem('agrimarche_products_cache', JSON.stringify(d)); } catch { /* ignore (quota/privé) */ }
     }, (error) => {
+      // ⚡ FIX : on ne bascule plus productsLoaded à true ici — le skeleton
+      // reste affiché pendant que la reprise automatique retente en
+      // arrière-plan, au lieu d'afficher un écran d'erreur qui casse la
+      // fluidité perçue de l'app.
       console.error('[products] Erreur listener:', error);
+      setLoadError(true);
+      setLoadingMore(false);
     });
     return () => u();
-  }, [pageLimit, authLoading, user]);
+  }, [pageLimit, retryTick]);
 
   // Requêtes séparées, triées côté serveur, indépendantes de la pagination ci-dessus :
   // sans ça, "Nouveautés" et "Les plus demandés" ne regarderaient que les 40 premiers
   // produits chargés (ordre arbitraire), pas les vrais plus récents / plus demandés
   // de tout le catalogue.
+  // ⚡ Même raisonnement : catalogue public, pas de raison d'attendre l'auth.
   useEffect(() => {
-    if (authLoading) return;
-
     const u = onSnapshot(
       query(collection(db, 'products'), orderBy('createdAt', 'desc'), limit(10)),
       snap => setFreshProducts(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })) as ProductData[]),
       () => setFreshProducts([]) // le champ createdAt peut être absent selon les documents existants
     );
     return () => u();
-  }, [authLoading, user]);
+  }, []);
 
   useEffect(() => {
-    if (authLoading) return;
-
     const u = onSnapshot(
       query(collection(db, 'products'), orderBy('whatsappClicks', 'desc'), limit(10)),
       snap => setPopularProducts(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })) as ProductData[]),
       () => setPopularProducts([])
     );
     return () => u();
-  }, [authLoading, user]);
+  }, []);
 
   // ── ANNONCES (Firestore collection 'ads') ──
   const [ads, setAds] = useState<any[]>([]);

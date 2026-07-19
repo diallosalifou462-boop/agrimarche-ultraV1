@@ -34,7 +34,16 @@ async function registerNotificationToken(uid: string) {
       return;
     }
 
-    const swRegistration = await navigator.serviceWorker.ready;
+    // Sécurité : sous Capacitor iOS, `navigator.serviceWorker.ready` ne se
+    // résout jamais (pas de SW actif sous le scheme capacitor://). On plafonne
+    // donc l'attente pour ne pas laisser une promesse pendre indéfiniment,
+    // même en arrière-plan.
+    const swRegistration = await Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('serviceWorker.ready timeout')), 5000),
+      ),
+    ]);
 
     const messaging = getMessaging();
     const token = await getToken(messaging, {
@@ -128,12 +137,42 @@ export function useAuth() {
   };
 
   // ─── Observer Firebase Auth ───────────────────────────
+  // ⚠️ FIX : `registerNotificationToken` fait `await navigator.serviceWorker.ready`
+  // pour obtenir le token FCM. Sous Capacitor iOS (scheme capacitor://localhost),
+  // aucun Service Worker actif n'existe jamais, donc cette promesse ne se résout
+  // JAMAIS. Comme cet appel était `await`-é avant `setLoading(false)`, le
+  // chargement restait bloqué à `true` pour toujours dès qu'un utilisateur était
+  // connecté — d'où le skeleton infini sur Produits/Panier/Compte (ces pages
+  // n'attachent même pas leurs listeners Firestore tant que `loading` est vrai).
+  // On ne bloque donc plus le chargement critique sur l'enregistrement FCM :
+  // il part en arrière-plan (fire-and-forget), avec son propre try/catch interne.
+  //
+  // ⚠️ FIX (filet de sécurité ultime) : `fetchUserProfile` appelle
+  // `ensureUserExists`, qui a déjà ses propres timeouts internes de 8s sur
+  // chaque appel Firestore (voir userProfile.ts). Mais `useAuth()` est LE
+  // hook dont dépend absolument toute l'app (Produits, Panier, Compte...) —
+  // on ne peut pas se permettre qu'un futur changement dans cette chaîne
+  // d'appels réintroduise un `await` non borné sans qu'on s'en aperçoive.
+  // On plafonne donc ICI, au niveau le plus haut, la durée totale de
+  // résolution du chargement à 9s : passé ce délai, on abandonne le profil
+  // (l'utilisateur reste connecté, juste sans `profile` chargé pour l'instant
+  // — les pages qui en ont besoin le rechargeront) et on débloque
+  // `setLoading(false)` dans tous les cas.
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       setUser(firebaseUser);
       if (firebaseUser) {
-        await fetchUserProfile(firebaseUser.uid, firebaseUser.email);
-        await registerNotificationToken(firebaseUser.uid);
+        try {
+          await Promise.race([
+            fetchUserProfile(firebaseUser.uid, firebaseUser.email),
+            new Promise<void>((_, reject) =>
+              setTimeout(() => reject(new Error('[useAuth] Timeout global (9s) sur fetchUserProfile')), 9000),
+            ),
+          ]);
+        } catch (error) {
+          console.error('[useAuth] fetchUserProfile abandonné (filet de sécurité):', error);
+        }
+        registerNotificationToken(firebaseUser.uid); // pas de await : ne bloque plus le chargement
       } else {
         setProfile(null);
       }

@@ -1,6 +1,6 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, setPersistence, browserLocalPersistence, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, sendPasswordResetEmail, updateProfile } from 'firebase/auth';
-import { initializeFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, Timestamp, arrayUnion, arrayRemove, increment, writeBatch } from 'firebase/firestore';
+import { initializeFirestore, enableIndexedDbPersistence, doc, getDoc, setDoc, updateDoc, onSnapshot, Timestamp, arrayUnion, arrayRemove, increment, writeBatch } from 'firebase/firestore';
 import { getStorage, uploadBytes, uploadBytesResumable, getDownloadURL, deleteObject } from 'firebase/storage';
 import { getMessaging, getToken, onMessage, isSupported } from 'firebase/messaging';
 import { getAnalytics, isSupported as analyticsIsSupported } from 'firebase/analytics';
@@ -42,6 +42,23 @@ export const auth = getAuth(app);
 export const db = initializeFirestore(app, {
   experimentalAutoDetectLongPolling: true,
 });
+
+// ⚡ FIX (rapidité perçue) : sans cache local, chaque ouverture de l'app
+// attend une réponse réseau avant d'afficher quoi que ce soit — même sur
+// une bonne connexion, ça donne une sensation de lenteur/attente. Avec le
+// cache IndexedDB activé, `onSnapshot` renvoie IMMÉDIATEMENT les dernières
+// données connues (depuis la 2e visite) pendant que Firestore va chercher
+// les données fraîches en arrière-plan et les pousse dès qu'elles arrivent
+// — l'utilisateur ne voit jamais d'écran de chargement vide.
+// Enveloppé en best-effort : si le navigateur/webview ne supporte pas
+// IndexedDB (ou si plusieurs onglets sont ouverts), l'app continue de
+// fonctionner normalement, juste sans ce boost de vitesse.
+if (typeof window !== 'undefined') {
+  enableIndexedDbPersistence(db).catch((err) => {
+    console.warn('[firebase] Cache local Firestore non activé:', err.code);
+  });
+}
+
 export const storage = getStorage(app);
 
 // ⚠️ FIX : `getAnalytics(app)` était appelé de façon synchrone et

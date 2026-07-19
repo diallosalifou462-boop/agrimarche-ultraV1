@@ -42,6 +42,22 @@ const emptyCart: Cart = {
   itemCount: 0,
 };
 
+// ⚠️ FIX : `getDoc()` n'a par lui-même aucune limite de temps. Si l'appel
+// reste en attente sans jamais résoudre NI rejeter (réseau capricieux au
+// cold-start, typique iOS/WKWebView), le `try/catch` autour ne se déclenche
+// JAMAIS puisqu'aucune erreur n'est levée — `isLoading` restait alors
+// bloqué à `true` pour toujours, gelant la page Panier. Même mécanisme et
+// même correctif que celui déjà appliqué à ensureUserExists()
+// (src/lib/firebase/userProfile.ts).
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`[useCart] Timeout (${ms}ms) sur ${label}`)), ms),
+    ),
+  ]);
+}
+
 const GUEST_KEY = 'agrimarche_cart_guest';
 
 function calculateCart(items: CartItem[]): Cart {
@@ -149,7 +165,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
 
       if (user) {
         try {
-          const snap = await getDoc(doc(db, 'carts', user.uid));
+          const snap = await withTimeout(getDoc(doc(db, 'carts', user.uid)), 8000, 'getDoc carts');
           let items = snap.exists()
             ? validateItems((snap.data() as any).items)
             : [];

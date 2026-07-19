@@ -7,6 +7,17 @@ import { useEffect, useState } from 'react';
 import { collection, getDocs, limit, orderBy, query, where } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
 
+// ⚠️ FIX (cohérence système) : même filet de sécurité que useCart.tsx /
+// userProfile.ts — getDocs() n'a par lui-même aucune limite de temps.
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`[cart] Timeout (${ms}ms) sur ${label}`)), ms),
+    ),
+  ]);
+}
+
 function formatPrice(amount: number): string {
   return new Intl.NumberFormat('fr-SN', { style: 'currency', currency: 'XOF', maximumFractionDigits: 0 }).format(amount);
 }
@@ -128,14 +139,14 @@ export default function CartPage() {
       setLoadingRecs(true);
       try {
         const productsRef = collection(db, 'products');
-        const [popularSnap, newSnap] = await Promise.all([
+        const [popularSnap, newSnap] = await withTimeout(Promise.all([
           getDocs(query(productsRef, orderBy('salesCount', 'desc'), limit(6))),
           getDocs(query(productsRef, orderBy('createdAt', 'desc'), limit(6))),
-        ]);
+        ]), 8000, 'recommandations populaires/nouveautés');
 
         let nearbyDocs: RecommendedProduct[] = [];
         if (userRegion) {
-          const nearbySnap = await getDocs(query(productsRef, where('region', '==', userRegion), limit(6)));
+          const nearbySnap = await withTimeout(getDocs(query(productsRef, where('region', '==', userRegion), limit(6))), 8000, 'recommandations région');
           nearbyDocs = nearbySnap.docs.map((d) => ({ id: d.id, ...d.data() } as RecommendedProduct));
         }
 
