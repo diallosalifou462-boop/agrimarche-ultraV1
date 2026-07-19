@@ -21,7 +21,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    console.log('[AuthContext] Abonnement à onAuthStateChanged...');
+
+    // ⚠️ FIX : filet de sécurité. Si onAuthStateChanged ne se déclenche
+    // JAMAIS (ex. conflit de synchronisation entre le plugin natif
+    // @capacitor-firebase/authentication et le SDK web firebase/auth, ou
+    // tout autre souci d'initialisation), `loading` restait bloqué à
+    // `true` pour toujours — ce qui bloque en cascade TOUTES les pages de
+    // l'app qui attendent `authLoading` avant de charger leurs propres
+    // données (produits, panier, compte...), car aucune ne reçoit jamais
+    // le signal "on sait maintenant si l'utilisateur est connecté ou non".
+    const failsafe = setTimeout(() => {
+      console.error('[AuthContext] onAuthStateChanged ne s\'est jamais déclenché après 8s — déblocage forcé');
+      setLoading(false);
+    }, 8000);
+
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      clearTimeout(failsafe);
+      console.log('[AuthContext] onAuthStateChanged déclenché, user =', firebaseUser?.uid ?? 'null');
       setUser(firebaseUser);
 
       if (firebaseUser) {
@@ -43,7 +60,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setLoading(false);
     });
 
-    return () => unsubscribe();
+    return () => {
+      clearTimeout(failsafe);
+      unsubscribe();
+    };
   }, []);
 
   const logout = async () => {
