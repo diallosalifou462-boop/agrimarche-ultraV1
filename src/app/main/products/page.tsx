@@ -111,6 +111,11 @@ export default function AgriMarket() {
   // qu'un console.error sans jamais sortir la page du skeleton de
   // chargement, qui tournait donc à l'infini ("recherche en boucle").
   const [loadError,          setLoadError]          = useState(false);
+  // Diagnostic visible à l'écran : capture le détail technique brut de la
+  // dernière erreur du listener produits, pour pouvoir le lire/screenshoter
+  // directement sur le téléphone sans outil externe (Safari Web Inspector
+  // nécessite un Mac, indisponible sur PC Windows).
+  const [debugErrorDetail,   setDebugErrorDetail]   = useState('');
   const [retryTick,          setRetryTick]          = useState(0);
   const [pageLimit,          setPageLimit]          = useState(PAGE_SIZE);
   const [loadingMore,        setLoadingMore]        = useState(false);
@@ -165,6 +170,7 @@ export default function AgriMarket() {
     const t = setTimeout(() => {
       console.warn('[products] Chargement bloqué (6s) — reprise automatique en arrière-plan');
       setLoadError(true);
+      setDebugErrorDetail(prev => prev || 'timeout — aucune réponse de Firestore après 6s (pas d\'erreur explicite reçue)');
     }, 6000);
     return () => clearTimeout(t);
   }, [productsLoaded, retryTick]);
@@ -205,6 +211,7 @@ export default function AgriMarket() {
       setProducts(d); setFiltered(d);
       setProductsLoaded(true);
       setLoadError(false);
+      setDebugErrorDetail('');
       setLoadingMore(false);
       // S'il y a moins de résultats que la limite demandée, on a atteint la fin du catalogue.
       setHasMore(d.length >= pageLimit);
@@ -219,6 +226,7 @@ export default function AgriMarket() {
       // fluidité perçue de l'app.
       console.error('[products] Erreur listener:', error);
       setLoadError(true);
+      setDebugErrorDetail(`${error?.code || 'inconnu'} — ${error?.message || String(error)}`);
       setLoadingMore(false);
     });
     return () => u();
@@ -1535,6 +1543,17 @@ export default function AgriMarket() {
           <div className="g-section-line" />
           <span className="g-section-badge">DIRECT PRODUCTEUR</span>
         </div>
+
+        {loadError && debugErrorDetail && (
+          <div style={{
+            margin: '0 20px 12px', padding: '8px 12px', borderRadius: 8,
+            background: '#fff3f3', border: '1px solid #ffc9c9',
+            fontSize: 12, color: '#c92a2a', fontFamily: 'monospace',
+            wordBreak: 'break-word',
+          }}>
+            🔧 Diagnostic (temporaire) : {debugErrorDetail}
+          </div>
+        )}
 
         <div className="g-grid">
           {!productsLoaded ? (
