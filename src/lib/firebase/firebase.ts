@@ -39,8 +39,19 @@ export const auth = getAuth(app);
 // propre. `experimentalAutoDetectLongPolling` bascule automatiquement sur du
 // long-polling (requêtes HTTP classiques) quand le streaming n'est pas
 // fiable, ce qui est stable dans les WebViews hybrides.
+// ⚠️ FIX v2 : `experimentalAutoDetectLongPolling` s'est révélé insuffisant en
+// pratique — le diagnostic en prod a confirmé un timeout de 6s sans la
+// moindre erreur, ce qui veut dire que l'auto-détection elle-même a jugé
+// (à tort) que le streaming WebChannel était fiable dans ce WKWebView, et
+// a donc essayé de l'utiliser quand même. On force désormais explicitement
+// le long-polling (requêtes HTTP classiques, sans connexion persistante en
+// streaming) plutôt que de laisser le SDK deviner : c'est plus lent de
+// quelques dizaines de ms par requête, mais fiable à 100% dans les
+// WebViews hybrides (Capacitor/Cordova/React Native), contrairement au
+// streaming qui peut rester bloqué silencieusement selon la pile réseau
+// native sous-jacente.
 export const db = initializeFirestore(app, {
-  experimentalAutoDetectLongPolling: true,
+  experimentalForceLongPolling: true,
 });
 
 // ⚡ FIX (rapidité perçue) : sans cache local, chaque ouverture de l'app
