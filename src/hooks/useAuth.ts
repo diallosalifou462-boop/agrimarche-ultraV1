@@ -14,6 +14,8 @@ import {
 } from 'firebase/auth';
 import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 import { getMessaging, getToken, onMessage, isSupported } from 'firebase/messaging';
+import { Capacitor } from '@capacitor/core';
+import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
 import { auth, db } from '@/lib/firebase/firebase';
 import { ensureUserExists } from '@/lib/firebase/userProfile';
 
@@ -166,6 +168,33 @@ export function useAuth() {
   useEffect(() => {
     let settled = false;
 
+    // 🔎 CAUSE RÉELLE (confirmée) : sur natif, @capacitor-firebase/authentication
+    // ne synchronise la session vers le SDK JS (donc onAuthStateChanged) qu'en
+    // réaction à un appel explicite. Au lancement à froid / retour d'arrière-plan,
+    // rien ne redéclenche cette synchro — d'où le watchdog 8s systématique sur
+    // mobile. On force la resynchro ici, et à chaque reprise d'activité.
+    if (Capacitor.isNativePlatform()) {
+      FirebaseAuthentication.getCurrentUser().catch((err) => {
+        console.error('[useAuth] Échec resynchro native → JS SDK:', err);
+      });
+    }
+    let removeResumeListener: (() => void) | undefined;
+    if (Capacitor.isNativePlatform()) {
+      import('@capacitor/app').then(({ App }) => {
+        App.addListener('appStateChange', ({ isActive }) => {
+          if (isActive) {
+            FirebaseAuthentication.getCurrentUser().catch((err) => {
+              console.error('[useAuth] Échec resynchro (reprise app):', err);
+            });
+          }
+        }).then((handle) => {
+          removeResumeListener = () => handle.remove();
+        });
+      }).catch(() => {
+        // @capacitor/app indisponible — pas de resynchro au retour d'arrière-plan
+      });
+    }
+
     // ⚡ FIX (parité Produits/Panier/Compte) : jusqu'ici, TOUT le filet de
     // sécurité (le Promise.race de 9s ci-dessous) était À L'INTÉRIEUR du
     // callback d'onAuthStateChanged. Si le SDK Firebase Auth lui-même
@@ -217,6 +246,7 @@ export function useAuth() {
     return () => {
       clearTimeout(outerWatchdog);
       unsubscribe();
+      removeResumeListener?.();
     };
   }, []);
 
