@@ -14,9 +14,7 @@ import {
 } from 'firebase/auth';
 import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 import { getMessaging, getToken, onMessage, isSupported } from 'firebase/messaging';
-import { Capacitor } from '@capacitor/core';
-import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
-import { auth, db } from '@/lib/firebase/firebase';
+import { auth, db, firestoreWarmupPromise, persistenceReadyPromise } from '@/lib/firebase/firebase';
 import { ensureUserExists } from '@/lib/firebase/userProfile';
 
 // ─── Helper : numéro → email synthétique ─────────────────
@@ -167,33 +165,8 @@ export function useAuth() {
   // `setLoading(false)` dans tous les cas.
   useEffect(() => {
     let settled = false;
-
-    // 🔎 CAUSE RÉELLE (confirmée) : sur natif, @capacitor-firebase/authentication
-    // ne synchronise la session vers le SDK JS (donc onAuthStateChanged) qu'en
-    // réaction à un appel explicite. Au lancement à froid / retour d'arrière-plan,
-    // rien ne redéclenche cette synchro — d'où le watchdog 8s systématique sur
-    // mobile. On force la resynchro ici, et à chaque reprise d'activité.
-    if (Capacitor.isNativePlatform()) {
-      FirebaseAuthentication.getCurrentUser().catch((err) => {
-        console.error('[useAuth] Échec resynchro native → JS SDK:', err);
-      });
-    }
-    let removeResumeListener: (() => void) | undefined;
-    if (Capacitor.isNativePlatform()) {
-      import('@capacitor/app').then(({ App }) => {
-        App.addListener('appStateChange', ({ isActive }) => {
-          if (isActive) {
-            FirebaseAuthentication.getCurrentUser().catch((err) => {
-              console.error('[useAuth] Échec resynchro (reprise app):', err);
-            });
-          }
-        }).then((handle) => {
-          removeResumeListener = () => handle.remove();
-        });
-      }).catch(() => {
-        // @capacitor/app indisponible — pas de resynchro au retour d'arrière-plan
-      });
-    }
+    let cleanedUp = false;
+    let unsubscribe: (() => void) | undefined;
 
     // ⚡ FIX (parité Produits/Panier/Compte) : jusqu'ici, TOUT le filet de
     // sécurité (le Promise.race de 9s ci-dessous) était À L'INTÉRIEUR du
@@ -213,40 +186,56 @@ export function useAuth() {
       setLoading(false);
     }, 8000);
 
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      settled = true;
-      clearTimeout(outerWatchdog);
-      setAuthDebugInfo('');
-      setUser(firebaseUser);
-      if (firebaseUser) {
-        try {
-          await Promise.race([
-            fetchUserProfile(firebaseUser.uid, firebaseUser.email),
-            new Promise<void>((_, reject) =>
-              setTimeout(() => reject(new Error('[useAuth] Timeout global (9s) sur fetchUserProfile')), 9000),
-            ),
-          ]);
-        } catch (error) {
-          console.error('[useAuth] fetchUserProfile abandonné (filet de sécurité):', error);
-          setAuthDebugInfo(`profil non chargé : ${(error as Error)?.message || error}`);
+    // ⚡ FIX (la vraie cause du "invité au lieu de connecté") : on attend que
+    // `setPersistence` ait fini de configurer où Firebase doit chercher la
+    // session sauvegardée AVANT d'enregistrer `onAuthStateChanged`. Sans ça,
+    // une course entre les deux pouvait faire conclure "pas de session" à
+    // tort, même quand une session valide existait sur l'appareil (voir
+    // persistenceReadyPromise dans firebase.ts pour le détail).
+    persistenceReadyPromise.then(() => {
+      if (cleanedUp) return;
+      unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+        settled = true;
+        clearTimeout(outerWatchdog);
+        setAuthDebugInfo('');
+        setUser(firebaseUser);
+        if (firebaseUser) {
+          try {
+            // ⚡ FIX (v4) : on attend le "réveil réseau" (voir firebase.ts)
+            // avant le tout premier appel Firestore réel de la session
+            // (ensureUserExists -> getDoc). Ne bloque pas la restauration de
+            // l'utilisateur lui-même (setUser a déjà eu lieu juste au-dessus),
+            // seulement le chargement de son profil.
+            await firestoreWarmupPromise;
+            await Promise.race([
+              fetchUserProfile(firebaseUser.uid, firebaseUser.email),
+              new Promise<void>((_, reject) =>
+                setTimeout(() => reject(new Error('[useAuth] Timeout global (9s) sur fetchUserProfile')), 9000),
+              ),
+            ]);
+          } catch (error) {
+            console.error('[useAuth] fetchUserProfile abandonné (filet de sécurité):', error);
+            setAuthDebugInfo(`profil non chargé : ${(error as Error)?.message || error}`);
+          }
+          registerNotificationToken(firebaseUser.uid); // pas de await : ne bloque plus le chargement
+        } else {
+          setProfile(null);
         }
-        registerNotificationToken(firebaseUser.uid); // pas de await : ne bloque plus le chargement
-      } else {
-        setProfile(null);
-      }
-      setLoading(false);
-    }, (authErr) => {
-      // Erreur du listener onAuthStateChanged lui-même (rare, mais possible).
-      settled = true;
-      clearTimeout(outerWatchdog);
-      console.error('[useAuth] Erreur onAuthStateChanged (listener):', authErr);
-      setAuthDebugInfo(`erreur listener auth : ${(authErr as Error)?.message || authErr}`);
-      setLoading(false);
+        setLoading(false);
+      }, (authErr) => {
+        // Erreur du listener onAuthStateChanged lui-même (rare, mais possible).
+        settled = true;
+        clearTimeout(outerWatchdog);
+        console.error('[useAuth] Erreur onAuthStateChanged (listener):', authErr);
+        setAuthDebugInfo(`erreur listener auth : ${(authErr as Error)?.message || authErr}`);
+        setLoading(false);
+      });
     });
+
     return () => {
+      cleanedUp = true;
       clearTimeout(outerWatchdog);
-      unsubscribe();
-      removeResumeListener?.();
+      unsubscribe?.();
     };
   }, []);
 

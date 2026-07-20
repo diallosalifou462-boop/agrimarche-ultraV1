@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { collection, onSnapshot, query, where, orderBy, doc, updateDoc, increment, limit } from 'firebase/firestore';
-import { db } from '@/lib/firebase/firebase';
+import { db, firestoreWarmupPromise } from '@/lib/firebase/firebase';
 import { logEvent } from 'firebase/analytics';
 import { analytics } from '@/lib/firebase/firebase';
 import { useCart } from '@/hooks/useCart';
@@ -240,31 +240,47 @@ export default function AgriMarket() {
     //
     // (Si les règles Firestore exigent un minimum d'authentification pour
     // lire 'products', il faut les assouplir côté Firebase — voir plus bas.)
+    //
+    // ⚡ FIX (v4) : on attend explicitement `firestoreWarmupPromise` (voir
+    // firebase.ts) avant de lancer ce premier onSnapshot. Au tout premier
+    // lancement à froid avec le réseau déjà actif, la pile réseau native
+    // iOS peut ne pas être prête pour la toute première requête — cette
+    // promesse s'assure qu'une requête "de réveil" est bien passée avant
+    // que Firestore ne tente sa propre connexion.
+    let cancelled = false;
+    let unsubscribe: (() => void) | undefined;
 
-    const u = onSnapshot(query(collection(db, 'products'), limit(pageLimit)), snap => {
-      const d = snap.docs.map(doc => ({ id: doc.id, ...doc.data() })) as ProductData[];
-      setProducts(d); setFiltered(d);
-      setProductsLoaded(true);
-      setLoadError(false);
-      setDebugErrorDetail('');
-      setLoadingMore(false);
-      // S'il y a moins de résultats que la limite demandée, on a atteint la fin du catalogue.
-      setHasMore(d.length >= pageLimit);
-      // ⚡ Cache local synchrone (voir hydratation instantanée plus haut) :
-      // la prochaine ouverture de cette page affichera ces produits dès le
-      // tout premier rendu, en 0ms perçu, avant même que Firestore réponde.
-      try { localStorage.setItem('agrimarche_products_cache', JSON.stringify(d)); } catch { /* ignore (quota/privé) */ }
-    }, (error) => {
-      // ⚡ FIX : on ne bascule plus productsLoaded à true ici — le skeleton
-      // reste affiché pendant que la reprise automatique retente en
-      // arrière-plan, au lieu d'afficher un écran d'erreur qui casse la
-      // fluidité perçue de l'app.
-      console.error('[products] Erreur listener:', error);
-      setLoadError(true);
-      setDebugErrorDetail(`${error?.code || 'inconnu'} — ${error?.message || String(error)}`);
-      setLoadingMore(false);
+    firestoreWarmupPromise.then(() => {
+      if (cancelled) return;
+      unsubscribe = onSnapshot(query(collection(db, 'products'), limit(pageLimit)), snap => {
+        const d = snap.docs.map(doc => ({ id: doc.id, ...doc.data() })) as ProductData[];
+        setProducts(d); setFiltered(d);
+        setProductsLoaded(true);
+        setLoadError(false);
+        setDebugErrorDetail('');
+        setLoadingMore(false);
+        // S'il y a moins de résultats que la limite demandée, on a atteint la fin du catalogue.
+        setHasMore(d.length >= pageLimit);
+        // ⚡ Cache local synchrone (voir hydratation instantanée plus haut) :
+        // la prochaine ouverture de cette page affichera ces produits dès le
+        // tout premier rendu, en 0ms perçu, avant même que Firestore réponde.
+        try { localStorage.setItem('agrimarche_products_cache', JSON.stringify(d)); } catch { /* ignore (quota/privé) */ }
+      }, (error) => {
+        // ⚡ FIX : on ne bascule plus productsLoaded à true ici — le skeleton
+        // reste affiché pendant que la reprise automatique retente en
+        // arrière-plan, au lieu d'afficher un écran d'erreur qui casse la
+        // fluidité perçue de l'app.
+        console.error('[products] Erreur listener:', error);
+        setLoadError(true);
+        setDebugErrorDetail(`${error?.code || 'inconnu'} — ${error?.message || String(error)}`);
+        setLoadingMore(false);
+      });
     });
-    return () => u();
+
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
   }, [pageLimit, retryTick]);
 
   // Requêtes séparées, triées côté serveur, indépendantes de la pagination ci-dessus :

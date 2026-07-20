@@ -52,19 +52,55 @@ export const db = initializeFirestore(app, {
   experimentalForceLongPolling: true,
 });
 
-// ⚠️ FIX v3 — CAUSE CONFIRMÉE DU BLOCAGE TOTAL : `enableIndexedDbPersistence`
-// n'est pas un simple cache à côté, c'est un VERROU interne que le SDK
-// Firestore utilise pour synchroniser TOUTES ses opérations (lectures,
-// écritures, listeners) via IndexedDB. Preuve définitive : une requête HTTP
-// brute vers l'API REST Firestore répondait 200 normalement (elle
-// contourne entièrement le SDK JS), alors que TOUT ce qui passait par ce
-// SDK (onSnapshot, y compris sur des collections totalement différentes)
-// restait bloqué sans jamais ni répondre ni renvoyer d'erreur — signe que
-// l'attente se faisait AVANT même la moindre requête réseau, au niveau de
-// ce verrou interne. Dans ce WebView précis, son initialisation ne
-// s'est jamais terminée, gelant donc tout le moteur Firestore derrière
-// elle. On retire cette persistence : on perd le cache instantané entre
-// deux visites, mais on retrouve un SDK qui répond de façon fiable.
+// ⚠️ FIX (v3 — retiré) : `enableIndexedDbPersistence(db)` avait été ajouté
+// pour un affichage plus rapide au lancement, mais le diagnostic en direct
+// (badge affiché sur l'app) a prouvé que :
+//   - le réseau du téléphone est bien connecté,
+//   - un accès direct à Firestore en HTTP simple répond correctement (200),
+//   - MALGRÉ ÇA, le SDK Firestore (onSnapshot) restait bloqué indéfiniment.
+// Ça isole le problème au moteur interne du SDK dans cette WebView — et le
+// principal suspect est justement l'initialisation du cache IndexedDB
+// (connue pour rester bloquée dans certains environnements Capacitor/
+// WKWebView, ce qui peut geler tout le moteur de synchronisation interne de
+// Firestore avant même qu'un seul onSnapshot ne puisse se déclencher).
+// Le gain de vitesse voulu est de toute façon déjà obtenu autrement, via le
+// cache localStorage ajouté sur la page Produits (lecture synchrone, encore
+// plus rapide, et indépendant de ce mécanisme).
+
+// ⚠️ FIX (v4 — la vraie cause) : le blocage est reproductible à 100% dans un
+// cas précis, décrit très précisément par l'utilisateur : ouvrir l'app avec
+// le wifi/4G DÉJÀ actif au lancement bloque tout indéfiniment, alors
+// qu'ouvrir l'app SANS connexion puis l'activer ENSUITE, à l'intérieur de
+// l'app, fonctionne. C'est la signature d'un problème bien identifié des
+// WebViews iOS (WKWebView) : au tout premier lancement à froid, la pile
+// réseau native (URLSession) n'a parfois pas fini de s'attacher au process
+// au moment où la première requête part — cette toute première requête
+// reste alors bloquée en silence, sans jamais aboutir ni échouer. Activer
+// la connexion APRÈS le lancement fonctionne parce que ça déclenche un vrai
+// évènement de changement réseau, qui force iOS à finaliser cette
+// attache — exactement ce qu'on simule ici artificiellement.
+//
+// La parade : au tout premier chargement du module (donc avant que
+// Firestore n'ait la moindre chance de tenter sa propre connexion), on
+// envoie nous-mêmes une requête HTTP basique — la même que celle qui a déjà
+// prouvé qu'elle passe même quand le SDK reste bloqué (voir le diagnostic
+// en direct). Cette requête "réveille" la pile réseau native. Une fois
+// qu'elle a abouti (ou échoué, peu importe — l'important est la tentative
+// elle-même), le SDK Firestore peut établir sa propre connexion normalement.
+//
+// Exportée en promesse : les écrans critiques (Produits, Auth...) l'attendent
+// explicitement avant de lancer leur premier appel Firestore/Auth réel, pour
+// garantir l'ordre (et pas juste "lancé à peu près en même temps").
+export const firestoreWarmupPromise: Promise<void> =
+  typeof window !== 'undefined'
+    ? Promise.race([
+        fetch(`https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents/products?pageSize=1`),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout réveil réseau (5s)')), 5000)),
+      ])
+        .then(() => { console.log('[firebase] Réveil réseau effectué avec succès'); })
+        .catch((err) => { console.warn('[firebase] Réveil réseau échoué (non bloquant) :', err); })
+    : Promise.resolve();
+
 export const storage = getStorage(app);
 
 // ⚠️ FIX : `getAnalytics(app)` était appelé de façon synchrone et
@@ -84,11 +120,29 @@ let messaging: any = null;
 // PERSISTENCE (côté client uniquement)
 // =====================================================
 
-if (typeof window !== 'undefined') {
-  setPersistence(auth, browserLocalPersistence).catch((err) =>
-    console.error('[firebase] setPersistence a échoué:', err),
-  );
+// ⚠️ FIX (la vraie cause du "invité au lieu de connecté") : `setPersistence`
+// était lancé en fire-and-forget, sans jamais être attendu nulle part.
+// `onAuthStateChanged` (dans useAuth.ts) démarre lui aussi immédiatement au
+// montage — RIEN ne garantissait que `setPersistence` ait fini de configurer
+// où Firebase doit chercher la session sauvegardée AVANT qu'`onAuthStateChanged`
+// ne vérifie s'il y a un utilisateur. Si `onAuthStateChanged` "gagne" cette
+// course, Firebase conclut "pas de session trouvée" et déclenche le callback
+// avec `user = null` — l'utilisateur apparaît en invité alors que sa session
+// existe bel et bien sur l'appareil. Ce timing dépend de facteurs externes
+// (état du réseau, vitesse du device...), ce qui explique le comportement
+// incohérent observé (parfois connecté, parfois invité selon l'état de la
+// connexion au lancement).
+//
+// Exportée en promesse : useAuth.ts l'attend maintenant explicitement AVANT
+// d'appeler onAuthStateChanged, éliminant cette course une fois pour toutes.
+export const persistenceReadyPromise: Promise<void> =
+  typeof window !== 'undefined'
+    ? setPersistence(auth, browserLocalPersistence).catch((err) => {
+        console.error('[firebase] setPersistence a échoué:', err);
+      })
+    : Promise.resolve();
 
+if (typeof window !== 'undefined') {
   isSupported()
     .then((supported) => {
       if (supported) {
