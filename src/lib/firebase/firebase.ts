@@ -36,20 +36,18 @@ export const auth = getAuth(app);
 // de reconnexion silencieuse : aucune donnée n'arrive jamais, aucune erreur
 // n'est levée non plus. C'est pour ça que couper puis rallumer la connexion
 // "débloquait" l'app : ça forçait le navigateur à renégocier une connexion
-// propre. `experimentalAutoDetectLongPolling` bascule automatiquement sur du
-// long-polling (requêtes HTTP classiques) quand le streaming n'est pas
-// fiable, ce qui est stable dans les WebViews hybrides.
-// ⚠️ FIX v2 : `experimentalAutoDetectLongPolling` s'est révélé insuffisant en
-// pratique — le diagnostic en prod a confirmé un timeout de 6s sans la
-// moindre erreur, ce qui veut dire que l'auto-détection elle-même a jugé
-// (à tort) que le streaming WebChannel était fiable dans ce WKWebView, et
-// a donc essayé de l'utiliser quand même. On force désormais explicitement
-// le long-polling (requêtes HTTP classiques, sans connexion persistante en
-// streaming) plutôt que de laisser le SDK deviner : c'est plus lent de
-// quelques dizaines de ms par requête, mais fiable à 100% dans les
-// WebViews hybrides (Capacitor/Cordova/React Native), contrairement au
-// streaming qui peut rester bloqué silencieusement selon la pile réseau
-// native sous-jacente.
+// propre.
+//
+// ⚠️ FIX (v2) : `experimentalAutoDetectLongPolling` fait d'abord une phase
+// de DÉTECTION pour choisir entre streaming et long-polling — et cette
+// détection elle-même peut rester bloquée sans jamais aboutir sur un réseau
+// mobile instable (signal faible, coupures), ce qui reproduit exactement le
+// même symptôme qu'on essayait de corriger. `experimentalForceLongPolling`
+// saute complètement cette phase de détection et utilise directement le
+// long-polling (simples requêtes HTTP, le protocole le plus robuste et le
+// plus largement supporté), au prix d'un tout petit surcoût réseau —
+// largement compensé par la fiabilité sur les connexions faibles typiques
+// du terrain (Sénégal, zones rurales).
 export const db = initializeFirestore(app, {
   experimentalForceLongPolling: true,
 });

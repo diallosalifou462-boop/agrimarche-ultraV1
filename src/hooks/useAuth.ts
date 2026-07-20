@@ -79,6 +79,11 @@ export function useAuth() {
   const [user, setUser]       = useState<User | null>(null);
   const [profile, setProfile] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  // ⚡ FIX (parité avec Produits) : détail brut affichable à l'écran si le
+  // chargement a dû être débloqué par un filet de sécurité — pour pouvoir
+  // diagnostiquer Panier/Compte de la même façon que Produits, sans outil
+  // externe.
+  const [authDebugInfo, setAuthDebugInfo] = useState('');
 
   // ─── Anti-collision inscription ────────────────────────
   // Pendant une inscription, onAuthStateChanged se déclenche dès la
@@ -159,7 +164,30 @@ export function useAuth() {
   // — les pages qui en ont besoin le rechargeront) et on débloque
   // `setLoading(false)` dans tous les cas.
   useEffect(() => {
+    let settled = false;
+
+    // ⚡ FIX (parité Produits/Panier/Compte) : jusqu'ici, TOUT le filet de
+    // sécurité (le Promise.race de 9s ci-dessous) était À L'INTÉRIEUR du
+    // callback d'onAuthStateChanged. Si le SDK Firebase Auth lui-même
+    // n'appelait JAMAIS ce callback (panne réseau au niveau du SDK Auth,
+    // même classe de problème que celle déjà rencontrée sur le transport
+    // Firestore), rien ne débloquait `loading` — Panier et Compte, qui en
+    // dépendent tous les deux pour leur rendu principal, restaient bloqués
+    // indéfiniment, MÊME APRÈS que Produits (qui ne dépend plus de
+    // `loading` pour ses données) ait pu s'afficher normalement. On ajoute
+    // donc un filet de sécurité encore plus extérieur, complètement
+    // indépendant du callback lui-même.
+    const outerWatchdog = setTimeout(() => {
+      if (settled) return;
+      console.warn('[useAuth] onAuthStateChanged ne s\'est jamais déclenché après 8s — déblocage forcé');
+      setAuthDebugInfo('timeout 8s — onAuthStateChanged ne s\'est jamais déclenché (SDK Auth bloqué)');
+      setLoading(false);
+    }, 8000);
+
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      settled = true;
+      clearTimeout(outerWatchdog);
+      setAuthDebugInfo('');
       setUser(firebaseUser);
       if (firebaseUser) {
         try {
@@ -171,14 +199,25 @@ export function useAuth() {
           ]);
         } catch (error) {
           console.error('[useAuth] fetchUserProfile abandonné (filet de sécurité):', error);
+          setAuthDebugInfo(`profil non chargé : ${(error as Error)?.message || error}`);
         }
         registerNotificationToken(firebaseUser.uid); // pas de await : ne bloque plus le chargement
       } else {
         setProfile(null);
       }
       setLoading(false);
+    }, (authErr) => {
+      // Erreur du listener onAuthStateChanged lui-même (rare, mais possible).
+      settled = true;
+      clearTimeout(outerWatchdog);
+      console.error('[useAuth] Erreur onAuthStateChanged (listener):', authErr);
+      setAuthDebugInfo(`erreur listener auth : ${(authErr as Error)?.message || authErr}`);
+      setLoading(false);
     });
-    return () => unsubscribe();
+    return () => {
+      clearTimeout(outerWatchdog);
+      unsubscribe();
+    };
   }, []);
 
   // ─── Écouter les notifications en avant-plan ─────────
@@ -295,6 +334,7 @@ export function useAuth() {
     user,
     profile,
     loading,
+    authDebugInfo,
     signIn,
     signUp,
     logout,

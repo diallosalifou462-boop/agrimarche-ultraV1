@@ -71,7 +71,7 @@ async function clientUpdateOrder(orderId: string, payload: Record<string, any>) 
 }
 
 export default function AccountPage() {
-  const { user, profile, loading, logout, updateUserProfile } = useAuth();
+  const { user, profile, loading, logout, updateUserProfile, authDebugInfo } = useAuth();
   const router = useRouter();
 
   const [isEditing, setIsEditing] = useState(false);
@@ -183,11 +183,16 @@ export default function AccountPage() {
         updatedAt:   Timestamp.now(), // Firestore Timestamp, pas string ISO — cf. processSnap plus haut
       });
     } catch (e: any) {
-      console.error(e);
+      // Message doux et rassurant pour le client — le détail technique
+      // (utile pour le diagnostic) va uniquement dans la console, jamais
+      // devant l'utilisateur.
+      console.error('[handleCancelOrder] Échec sur commande', orderId, {
+        code: e?.code, message: e?.message, statusActuel: orders.find((o: any) => o.id === orderId)?.status,
+      });
       const isOffline = !navigator.onLine || e?.code === 'unavailable' || e?.message?.includes('offline');
       alert(isOffline
-        ? '📶 Pas de connexion internet. Reconnecte-toi et réessaie.'
-        : 'Erreur lors de l\'annulation : ' + (e?.message || e));
+        ? '📶 Pas de connexion internet. Reconnecte-toi et réessaie 🙏'
+        : '😊 Petit souci technique de notre côté — ta commande n\'a pas pu être annulée pour l\'instant. Réessaie dans un instant, ou contacte-nous si ça persiste, on s\'en occupe !');
     } finally {
       setUpdating(null);
     }
@@ -204,11 +209,13 @@ export default function AccountPage() {
         updatedAt:   Timestamp.now(),
       });
     } catch (e: any) {
-      console.error(e);
+      console.error('[handleConfirmOrder] Échec sur commande', orderId, {
+        code: e?.code, message: e?.message, statusActuel: orders.find((o: any) => o.id === orderId)?.status,
+      });
       const isOffline = !navigator.onLine || e?.code === 'unavailable' || e?.message?.includes('offline');
       alert(isOffline
-        ? '📶 Pas de connexion internet. Reconnecte-toi et réessaie.'
-        : 'Erreur lors de la confirmation : ' + (e?.message || e));
+        ? '📶 Pas de connexion internet. Reconnecte-toi et réessaie 🙏'
+        : '😊 Petit souci technique de notre côté — la confirmation n\'a pas pu être enregistrée pour l\'instant. Réessaie dans un instant, ou contacte-nous si ça persiste, on s\'en occupe !');
     } finally {
       setUpdating(null);
     }
@@ -247,6 +254,16 @@ export default function AccountPage() {
       <div className="flex flex-col items-center gap-3">
         <div className="w-12 h-12 rounded-full border-[3px] border-emerald-500 border-t-transparent animate-spin" />
         <p className="text-sm text-gray-400 tracking-wide font-medium">Chargement…</p>
+        {authDebugInfo && (
+          <div style={{
+            marginTop: 8, padding: '8px 12px', borderRadius: 8, maxWidth: 320,
+            background: '#fff3f3', border: '1px solid #ffc9c9',
+            fontSize: 12, color: '#c92a2a', fontFamily: 'monospace',
+            wordBreak: 'break-word', textAlign: 'center',
+          }}>
+            🔧 Diagnostic (temporaire) : {authDebugInfo}
+          </div>
+        )}
       </div>
     </div>
   );

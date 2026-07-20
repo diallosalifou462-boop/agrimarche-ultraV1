@@ -9,6 +9,7 @@ import { logEvent } from 'firebase/analytics';
 import { analytics } from '@/lib/firebase/firebase';
 import { useCart } from '@/hooks/useCart';
 import { useAuth } from '@/hooks/useAuth';
+import { Network } from '@capacitor/network';
 
 const CATEGORIES = [
   { label: 'Tous',              icon: '✦',  color: '#C9A84C' },
@@ -167,10 +168,44 @@ export default function AgriMarket() {
   // déclenche juste la reprise automatique ci-dessous.
   useEffect(() => {
     if (productsLoaded) return;
-    const t = setTimeout(() => {
-      console.warn('[products] Chargement bloqué (6s) — reprise automatique en arrière-plan');
+    const t = setTimeout(async () => {
+      // ⚡ FIX (diagnostic) : avant de conclure "bug de l'app", on vérifie le
+      // VRAI état réseau du téléphone via le plugin natif Capacitor. Ça
+      // distingue clairement "le téléphone n'a réellement aucune connexion"
+      // (rien à corriger côté code, c'est le réseau du terrain) de "le
+      // téléphone est connecté mais Firestore ne répond quand même pas"
+      // (là, c'est un vrai bug à corriger).
+      let networkInfo = 'statut réseau inconnu (plugin indisponible)';
+      try {
+        const status = await Network.getStatus();
+        networkInfo = status.connected
+          ? `connecté (${status.connectionType})`
+          : 'DÉCONNECTÉ — le téléphone n\'a aucune connexion réseau active';
+      } catch (netErr) {
+        networkInfo = `impossible de lire le statut réseau (${(netErr as Error)?.message || netErr})`;
+      }
+
+      // ⚡ FIX (diagnostic) : test d'accès à Firestore en HTTP simple (API
+      // REST publique), complètement indépendant du SDK Firebase et de son
+      // transport interne (gRPC/long-polling). Si CE test passe alors que le
+      // SDK reste bloqué, le problème est dans le SDK/sa configuration. Si CE
+      // test échoue AUSSI, le problème est réseau/projet (bloqué par
+      // l'opérateur, mauvais projectId, Firestore désactivé, etc.) — pas un
+      // bug de l'app.
+      let restInfo = 'non testé';
+      try {
+        const restRes = await Promise.race([
+          fetch('https://firestore.googleapis.com/v1/projects/agrimarche-24e37/databases/(default)/documents/products?pageSize=1'),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout REST 5s')), 5000)),
+        ]);
+        restInfo = restRes.ok ? `OK (HTTP ${restRes.status})` : `HTTP ${restRes.status}`;
+      } catch (restErr) {
+        restInfo = `échec (${(restErr as Error)?.message || restErr})`;
+      }
+
+      console.warn('[products] Chargement bloqué (6s) — reprise automatique en arrière-plan. Réseau:', networkInfo, '— Test REST Firestore:', restInfo);
       setLoadError(true);
-      setDebugErrorDetail(prev => prev || 'timeout — aucune réponse de Firestore après 6s (pas d\'erreur explicite reçue)');
+      setDebugErrorDetail(prev => prev || `timeout après 6s — réseau : ${networkInfo} — accès direct Firestore : ${restInfo}`);
     }, 6000);
     return () => clearTimeout(t);
   }, [productsLoaded, retryTick]);

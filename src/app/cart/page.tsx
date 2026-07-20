@@ -115,7 +115,7 @@ interface Cart {
 export default function CartPage() {
   const router = useRouter();
   const { cart, removeFromCart, updateQuantity, clearCart, isLoading: cartLoading } = useCart() as { cart: Cart; removeFromCart: (id: string) => void; updateQuantity: (id: string, quantity: number) => void; clearCart: () => void; isLoading: boolean };
-  const { user, loading } = useAuth();
+  const { user, loading, authDebugInfo } = useAuth();
   const [mounted, setMounted] = useState(false);
   const [quote, setQuote] = useState('');
   const [popularProducts, setPopularProducts] = useState<RecommendedProduct[]>([]);
@@ -184,8 +184,18 @@ export default function CartPage() {
   // cart.items est encore [] par défaut, avant de basculer sur le vrai contenu.
   if (!mounted || cartLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="min-h-screen flex flex-col items-center justify-center gap-4 px-6">
         <div className="w-10 h-10 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+        {authDebugInfo && (
+          <div style={{
+            padding: '8px 12px', borderRadius: 8,
+            background: '#fff3f3', border: '1px solid #ffc9c9',
+            fontSize: 12, color: '#c92a2a', fontFamily: 'monospace',
+            wordBreak: 'break-word', textAlign: 'center',
+          }}>
+            🔧 Diagnostic (temporaire) : {authDebugInfo}
+          </div>
+        )}
       </div>
     );
   }
