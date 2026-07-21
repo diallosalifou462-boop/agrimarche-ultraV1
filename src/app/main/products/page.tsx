@@ -289,40 +289,55 @@ export default function AgriMarket() {
   // de tout le catalogue.
   // ⚡ Même raisonnement : catalogue public, pas de raison d'attendre l'auth.
   useEffect(() => {
-    const u = onSnapshot(
-      query(collection(db, 'products'), orderBy('createdAt', 'desc'), limit(10)),
-      snap => setFreshProducts(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })) as ProductData[]),
-      () => setFreshProducts([]) // le champ createdAt peut être absent selon les documents existants
-    );
-    return () => u();
+    let cancelled = false;
+    let u: (() => void) | undefined;
+    firestoreWarmupPromise.then(() => {
+      if (cancelled) return;
+      u = onSnapshot(
+        query(collection(db, 'products'), orderBy('createdAt', 'desc'), limit(10)),
+        snap => setFreshProducts(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })) as ProductData[]),
+        () => setFreshProducts([]) // le champ createdAt peut être absent selon les documents existants
+      );
+    });
+    return () => { cancelled = true; u?.(); };
   }, []);
 
   useEffect(() => {
-    const u = onSnapshot(
-      query(collection(db, 'products'), orderBy('whatsappClicks', 'desc'), limit(10)),
-      snap => setPopularProducts(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })) as ProductData[]),
-      () => setPopularProducts([])
-    );
-    return () => u();
+    let cancelled = false;
+    let u: (() => void) | undefined;
+    firestoreWarmupPromise.then(() => {
+      if (cancelled) return;
+      u = onSnapshot(
+        query(collection(db, 'products'), orderBy('whatsappClicks', 'desc'), limit(10)),
+        snap => setPopularProducts(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })) as ProductData[]),
+        () => setPopularProducts([])
+      );
+    });
+    return () => { cancelled = true; u?.(); };
   }, []);
 
   // ── ANNONCES (Firestore collection 'ads') ──
   const [ads, setAds] = useState<any[]>([]);
   const [adIdx, setAdIdx] = useState(0);
   useEffect(() => {
-    const u = onSnapshot(
-      query(collection(db, 'ads'), where('active', '==', true)),
-      snap => {
-        const list = snap.docs
-          .map(d => ({ id: d.id, ...d.data() }))
-          .sort((a: any, b: any) => (b.priority ?? 0) - (a.priority ?? 0));
-        setAds(list);
-        setAdIdx(0);
-      },
-      // Erreur silencieuse — ads optionnelles, ne pas crasher si permission manquante
-      (err) => { console.warn('ads listener ignoré:', err.code); }
-    );
-    return () => u();
+    let cancelled = false;
+    let u: (() => void) | undefined;
+    firestoreWarmupPromise.then(() => {
+      if (cancelled) return;
+      u = onSnapshot(
+        query(collection(db, 'ads'), where('active', '==', true)),
+        snap => {
+          const list = snap.docs
+            .map(d => ({ id: d.id, ...d.data() }))
+            .sort((a: any, b: any) => (b.priority ?? 0) - (a.priority ?? 0));
+          setAds(list);
+          setAdIdx(0);
+        },
+        // Erreur silencieuse — ads optionnelles, ne pas crasher si permission manquante
+        (err) => { console.warn('ads listener ignoré:', err.code); }
+      );
+    });
+    return () => { cancelled = true; u?.(); };
   }, []);
   useEffect(() => {
     if (ads.length <= 1) return;
