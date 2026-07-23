@@ -1,9 +1,10 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, setPersistence, browserLocalPersistence, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, sendPasswordResetEmail, updateProfile } from 'firebase/auth';
-import { initializeFirestore, disableNetwork, enableNetwork, doc, getDoc, setDoc, updateDoc, onSnapshot, Timestamp, arrayUnion, arrayRemove, increment, writeBatch } from 'firebase/firestore';
+import { initializeFirestore, onSnapshotsInSync, collection, query, limit, getDocs, doc, getDoc, setDoc, updateDoc, onSnapshot, Timestamp, arrayUnion, arrayRemove, increment, writeBatch } from 'firebase/firestore';
 import { getStorage, uploadBytes, uploadBytesResumable, getDownloadURL, deleteObject } from 'firebase/storage';
 import { getMessaging, getToken, onMessage, isSupported } from 'firebase/messaging';
 import { getAnalytics, isSupported as analyticsIsSupported } from 'firebase/analytics';
+import { Capacitor } from '@capacitor/core';
 
 // =====================================================
 // CONFIG FIREBASE
@@ -48,46 +49,71 @@ export const auth = getAuth(app);
 // plus largement supporté), au prix d'un tout petit surcoût réseau —
 // largement compensé par la fiabilité sur les connexions faibles typiques
 // du terrain (Sénégal, zones rurales).
+//
+// ⚠️ FIX v6 — ce forçage ne doit s'appliquer QUE sur natif (Capacitor
+// iOS/Android), pas dans un navigateur classique (Chrome/Edge en dev sur
+// localhost, ou PWA web). Un vrai navigateur gère très bien le streaming
+// WebChannel natif — c'est justement ce que ce fix contourne. En le
+// forçant aussi côté web, chaque connexion Firestore devient un
+// "hanging GET" qui met 15 à 30s à s'établir (visible dans l'onglet
+// Réseau : requêtes `channel?gsessionid=...` très longues), ce qui
+// dépasse largement les filets de sécurité de 5-8s ailleurs dans le code
+// et déclenche des `[firebase] Firestore prêt (timeout de sécurité 5s)`
+// à répétition alors que rien n'est réellement cassé. Sur le web, le SDK
+// choisit lui-même le meilleur transport (généralement le streaming,
+// beaucoup plus rapide à établir).
+const isNative = typeof window !== 'undefined' && Capacitor.isNativePlatform();
+
 export const db = initializeFirestore(app, {
-  experimentalForceLongPolling: true,
+  ...(isNative ? { experimentalForceLongPolling: true } : {}),
 });
 
-// ⚠️ FIX v4 — CAUSE RÉELLE IDENTIFIÉE PAR TEST UTILISATEUR : quand l'app
-// démarre avec le réseau DÉJÀ actif, la toute première tentative de
-// connexion de Firestore reste bloquée sans jamais aboutir ni erreur.
-// Mais quand l'app démarre HORS-LIGNE puis que le réseau est activé
-// ENSUITE, tout fonctionne normalement : Firestore emprunte alors un chemin
-// de code différent ("je repasse en ligne" plutôt que "je me connecte pour
-// la première fois"), qui lui fonctionne de façon fiable.
-// On reproduit ce comportement automatiquement pour chaque utilisateur :
-// on force une coupure immédiate de la connexion Firestore juste après
-// l'initialisation, puis on la rétablit un instant plus tard — exactement
-// le cycle "hors-ligne → en ligne" qui s'est révélé fiable, sans que
-// personne n'ait besoin de couper son wifi/4G à la main.
-let resolveFirestoreWarmup: () => void = () => {};
-export const firestoreWarmupPromise = new Promise<void>((resolve) => {
-  resolveFirestoreWarmup = resolve;
-});
+// ⚠️ FIX v5 — CAUSE RÉELLE CONFIRMÉE (erreur exacte capturée en prod) :
+// `FirebaseError: Failed to get document because the client is offline`.
+//
+// Le vrai problème n'était ni le réseau, ni IndexedDB, ni le long-polling :
+// c'est que `ensureUserExists()` appelle `getDoc()` — une lecture UNIQUE,
+// pas un listener — immédiatement après la connexion de l'utilisateur.
+// Or `getDoc()` (contrairement à `onSnapshot()`) échoue IMMÉDIATEMENT avec
+// "client is offline" si le SDK Firestore n'a pas encore intérieurement
+// confirmé son état "en ligne", même si le réseau de l'appareil fonctionne
+// très bien — c'est un pur problème de timing interne au SDK au démarrage
+// à froid, pas un problème réseau réel. Une fois cette première lecture
+// ratée, l'état de l'app (profil non chargé, redirection non faite) restait
+// cassé, même si Firestore se connectait correctement juste après.
+//
+// La solution : exposer un vrai signal "Firestore est prêt" basé sur
+// `onSnapshotsInSync` (l'événement officiel de synchronisation avec le
+// serveur), que `ensureUserExists()` et toute autre lecture ponctuelle
+// attendent AVANT de faire leur premier `getDoc()`. Un timeout de sécurité
+// de 5s évite de bloquer indéfiniment si cet événement ne se déclenchait
+// jamais pour une raison quelconque.
+let firestoreReadyPromise: Promise<void> | null = null;
 
-if (typeof window !== 'undefined') {
-  disableNetwork(db)
-    .then(() => {
-      console.log('[firebase] Cycle de démarrage réseau : hors-ligne → en ligne...');
-      setTimeout(() => {
-        enableNetwork(db)
-          .then(() => console.log('[firebase] Firestore reconnecté'))
-          .catch((err) => console.error('[firebase] enableNetwork a échoué:', err))
-          .finally(() => resolveFirestoreWarmup());
-      }, 300);
-    })
-    .catch((err) => {
-      console.error('[firebase] disableNetwork a échoué:', err);
-      resolveFirestoreWarmup();
+export function waitForFirestoreReady(timeoutMs = 5000): Promise<void> {
+  if (typeof window === 'undefined') return Promise.resolve();
+
+  if (!firestoreReadyPromise) {
+    firestoreReadyPromise = new Promise<void>((resolve) => {
+      let done = false;
+      const finish = (reason: string) => {
+        if (done) return;
+        done = true;
+        console.log(`[firebase] Firestore prêt (${reason})`);
+        resolve();
+      };
+
+      const timer = setTimeout(() => finish('timeout de sécurité 5s'), timeoutMs);
+
+      const unsubscribe = onSnapshotsInSync(db, () => {
+        clearTimeout(timer);
+        unsubscribe();
+        finish('onSnapshotsInSync');
+      });
     });
-} else {
-  // Côté serveur : pas de cycle réseau à attendre, on résout tout de suite
-  // pour ne jamais bloquer un éventuel appel côté SSR.
-  resolveFirestoreWarmup();
+  }
+
+  return firestoreReadyPromise;
 }
 
 // ⚠️ FIX v3 — CAUSE CONFIRMÉE DU BLOCAGE TOTAL : `enableIndexedDbPersistence`
@@ -122,15 +148,10 @@ let messaging: any = null;
 // PERSISTENCE (côté client uniquement)
 // =====================================================
 
-let resolvePersistenceReady: () => void = () => {};
-export const persistenceReadyPromise = new Promise<void>((resolve) => {
-  resolvePersistenceReady = resolve;
-});
-
 if (typeof window !== 'undefined') {
-  setPersistence(auth, browserLocalPersistence)
-    .catch((err) => console.error('[firebase] setPersistence a échoué:', err))
-    .finally(() => resolvePersistenceReady());
+  setPersistence(auth, browserLocalPersistence).catch((err) =>
+    console.error('[firebase] setPersistence a échoué:', err),
+  );
 
   isSupported()
     .then((supported) => {
@@ -145,8 +166,6 @@ if (typeof window !== 'undefined') {
       if (supported) analytics = getAnalytics(app);
     })
     .catch((err) => console.error('[firebase] analytics non initialisé (ignoré, non bloquant):', err));
-} else {
-  resolvePersistenceReady();
 }
 
 // =====================================================

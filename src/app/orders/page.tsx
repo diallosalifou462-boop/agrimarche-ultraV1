@@ -4,10 +4,14 @@ import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import {
-  collection, query, where, orderBy, onSnapshot, doc, getDoc, updateDoc, writeBatch, Timestamp,
+  collection, query, where, orderBy, onSnapshot,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
 import { Suspense } from 'react';
+// ✅ Toute transition de statut passe désormais par la Cloud Function
+// `updateOrderStatus` (transaction atomique côté serveur), plus par une
+// écriture Firestore directe — voir src/lib/orderActions.ts pour le détail.
+import { cancelClientOrder, OrderActionError } from '@/lib/orderActions';
 
 interface Order {
   id: string;
@@ -64,19 +68,6 @@ const TRACKING_STEPS = [
   { key: 'livre',          icon: '📦', label: 'Livrée',                   doneWhen: (s: string) => s === 'livre' },
 ];
 
-// ✅ FIX : helper centralisé pour toutes les mutations de statut client
-// ✅ FIX : set+merge évite "No document to update" si le doc n'existe pas encore
-async function clientUpdateOrder(orderId: string, payload: Record<string, any>) {
-  const batch = writeBatch(db);
-  batch.set(doc(db, 'orders', orderId), payload, { merge: true });
-  const sellerOrderRef = doc(db, 'seller_orders', orderId);
-  const sellerOrderSnap = await getDoc(sellerOrderRef);
-  if (sellerOrderSnap.exists()) {
-    batch.set(sellerOrderRef, payload, { merge: true });
-  }
-  return batch.commit();
-}
-
 function OrdersContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -117,19 +108,11 @@ function OrdersContent() {
     if (!confirm('Annuler cette commande ? Cette action est irréversible.')) return;
     setCancelling(orderId);
     try {
-      await clientUpdateOrder(orderId, {
-        status:      'annule',
-        statusLabel: 'Annulée par le client',
-        cancelledBy: 'client',
-        cancelledAt: Timestamp.now(),
-        updatedAt:   new Date().toISOString(),
-      });
-    } catch (e: any) {
-      console.error('Erreur annulation', e);
-      const isOffline = !navigator.onLine || e?.code === 'unavailable' || e?.message?.includes('offline');
-      alert(isOffline
-        ? '📶 Pas de connexion internet. Reconnecte-toi et réessaie.'
-        : 'Erreur lors de l\'annulation. Réessayez.');
+      await cancelClientOrder(orderId);
+    } catch (e) {
+      const err = e instanceof OrderActionError ? e : null;
+      console.error('Erreur annulation', err ?? e);
+      alert(err?.message ?? "Erreur lors de l'annulation. Réessayez.");
     } finally {
       setCancelling(null);
     }

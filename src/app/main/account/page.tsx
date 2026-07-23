@@ -9,11 +9,7 @@ import {
   query,
   where,
   orderBy,
-  doc,
-  getDoc,
-  writeBatch,
   onSnapshot,
-  Timestamp,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
 import {
@@ -24,6 +20,10 @@ import {
 // ✅ Même cloche de notifications que l'espace vendeur (voir seller/layout.tsx) :
 // affiche en temps réel commandes, avis, messages... pour le client aussi.
 import { NotificationBell } from '@/components/NotificationBell';
+// ✅ Toute transition de statut passe désormais par la Cloud Function
+// `updateOrderStatus` (transaction atomique côté serveur), plus par une
+// écriture Firestore directe — voir src/lib/orderActions.ts pour le détail.
+import { confirmOrderDelivery, cancelClientOrder, OrderActionError } from '@/lib/orderActions';
 
 interface UserFormData {
   displayName: string;
@@ -37,53 +37,24 @@ interface SellerRating {
   reviewCount: number;
 }
 
-// ─── NORMALISATION DES ANCIENS STATUTS FIRESTORE ────────────────────────────
-// Certains anciens documents ont encore : 'expediee', 'livree', 'annulee',
-// 'pending', 'shipped', 'delivered', 'cancelled'. On les migre à la lecture
-// sans toucher Firestore, pour rester rétro-compatible.
-const LEGACY_STATUS: Record<string, string> = {
-  expediee:  'en_livraison',
-  livree:    'livre',
-  annulee:   'annule',
-  pending:   'en_attente',
-  preparing: 'en_preparation',
-  shipped:   'en_livraison',
-  delivered: 'livre',
-  cancelled: 'annule',
+import { ORDER_STATUS_CONFIG, normalizeStatus, statusTint, formatFCFA, canClientCancel, canClientConfirmDelivery } from '@/lib/orderStatus';
+// ✅ Le vocabulaire de statut (normalizeStatus, couleurs, libellés) vient
+// désormais de @/lib/orderStatus — la même source unique que account
+// (page.tsx), account/orders et orders. Avant, cette page avait sa propre
+// copie de LEGACY_STATUS/statusConfig, qui avait divergé : elle autorisait
+// encore l'annulation client en 'en_preparation', un statut que
+// firestore.rules et la Cloud Function updateOrderStatus refusent — un
+// bouton actif dans l'UI que le backend aurait rejeté silencieusement.
+const getStatus = (s: string) => {
+  const cfg = ORDER_STATUS_CONFIG[normalizeStatus(s)];
+  return {
+    label: cfg.label,
+    dotColor: cfg.color,
+    pillBg: statusTint(s, 0.1),
+    pillColor: cfg.color,
+    pillRing: statusTint(s, 0.25),
+  };
 };
-function normalizeStatus(s: string): string {
-  return LEGACY_STATUS[s] ?? s;
-}
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─── SOURCE DE VÉRITÉ DES STATUTS ────────────────────────────────────────────
-// ✅ FIX : clés harmonisées avec seller-orders et account/orders
-// Avant : 'expediee', 'livree', 'annulee' → toutes les commandes s'affichaient "En attente"
-// Après : 'en_livraison', 'livre', 'annule' (cohérent avec les 2 autres pages)
-// ─────────────────────────────────────────────────────────────────────────────
-const statusConfig: Record<string, { label: string; dot: string; pill: string }> = {
-  en_attente:     { label: 'En attente',     dot: 'bg-amber-400',   pill: 'bg-amber-50 text-amber-700 ring-amber-200' },
-  en_preparation: { label: 'En préparation', dot: 'bg-sky-400',     pill: 'bg-sky-50 text-sky-700 ring-sky-200' },
-  en_livraison:   { label: 'En livraison',   dot: 'bg-violet-400',  pill: 'bg-violet-50 text-violet-700 ring-violet-200' },
-  livre:          { label: 'Livrée',         dot: 'bg-emerald-400', pill: 'bg-emerald-50 text-emerald-700 ring-emerald-200' },
-  annule:         { label: 'Annulée',        dot: 'bg-rose-400',    pill: 'bg-rose-50 text-rose-700 ring-rose-200' },
-};
-const getStatus = (s: string) =>
-  statusConfig[s] || { label: s, dot: 'bg-gray-400', pill: 'bg-gray-50 text-gray-700 ring-gray-200' };
-
-// ✅ FIX : vérifie si seller_orders existe avant de l'inclure dans le batch
-// car batch.update() sur un doc inexistant fait échouer TOUT le batch (y compris orders)
-async function clientUpdateOrder(orderId: string, payload: Record<string, any>) {
-  const batch = writeBatch(db);
-  // set+merge crée le doc s'il n'existe pas, le met à jour s'il existe
-  batch.set(doc(db, 'orders', orderId), payload, { merge: true });
-  const sellerOrderRef = doc(db, 'seller_orders', orderId);
-  const sellerOrderSnap = await getDoc(sellerOrderRef);
-  if (sellerOrderSnap.exists()) {
-    batch.set(sellerOrderRef, payload, { merge: true });
-  }
-  return batch.commit();
-}
 
 export default function AccountPage() {
   const { user, profile, loading, logout, updateUserProfile, authDebugInfo } = useAuth();
@@ -190,30 +161,13 @@ export default function AccountPage() {
     if (!confirm('⚠️ Annuler cette commande ?')) return;
     setUpdating(orderId);
     try {
-      await clientUpdateOrder(orderId, {
-        status:      'annule',
-        statusLabel: 'Annulée par le client',
-        cancelledBy: 'client',
-        cancelledAt: Timestamp.now(),
-        // ⚠️ FIX : ce champ était une string ISO ici, alors que la version
-        // de ce même écran dans src/app/account/page.tsx utilise bien un
-        // Timestamp Firestore pour updatedAt (voir son commentaire à ce
-        // sujet). Deux types différents pour le même champ selon l'écran
-        // d'où l'action est faite casse tout tri/requête ultérieur sur
-        // updatedAt (orderBy ne peut pas mélanger types). On aligne ici sur
-        // le bon type.
-        updatedAt: Timestamp.now(),
-      });
-    } catch (e: any) {
-      // Message doux et rassurant pour le client — le détail technique
-      // (utile pour le diagnostic) va uniquement dans la console.
+      await cancelClientOrder(orderId);
+    } catch (e) {
+      const err = e instanceof OrderActionError ? e : null;
       console.error('[handleCancelOrder] Échec sur commande', orderId, {
-        code: e?.code, message: e?.message, statusActuel: orders.find((o: any) => o.id === orderId)?.status,
+        code: err?.code, message: err?.message, statusActuel: orders.find((o: any) => o.id === orderId)?.status,
       });
-      const isOffline = !navigator.onLine || e?.code === 'unavailable' || e?.message?.includes('offline');
-      alert(isOffline
-        ? '📶 Pas de connexion internet. Reconnecte-toi et réessaie 🙏'
-        : '😊 Petit souci technique de notre côté — ta commande n\'a pas pu être annulée pour l\'instant. Réessaie dans un instant, ou contacte-nous si ça persiste, on s\'en occupe !');
+      alert(err?.message ?? "😊 Petit souci technique de notre côté — ta commande n'a pas pu être annulée pour l'instant. Réessaie dans un instant, ou contacte-nous si ça persiste, on s'en occupe !");
     } finally {
       setUpdating(null);
     }
@@ -224,19 +178,13 @@ export default function AccountPage() {
     if (!confirm('✅ Confirmez-vous avoir reçu cette commande ?')) return;
     setUpdating(orderId);
     try {
-      await clientUpdateOrder(orderId, {
-        status:      'livre',
-        statusLabel: 'Livrée – confirmée par le client',
-        updatedAt: Timestamp.now(),
-      });
-    } catch (e: any) {
+      await confirmOrderDelivery(orderId);
+    } catch (e) {
+      const err = e instanceof OrderActionError ? e : null;
       console.error('[handleConfirmOrder] Échec sur commande', orderId, {
-        code: e?.code, message: e?.message, statusActuel: orders.find((o: any) => o.id === orderId)?.status,
+        code: err?.code, message: err?.message, statusActuel: orders.find((o: any) => o.id === orderId)?.status,
       });
-      const isOffline = !navigator.onLine || e?.code === 'unavailable' || e?.message?.includes('offline');
-      alert(isOffline
-        ? '📶 Pas de connexion internet. Reconnecte-toi et réessaie 🙏'
-        : '😊 Petit souci technique de notre côté — la confirmation n\'a pas pu être enregistrée pour l\'instant. Réessaie dans un instant, ou contacte-nous si ça persiste, on s\'en occupe !');
+      alert(err?.message ?? "😊 Petit souci technique de notre côté — la confirmation n'a pas pu être enregistrée pour l'instant. Réessaie dans un instant, ou contacte-nous si ça persiste, on s'en occupe !");
     } finally {
       setUpdating(null);
     }
@@ -454,9 +402,14 @@ export default function AccountPage() {
               <div className="space-y-3">
                 {orders.slice(0, 3).map((order) => {
                   const s = getStatus(order.status);
-                  // ✅ FIX : canConfirm vérifie 'en_livraison' (cohérent avec statusConfig)
-                  const canCancel  = ['en_attente', 'en_preparation'].includes(order.status);
-                  const canConfirm = order.status === 'en_livraison';
+                  // ✅ FIX : canCancel n'autorisait pas seulement 'en_attente'
+                  // mais aussi 'en_preparation' — un bouton actif dans l'UI
+                  // que firestore.rules (et maintenant la Cloud Function
+                  // updateOrderStatus) refusaient déjà silencieusement.
+                  // canClientCancel/canClientConfirmDelivery viennent de
+                  // @/lib/orderStatus, la même source que les 3 autres écrans.
+                  const canCancel  = canClientCancel(order.status);
+                  const canConfirm = canClientConfirmDelivery(order.status);
                   const isUpdating = updating === order.id;
                   const cancelledBySeller = order.status === 'annule' && order.cancelledBy === 'seller';
                   const sellerRating = sellerRatings.get(order.sellerId);
@@ -482,8 +435,11 @@ export default function AccountPage() {
                             </div>
                           )}
                         </div>
-                        <span className={`shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold ring-1 ${s.pill}`}>
-                          <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />{s.label}
+                        <span
+                          className="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold"
+                          style={{ background: s.pillBg, color: s.pillColor, boxShadow: `inset 0 0 0 1px ${s.pillRing}` }}
+                        >
+                          <span className="w-1.5 h-1.5 rounded-full" style={{ background: s.dotColor }} />{s.label}
                         </span>
                       </div>
 

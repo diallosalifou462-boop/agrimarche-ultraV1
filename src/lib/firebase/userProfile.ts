@@ -37,7 +37,7 @@
 
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import type { User } from 'firebase/auth';
-import { db } from './firebase';
+import { db, waitForFirestoreReady } from './firebase';
 
 // ⚠️ FIX : getDoc()/setDoc() n'ont, par eux-mêmes, aucune limite de temps.
 // Si le réseau est capricieux au cold-start (typique iOS/WKWebView),
@@ -51,6 +51,25 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
       setTimeout(() => reject(new Error(`[ensureUserExists] Timeout (${ms}ms) sur ${label}`)), ms),
     ),
   ]);
+}
+
+// Filet de sécurité en plus de waitForFirestoreReady() : sur un réseau
+// vraiment capricieux (coupures répétées au démarrage), même un getDoc()
+// lancé après confirmation de synchronisation peut retomber sur "client
+// is offline" si la connexion vient de retomber entre-temps. On retente
+// alors 2 fois avec un court délai avant d'abandonner pour de bon.
+async function getDocWithRetry(userRef: ReturnType<typeof doc>, attempt = 1): Promise<Awaited<ReturnType<typeof getDoc>>> {
+  try {
+    return await withTimeout(getDoc(userRef), 8000, `getDoc (essai ${attempt})`);
+  } catch (error: any) {
+    const isOffline = error?.code === 'unavailable' || /offline/i.test(error?.message ?? '');
+    if (isOffline && attempt < 3) {
+      console.warn(`[ensureUserExists] getDoc hors-ligne, nouvel essai dans ${attempt * 500}ms...`);
+      await new Promise((r) => setTimeout(r, attempt * 500));
+      return getDocWithRetry(userRef, attempt + 1);
+    }
+    throw error;
+  }
 }
 
 export interface AppUserProfile {
@@ -84,9 +103,18 @@ export async function ensureUserExists(user: User): Promise<AppUserProfile> {
 
   const promise = (async () => {
     try {
+      // ⚠️ FIX v5 : LA cause du bug rapporté en prod. On attend que
+      // Firestore ait confirmé être synchronisé avec le serveur avant de
+      // faire le tout premier getDoc() de la session — sinon ce getDoc()
+      // échoue immédiatement avec "Failed to get document because the
+      // client is offline", même sur un réseau qui fonctionne très bien,
+      // simplement parce que le SDK n'a pas encore eu le temps de confirmer
+      // son propre état de connexion en interne.
+      await waitForFirestoreReady();
+
       console.log('[ensureUserExists] getDoc users/', user.uid);
       const userRef = doc(db, 'users', user.uid);
-      const snap = await withTimeout(getDoc(userRef), 8000, 'getDoc');
+      const snap = await getDocWithRetry(userRef);
 
       if (snap.exists()) {
         console.log('[ensureUserExists] Profil existant trouvé');

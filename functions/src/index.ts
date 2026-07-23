@@ -5,6 +5,23 @@ import { Resend } from 'resend';
 
 admin.initializeApp();
 
+// ============================================================
+//   COMMANDES & AVIS — Cloud Functions callable (Admin SDK)
+// ============================================================
+// updateOrderStatus : confirmation de réception / annulation par le
+// client. submitReview : création d'un avis lié à une commande. Les
+// deux valident ownership + transition côté serveur en transaction —
+// voir orderStatusTransitions.ts / reviewSubmission.ts pour le détail.
+//
+// ⚠️ Ces fonctions écrivent orders.status ('livre'/'annule') et des
+// docs dans 'reviews'. Ça déclenche AUTOMATIQUEMENT les triggers
+// notifyOrderStatusStep / notifyOrderCancelled / notifyNewReview
+// définis plus bas dans ce fichier — aucun appel de notification à
+// ajouter dans orderStatusTransitions.ts/reviewSubmission.ts, ce
+// serait un doublon.
+export { updateOrderStatus } from './orderStatusTransitions';
+export { submitReview } from './reviewSubmission';
+
 export const processEmailQueue = functions.firestore.onDocumentCreated(
   {
     document: 'email_queue/{docId}',
@@ -51,8 +68,6 @@ export const processEmailQueue = functions.firestore.onDocumentCreated(
 // ============================================================
 //   NOTIFICATIONS PUSH (FCM) + EN-APP
 // ============================================================
-// Écrit une notification dans notifications/{userId}/items (pour la
-// cloche en-app) et retourne l'id créé.
 async function writeNotification(
   userId: string,
   payload: { title: string; body: string; type: string; data?: Record<string, string> }
@@ -71,8 +86,6 @@ async function writeNotification(
   }
 }
 
-// Envoie un push direct à un ou plusieurs utilisateurs connus (commande,
-// annulation...) — pas pour la diffusion large, voir sendToTopic pour ça.
 async function sendToUsers(
   userIds: string[],
   notification: { title: string; body: string },
@@ -100,7 +113,6 @@ async function sendToUsers(
     }
   }
 
-  // Historique en-app pour chaque destinataire, indépendamment du push.
   await Promise.all(
     uniqueIds.map((id) =>
       writeNotification(id, { title: notification.title, body: notification.body, type: data.type ?? 'info', data })
@@ -108,11 +120,6 @@ async function sendToUsers(
   );
 }
 
-// Abonne le token FCM de l'utilisateur au topic 'buyers' ou 'sellers' selon
-// son rôle, dès qu'un token est enregistré/mis à jour sur son profil. Ça
-// permet de diffuser à "tous les acheteurs" en un seul envoi (un topic),
-// plutôt que de charger et boucler sur tous les documents users à chaque
-// nouveau produit — ce qui ne tiendrait pas à l'échelle.
 export const onUserTokenSync = functions.firestore.onDocumentWritten(
   { document: 'users/{userId}', region: 'us-central1' },
   async (event) => {
@@ -133,11 +140,6 @@ export const onUserTokenSync = functions.firestore.onDocumentWritten(
   }
 );
 
-// Nouveau produit → diffusion à tous les acheteurs via le topic 'buyers'.
-// Pas d'écriture individuelle dans notifications/{userId} ici : avec une
-// diffusion large, un doc par acheteur à chaque produit ajouté ferait
-// exploser les écritures Firestore. Le push suffit ; l'historique en-app
-// reste réservé aux notifications personnelles (commandes, annulations).
 export const notifyNewProduct = functions.firestore.onDocumentCreated(
   { document: 'products/{productId}', region: 'us-central1' },
   async (event) => {
@@ -160,7 +162,6 @@ export const notifyNewProduct = functions.firestore.onDocumentCreated(
   }
 );
 
-// Nouvelle commande → notifie l'acheteur ET le vendeur.
 export const notifyNewOrder = functions.firestore.onDocumentCreated(
   { document: 'orders/{orderId}', region: 'us-central1' },
   async (event) => {
@@ -186,10 +187,6 @@ export const notifyNewOrder = functions.firestore.onDocumentCreated(
   }
 );
 
-// Commande annulée → notifie l'acheteur ET le vendeur, uniquement au
-// moment où le statut BASCULE vers 'annule' (pas à chaque update).
-// ✅ FIX : 'cancelled' → 'annule' pour matcher les statuts réellement
-//         écrits par l'app (voir firestore.rules / SellerOrdersPage).
 export const notifyOrderCancelled = functions.firestore.onDocumentUpdated(
   { document: 'orders/{orderId}', region: 'us-central1' },
   async (event) => {
@@ -207,12 +204,6 @@ export const notifyOrderCancelled = functions.firestore.onDocumentUpdated(
   }
 );
 
-// ============================================================
-//   1. CHAQUE ÉTAPE DE LA COMMANDE
-// ============================================================
-// Notifie l'acheteur à chaque changement de statut suivi
-// (en_preparation, en_livraison, livre). 'annule' et 'en_attente'
-// sont déjà gérés par les fonctions dédiées ci-dessus.
 const STEP_NOTIFICATIONS: Record<string, { title: string; body: (id: string) => string }> = {
   en_preparation: {
     title: 'Commande en préparation 👨‍🌾',
@@ -247,9 +238,6 @@ export const notifyOrderStatusStep = functions.firestore.onDocumentUpdated(
   }
 );
 
-// ============================================================
-//   2. STOCK FAIBLE / RUPTURE DE STOCK (alerte vendeur)
-// ============================================================
 const LOW_STOCK_THRESHOLD = 5;
 
 export const notifyLowStock = functions.firestore.onDocumentUpdated(
@@ -263,7 +251,6 @@ export const notifyLowStock = functions.firestore.onDocumentUpdated(
     const afterStock = after.stock ?? 0;
     if (beforeStock === afterStock) return;
 
-    // Rupture : uniquement au moment où on passe à 0
     if (afterStock <= 0 && beforeStock > 0) {
       await sendToUsers(
         [after.sellerId],
@@ -273,7 +260,6 @@ export const notifyLowStock = functions.firestore.onDocumentUpdated(
       return;
     }
 
-    // Stock faible : uniquement au moment où on passe sous le seuil
     if (afterStock > 0 && afterStock <= LOW_STOCK_THRESHOLD && beforeStock > LOW_STOCK_THRESHOLD) {
       await sendToUsers(
         [after.sellerId],
@@ -284,9 +270,6 @@ export const notifyLowStock = functions.firestore.onDocumentUpdated(
   }
 );
 
-// ============================================================
-//   3. NOUVEL AVIS CLIENT (alerte vendeur)
-// ============================================================
 export const notifyNewReview = functions.firestore.onDocumentCreated(
   { document: 'reviews/{reviewId}', region: 'us-central1' },
   async (event) => {
@@ -305,15 +288,10 @@ export const notifyNewReview = functions.firestore.onDocumentCreated(
   }
 );
 
-// ============================================================
-//   4. RAPPEL DE COMMANDE NON CONFIRMÉE APRÈS LIVRAISON
-// ============================================================
-// Tourne toutes les heures : relance une seule fois (reminderSentAt)
-// les commandes en 'en_livraison' depuis plus de 24h sans confirmation.
 export const remindUnconfirmedDelivery = onSchedule(
   { schedule: 'every 60 minutes', region: 'us-central1', timeoutSeconds: 120 },
   async () => {
-    const cutoffMs = Date.now() - 24 * 60 * 60 * 1000; // 24h
+    const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
 
     const snap = await admin.firestore()
       .collection('orders')
@@ -325,10 +303,10 @@ export const remindUnconfirmedDelivery = onSchedule(
 
     for (const docSnap of snap.docs) {
       const order = docSnap.data() as any;
-      if (order.reminderSentAt) continue; // déjà relancé une fois
+      if (order.reminderSentAt) continue;
 
       const updatedAtMs = order.updatedAt?.toMillis?.() ?? 0;
-      if (updatedAtMs === 0 || updatedAtMs > cutoffMs) continue; // pas encore assez ancien
+      if (updatedAtMs === 0 || updatedAtMs > cutoffMs) continue;
 
       await sendToUsers(
         [order.userId],

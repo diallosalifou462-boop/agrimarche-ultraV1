@@ -4,11 +4,15 @@ import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import {
-  collection, query, where, orderBy, onSnapshot, doc, getDoc, updateDoc, writeBatch, Timestamp,
+  collection, query, where, orderBy, onSnapshot,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
 import { Suspense } from 'react';
 import { OrderStatus, ORDER_STATUS_CONFIG, normalizeStatus, statusTint, formatFCFA, canClientCancel, canClientConfirmDelivery } from '@/lib/orderStatus';
+// ✅ Toute transition de statut passe désormais par la Cloud Function
+// `updateOrderStatus` (transaction atomique côté serveur), plus par une
+// écriture Firestore directe — voir src/lib/orderActions.ts pour le détail.
+import { confirmOrderDelivery, cancelClientOrder, OrderActionError } from '@/lib/orderActions';
 
 interface Order {
   id: string;
@@ -47,19 +51,6 @@ const TRACKING_STEPS = [
   { key: 'livre',          label: 'Livrée',                   doneWhen: (s: string) => s === 'livre' },
 ] as const;
 
-// ✅ FIX : helper centralisé pour toutes les mutations de statut client
-// ✅ FIX : set+merge évite "No document to update" si le doc n'existe pas encore
-async function clientUpdateOrder(orderId: string, payload: Record<string, any>) {
-  const batch = writeBatch(db);
-  batch.set(doc(db, 'orders', orderId), payload, { merge: true });
-  const sellerOrderRef = doc(db, 'seller_orders', orderId);
-  const sellerOrderSnap = await getDoc(sellerOrderRef);
-  if (sellerOrderSnap.exists()) {
-    batch.set(sellerOrderRef, payload, { merge: true });
-  }
-  return batch.commit();
-}
-
 function OrdersContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -96,48 +87,36 @@ function OrdersContent() {
   }, [user, authLoading]);
 
   // ── Annulation par le client ─────────────────────────────────────────────
+  // Validation ("possible seulement si en_attente") + écriture atomique
+  // orders+seller_orders gérées côté serveur par la Cloud Function
+  // updateOrderStatus — voir src/lib/orderActions.ts.
   const handleCancelOrder = async (orderId: string) => {
     if (!confirm('Annuler cette commande ? Cette action est irréversible.')) return;
     setCancelling(orderId);
     try {
-      await clientUpdateOrder(orderId, {
-        status:      'annule',
-        statusLabel: 'Annulée par le client',
-        cancelledBy: 'client',
-        cancelledAt: Timestamp.now(),
-        updatedAt:   Timestamp.now(), // Firestore Timestamp, pas string ISO — cf. account-page.tsx processSnap
-      });
-    } catch (e: any) {
-      console.error('Erreur annulation', e);
-      const isOffline = !navigator.onLine || e?.code === 'unavailable' || e?.message?.includes('offline');
-      alert(isOffline
-        ? '📶 Pas de connexion internet. Reconnecte-toi et réessaie.'
-        : 'Erreur lors de l\'annulation. Réessayez.');
+      await cancelClientOrder(orderId);
+    } catch (e) {
+      const err = e instanceof OrderActionError ? e : null;
+      console.error('Erreur annulation', err ?? e);
+      alert(err?.message ?? "Erreur lors de l'annulation. Réessayez.");
     } finally {
       setCancelling(null);
     }
   };
 
   // ── Confirmation de réception par le client ──────────────────────────────
-  // Autorisé par isInDeliveryStatus() dans firestore.rules dès que la
-  // commande est en_livraison. Cette action existait déjà sur account
-  // (page.tsx) mais manquait ici — un client ouvrant le détail de sa
-  // commande sur CETTE page n'avait aucun moyen de confirmer réception.
+  // Cette action existait déjà sur account (page.tsx) mais manquait ici —
+  // un client ouvrant le détail de sa commande sur CETTE page n'avait
+  // aucun moyen de confirmer réception.
   const [confirming, setConfirming] = useState<string | null>(null);
   const handleConfirmDelivery = async (orderId: string) => {
     setConfirming(orderId);
     try {
-      await clientUpdateOrder(orderId, {
-        status:      'livre',
-        statusLabel: 'Livrée – confirmée par le client',
-        updatedAt:   Timestamp.now(),
-      });
-    } catch (e: any) {
-      console.error('Erreur confirmation', e);
-      const isOffline = !navigator.onLine || e?.code === 'unavailable' || e?.message?.includes('offline');
-      alert(isOffline
-        ? '📶 Pas de connexion internet. Reconnecte-toi et réessaie.'
-        : 'Erreur lors de la confirmation. Réessayez.');
+      await confirmOrderDelivery(orderId);
+    } catch (e) {
+      const err = e instanceof OrderActionError ? e : null;
+      console.error('Erreur confirmation', err ?? e);
+      alert(err?.message ?? 'Erreur lors de la confirmation. Réessayez.');
     } finally {
       setConfirming(null);
     }

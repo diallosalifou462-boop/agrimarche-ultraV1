@@ -33,12 +33,30 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.remindUnconfirmedDelivery = exports.notifyNewReview = exports.notifyLowStock = exports.notifyOrderStatusStep = exports.notifyOrderCancelled = exports.notifyNewOrder = exports.notifyNewProduct = exports.onUserTokenSync = exports.processEmailQueue = void 0;
+exports.remindUnconfirmedDelivery = exports.notifyNewReview = exports.notifyLowStock = exports.notifyOrderStatusStep = exports.notifyOrderCancelled = exports.notifyNewOrder = exports.notifyNewProduct = exports.onUserTokenSync = exports.processEmailQueue = exports.submitReview = exports.updateOrderStatus = void 0;
 const functions = __importStar(require("firebase-functions/v2"));
 const scheduler_1 = require("firebase-functions/v2/scheduler");
 const admin = __importStar(require("firebase-admin"));
 const resend_1 = require("resend");
 admin.initializeApp();
+// ============================================================
+//   COMMANDES & AVIS — Cloud Functions callable (Admin SDK)
+// ============================================================
+// updateOrderStatus : confirmation de réception / annulation par le
+// client. submitReview : création d'un avis lié à une commande. Les
+// deux valident ownership + transition côté serveur en transaction —
+// voir orderStatusTransitions.ts / reviewSubmission.ts pour le détail.
+//
+// ⚠️ Ces fonctions écrivent orders.status ('livre'/'annule') et des
+// docs dans 'reviews'. Ça déclenche AUTOMATIQUEMENT les triggers
+// notifyOrderStatusStep / notifyOrderCancelled / notifyNewReview
+// définis plus bas dans ce fichier — aucun appel de notification à
+// ajouter dans orderStatusTransitions.ts/reviewSubmission.ts, ce
+// serait un doublon.
+var orderStatusTransitions_1 = require("./orderStatusTransitions");
+Object.defineProperty(exports, "updateOrderStatus", { enumerable: true, get: function () { return orderStatusTransitions_1.updateOrderStatus; } });
+var reviewSubmission_1 = require("./reviewSubmission");
+Object.defineProperty(exports, "submitReview", { enumerable: true, get: function () { return reviewSubmission_1.submitReview; } });
 exports.processEmailQueue = functions.firestore.onDocumentCreated({
     document: 'email_queue/{docId}',
     secrets: ['RESEND_API_KEY'],
@@ -77,8 +95,6 @@ exports.processEmailQueue = functions.firestore.onDocumentCreated({
 // ============================================================
 //   NOTIFICATIONS PUSH (FCM) + EN-APP
 // ============================================================
-// Écrit une notification dans notifications/{userId}/items (pour la
-// cloche en-app) et retourne l'id créé.
 async function writeNotification(userId, payload) {
     var _a;
     try {
@@ -95,8 +111,6 @@ async function writeNotification(userId, payload) {
         console.error(`❌ Erreur écriture notification pour ${userId}:`, err);
     }
 }
-// Envoie un push direct à un ou plusieurs utilisateurs connus (commande,
-// annulation...) — pas pour la diffusion large, voir sendToTopic pour ça.
 async function sendToUsers(userIds, notification, data = {}) {
     var _a;
     const uniqueIds = [...new Set(userIds)].filter(Boolean);
@@ -118,14 +132,8 @@ async function sendToUsers(userIds, notification, data = {}) {
             console.error('❌ Erreur envoi push:', err);
         }
     }
-    // Historique en-app pour chaque destinataire, indépendamment du push.
     await Promise.all(uniqueIds.map((id) => { var _a; return writeNotification(id, { title: notification.title, body: notification.body, type: (_a = data.type) !== null && _a !== void 0 ? _a : 'info', data }); }));
 }
-// Abonne le token FCM de l'utilisateur au topic 'buyers' ou 'sellers' selon
-// son rôle, dès qu'un token est enregistré/mis à jour sur son profil. Ça
-// permet de diffuser à "tous les acheteurs" en un seul envoi (un topic),
-// plutôt que de charger et boucler sur tous les documents users à chaque
-// nouveau produit — ce qui ne tiendrait pas à l'échelle.
 exports.onUserTokenSync = functions.firestore.onDocumentWritten({ document: 'users/{userId}', region: 'us-central1' }, async (event) => {
     var _a;
     const after = (_a = event.data) === null || _a === void 0 ? void 0 : _a.after;
@@ -144,11 +152,6 @@ exports.onUserTokenSync = functions.firestore.onDocumentWritten({ document: 'use
         console.error('❌ Erreur abonnement topic:', err);
     }
 });
-// Nouveau produit → diffusion à tous les acheteurs via le topic 'buyers'.
-// Pas d'écriture individuelle dans notifications/{userId} ici : avec une
-// diffusion large, un doc par acheteur à chaque produit ajouté ferait
-// exploser les écritures Firestore. Le push suffit ; l'historique en-app
-// reste réservé aux notifications personnelles (commandes, annulations).
 exports.notifyNewProduct = functions.firestore.onDocumentCreated({ document: 'products/{productId}', region: 'us-central1' }, async (event) => {
     var _a;
     const product = (_a = event.data) === null || _a === void 0 ? void 0 : _a.data();
@@ -169,7 +172,6 @@ exports.notifyNewProduct = functions.firestore.onDocumentCreated({ document: 'pr
         console.error('❌ Erreur diffusion nouveau produit:', err);
     }
 });
-// Nouvelle commande → notifie l'acheteur ET le vendeur.
 exports.notifyNewOrder = functions.firestore.onDocumentCreated({ document: 'orders/{orderId}', region: 'us-central1' }, async (event) => {
     var _a, _b, _c, _d;
     const order = (_a = event.data) === null || _a === void 0 ? void 0 : _a.data();
@@ -183,10 +185,6 @@ exports.notifyNewOrder = functions.firestore.onDocumentCreated({ document: 'orde
             : Promise.resolve(),
     ]);
 });
-// Commande annulée → notifie l'acheteur ET le vendeur, uniquement au
-// moment où le statut BASCULE vers 'annule' (pas à chaque update).
-// ✅ FIX : 'cancelled' → 'annule' pour matcher les statuts réellement
-//         écrits par l'app (voir firestore.rules / SellerOrdersPage).
 exports.notifyOrderCancelled = functions.firestore.onDocumentUpdated({ document: 'orders/{orderId}', region: 'us-central1' }, async (event) => {
     var _a, _b;
     const before = (_a = event.data) === null || _a === void 0 ? void 0 : _a.before.data();
@@ -198,12 +196,6 @@ exports.notifyOrderCancelled = functions.firestore.onDocumentUpdated({ document:
     const recipients = [after.userId, after.sellerId].filter(Boolean);
     await sendToUsers(recipients, { title: 'Commande annulée ❌', body: `La commande #${event.params.orderId.slice(0, 6)} a été annulée.` }, { type: 'order_cancelled', orderId: event.params.orderId });
 });
-// ============================================================
-//   1. CHAQUE ÉTAPE DE LA COMMANDE
-// ============================================================
-// Notifie l'acheteur à chaque changement de statut suivi
-// (en_preparation, en_livraison, livre). 'annule' et 'en_attente'
-// sont déjà gérés par les fonctions dédiées ci-dessus.
 const STEP_NOTIFICATIONS = {
     en_preparation: {
         title: 'Commande en préparation 👨‍🌾',
@@ -231,9 +223,6 @@ exports.notifyOrderStatusStep = functions.firestore.onDocumentUpdated({ document
         return;
     await sendToUsers([after.userId], { title: step.title, body: step.body(event.params.orderId) }, { type: 'order_status', orderId: event.params.orderId, status: after.status });
 });
-// ============================================================
-//   2. STOCK FAIBLE / RUPTURE DE STOCK (alerte vendeur)
-// ============================================================
 const LOW_STOCK_THRESHOLD = 5;
 exports.notifyLowStock = functions.firestore.onDocumentUpdated({ document: 'products/{productId}', region: 'us-central1' }, async (event) => {
     var _a, _b, _c, _d;
@@ -245,19 +234,14 @@ exports.notifyLowStock = functions.firestore.onDocumentUpdated({ document: 'prod
     const afterStock = (_d = after.stock) !== null && _d !== void 0 ? _d : 0;
     if (beforeStock === afterStock)
         return;
-    // Rupture : uniquement au moment où on passe à 0
     if (afterStock <= 0 && beforeStock > 0) {
         await sendToUsers([after.sellerId], { title: 'Rupture de stock ⚠️', body: `"${after.name}" est en rupture de stock.` }, { type: 'stock_out', productId: event.params.productId });
         return;
     }
-    // Stock faible : uniquement au moment où on passe sous le seuil
     if (afterStock > 0 && afterStock <= LOW_STOCK_THRESHOLD && beforeStock > LOW_STOCK_THRESHOLD) {
         await sendToUsers([after.sellerId], { title: 'Stock faible 📉', body: `Il ne reste que ${afterStock} unité(s) de "${after.name}".` }, { type: 'stock_low', productId: event.params.productId });
     }
 });
-// ============================================================
-//   3. NOUVEL AVIS CLIENT (alerte vendeur)
-// ============================================================
 exports.notifyNewReview = functions.firestore.onDocumentCreated({ document: 'reviews/{reviewId}', region: 'us-central1' }, async (event) => {
     var _a, _b;
     const review = (_a = event.data) === null || _a === void 0 ? void 0 : _a.data();
@@ -268,14 +252,9 @@ exports.notifyNewReview = functions.firestore.onDocumentCreated({ document: 'rev
     const excerpt = review.comment ? String(review.comment).slice(0, 80) : 'Un client a laissé un avis.';
     await sendToUsers([review.sellerId], { title: 'Nouvel avis client 📝', body: `${stars} — ${excerpt}` }, { type: 'new_review', reviewId: event.params.reviewId });
 });
-// ============================================================
-//   4. RAPPEL DE COMMANDE NON CONFIRMÉE APRÈS LIVRAISON
-// ============================================================
-// Tourne toutes les heures : relance une seule fois (reminderSentAt)
-// les commandes en 'en_livraison' depuis plus de 24h sans confirmation.
 exports.remindUnconfirmedDelivery = (0, scheduler_1.onSchedule)({ schedule: 'every 60 minutes', region: 'us-central1', timeoutSeconds: 120 }, async () => {
     var _a, _b, _c;
-    const cutoffMs = Date.now() - 24 * 60 * 60 * 1000; // 24h
+    const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
     const snap = await admin.firestore()
         .collection('orders')
         .where('status', '==', 'en_livraison')
@@ -285,10 +264,10 @@ exports.remindUnconfirmedDelivery = (0, scheduler_1.onSchedule)({ schedule: 'eve
     for (const docSnap of snap.docs) {
         const order = docSnap.data();
         if (order.reminderSentAt)
-            continue; // déjà relancé une fois
+            continue;
         const updatedAtMs = (_c = (_b = (_a = order.updatedAt) === null || _a === void 0 ? void 0 : _a.toMillis) === null || _b === void 0 ? void 0 : _b.call(_a)) !== null && _c !== void 0 ? _c : 0;
         if (updatedAtMs === 0 || updatedAtMs > cutoffMs)
-            continue; // pas encore assez ancien
+            continue;
         await sendToUsers([order.userId], {
             title: 'Votre commande est arrivée ? 📦',
             body: `N'oubliez pas de confirmer la réception de votre commande #${docSnap.id.slice(0, 6)}.`,

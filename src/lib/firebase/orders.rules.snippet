@@ -1,0 +1,76 @@
+// ============================================================
+// EXTRAIT À FUSIONNER DANS firestore.rules (bloc match /databases/...)
+// ============================================================
+//
+// Changement de modèle : avant, `orders` acceptait des updates directs
+// du client sur le champ `status` (via isSelfCancellableStatus() /
+// isInDeliveryStatus()), et `seller_orders` était sensé être fermé au
+// client — mais l'app écrivait quand même dedans via un batch, ce qui
+// produisait un permission-denied sur TOUT le batch (voir
+// functions/src/orderStatusTransitions.ts pour le détail).
+//
+// Nouveau modèle : la Cloud Function `updateOrderStatus` (Admin SDK,
+// donc elle IGNORE ces règles) est désormais la SEULE voie pour changer
+// le statut d'une commande côté client. Les règles ci-dessous n'ont
+// donc plus besoin d'exposer isSelfCancellableStatus()/
+// isInDeliveryStatus() en écriture directe — elles peuvent au contraire
+// les FERMER, ce qui réduit la surface d'attaque (un client malveillant
+// ne peut plus forcer un statut en modifiant le payload d'une requête
+// Firestore côté device).
+//
+// Le vendeur et l'admin gardent leurs droits d'écriture existants sur
+// `orders` et `seller_orders` (préparation, expédition, etc.) — ce
+// snippet ne touche qu'aux droits du CLIENT (acheteur).
+
+function isOwner(orderData) {
+  return request.auth != null && request.auth.uid == orderData.userId;
+}
+
+function isSellerOfOrder(orderData) {
+  return request.auth != null && request.auth.uid == orderData.sellerId;
+}
+
+function isAdmin() {
+  return request.auth != null &&
+    get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+}
+
+match /orders/{orderId} {
+  allow read: if isOwner(resource.data) || isSellerOfOrder(resource.data) || isAdmin();
+
+  // Création : inchangé, c'est le flux de checkout (l'acheteur crée sa
+  // propre commande). À adapter si ta version actuelle valide déjà des
+  // champs précis au create — ne pas relâcher cette partie.
+  allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
+
+  // ⛔ Le client (acheteur) n'a PLUS le droit d'update() directement.
+  // Toute transition de statut passe par la Cloud Function
+  // `updateOrderStatus`, qui écrit avec les droits Admin SDK et n'est
+  // donc pas concernée par cette règle.
+  // Le vendeur et l'admin gardent leur update (précision selon ton
+  // implémentation actuelle — ownerId vendeur, ou rôle admin).
+  allow update: if isSellerOfOrder(resource.data) || isAdmin();
+
+  allow delete: if isAdmin();
+}
+
+match /seller_orders/{orderId} {
+  // Lecture : l'acheteur peut voir SA commande dans cette collection
+  // (nécessaire pour la requête `where('userId','==',uid)` utilisée par
+  // les écrans compte client), le vendeur voit les siennes, l'admin voit
+  // tout.
+  allow read: if isOwner(resource.data) || isSellerOfOrder(resource.data) || isAdmin();
+
+  // ⛔ Écriture totalement fermée au client. Seuls le vendeur (sur ses
+  // propres commandes) et l'admin peuvent écrire ici directement ; la
+  // synchronisation déclenchée par une action client (confirmation,
+  // annulation) passe exclusivement par la Cloud Function.
+  allow write: if isSellerOfOrder(resource.data) || isAdmin();
+}
+
+// Journal d'audit : écrit uniquement par la Cloud Function (Admin SDK).
+// Lecture réservée à l'admin (utile pour support/litiges).
+match /order_status_log/{logId} {
+  allow read: if isAdmin();
+  allow write: if false;
+}

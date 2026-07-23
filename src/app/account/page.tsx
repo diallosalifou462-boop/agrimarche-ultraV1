@@ -9,11 +9,7 @@ import {
   query,
   where,
   orderBy,
-  doc,
-  getDoc,
-  writeBatch,
   onSnapshot,
-  Timestamp,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
 import {
@@ -22,6 +18,10 @@ import {
   Sparkles, ArrowRight, AlertTriangle, Star,
 } from 'lucide-react';
 import { ORDER_STATUS_CONFIG, normalizeStatus, statusTint, formatFCFA, canClientCancel, canClientConfirmDelivery } from '@/lib/orderStatus';
+// ✅ Toute transition de statut passe désormais par la Cloud Function
+// `updateOrderStatus` (transaction atomique côté serveur), plus par une
+// écriture Firestore directe — voir src/lib/orderActions.ts pour le détail.
+import { confirmOrderDelivery, cancelClientOrder, OrderActionError } from '@/lib/orderActions';
 // ✅ Même cloche de notifications que l'espace vendeur (voir seller/layout.tsx) :
 // affiche en temps réel commandes, avis, messages... pour le client aussi.
 import { NotificationBell } from '@/components/NotificationBell';
@@ -55,20 +55,6 @@ const getStatus = (s: string) => {
     pillRing: statusTint(s, 0.25),
   };
 };
-
-// ✅ FIX : vérifie si seller_orders existe avant de l'inclure dans le batch
-// car batch.update() sur un doc inexistant fait échouer TOUT le batch (y compris orders)
-async function clientUpdateOrder(orderId: string, payload: Record<string, any>) {
-  const batch = writeBatch(db);
-  // set+merge crée le doc s'il n'existe pas, le met à jour s'il existe
-  batch.set(doc(db, 'orders', orderId), payload, { merge: true });
-  const sellerOrderRef = doc(db, 'seller_orders', orderId);
-  const sellerOrderSnap = await getDoc(sellerOrderRef);
-  if (sellerOrderSnap.exists()) {
-    batch.set(sellerOrderRef, payload, { merge: true });
-  }
-  return batch.commit();
-}
 
 export default function AccountPage() {
   const { user, profile, loading, logout, updateUserProfile, authDebugInfo } = useAuth();
@@ -171,28 +157,20 @@ export default function AccountPage() {
   }, [profile]);
 
   // ── Annulation CLIENT ────────────────────────────────────────────────────
+  // La validation ("possible seulement si en_attente") et l'écriture
+  // atomique orders+seller_orders sont désormais entièrement gérées côté
+  // serveur par la Cloud Function updateOrderStatus — cf. orderActions.ts.
   const handleCancelOrder = async (orderId: string) => {
     if (!confirm('⚠️ Annuler cette commande ?')) return;
     setUpdating(orderId);
     try {
-      await clientUpdateOrder(orderId, {
-        status:      'annule',
-        statusLabel: 'Annulée par le client',
-        cancelledBy: 'client',
-        cancelledAt: Timestamp.now(),
-        updatedAt:   Timestamp.now(), // Firestore Timestamp, pas string ISO — cf. processSnap plus haut
-      });
-    } catch (e: any) {
-      // Message doux et rassurant pour le client — le détail technique
-      // (utile pour le diagnostic) va uniquement dans la console, jamais
-      // devant l'utilisateur.
+      await cancelClientOrder(orderId);
+    } catch (e) {
+      const err = e instanceof OrderActionError ? e : null;
       console.error('[handleCancelOrder] Échec sur commande', orderId, {
-        code: e?.code, message: e?.message, statusActuel: orders.find((o: any) => o.id === orderId)?.status,
+        code: err?.code, message: err?.message, statusActuel: orders.find((o: any) => o.id === orderId)?.status,
       });
-      const isOffline = !navigator.onLine || e?.code === 'unavailable' || e?.message?.includes('offline');
-      alert(isOffline
-        ? '📶 Pas de connexion internet. Reconnecte-toi et réessaie 🙏'
-        : '😊 Petit souci technique de notre côté — ta commande n\'a pas pu être annulée pour l\'instant. Réessaie dans un instant, ou contacte-nous si ça persiste, on s\'en occupe !');
+      alert(err?.message ?? "😊 Petit souci technique de notre côté — ta commande n'a pas pu être annulée pour l'instant. Réessaie dans un instant, ou contacte-nous si ça persiste, on s'en occupe !");
     } finally {
       setUpdating(null);
     }
@@ -203,19 +181,13 @@ export default function AccountPage() {
     if (!confirm('✅ Confirmez-vous avoir reçu cette commande ?')) return;
     setUpdating(orderId);
     try {
-      await clientUpdateOrder(orderId, {
-        status:      'livre',
-        statusLabel: 'Livrée – confirmée par le client',
-        updatedAt:   Timestamp.now(),
-      });
-    } catch (e: any) {
+      await confirmOrderDelivery(orderId);
+    } catch (e) {
+      const err = e instanceof OrderActionError ? e : null;
       console.error('[handleConfirmOrder] Échec sur commande', orderId, {
-        code: e?.code, message: e?.message, statusActuel: orders.find((o: any) => o.id === orderId)?.status,
+        code: err?.code, message: err?.message, statusActuel: orders.find((o: any) => o.id === orderId)?.status,
       });
-      const isOffline = !navigator.onLine || e?.code === 'unavailable' || e?.message?.includes('offline');
-      alert(isOffline
-        ? '📶 Pas de connexion internet. Reconnecte-toi et réessaie 🙏'
-        : '😊 Petit souci technique de notre côté — la confirmation n\'a pas pu être enregistrée pour l\'instant. Réessaie dans un instant, ou contacte-nous si ça persiste, on s\'en occupe !');
+      alert(err?.message ?? "😊 Petit souci technique de notre côté — la confirmation n'a pas pu être enregistrée pour l'instant. Réessaie dans un instant, ou contacte-nous si ça persiste, on s'en occupe !");
     } finally {
       setUpdating(null);
     }

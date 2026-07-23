@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { collection, onSnapshot, query, where, orderBy, doc, updateDoc, increment, limit } from 'firebase/firestore';
-import { db, firestoreWarmupPromise } from '@/lib/firebase/firebase';
+import { db, waitForFirestoreReady } from '@/lib/firebase/firebase';
 import { logEvent } from 'firebase/analytics';
 import { analytics } from '@/lib/firebase/firebase';
 import { useCart } from '@/hooks/useCart';
@@ -250,7 +250,7 @@ export default function AgriMarket() {
     let cancelled = false;
     let unsubscribe: (() => void) | undefined;
 
-    firestoreWarmupPromise.then(() => {
+    waitForFirestoreReady().then(() => {
       if (cancelled) return;
       unsubscribe = onSnapshot(query(collection(db, 'products'), limit(pageLimit)), snap => {
         const d = snap.docs.map(doc => ({ id: doc.id, ...doc.data() })) as ProductData[];
@@ -291,7 +291,7 @@ export default function AgriMarket() {
   useEffect(() => {
     let cancelled = false;
     let u: (() => void) | undefined;
-    firestoreWarmupPromise.then(() => {
+    waitForFirestoreReady().then(() => {
       if (cancelled) return;
       u = onSnapshot(
         query(collection(db, 'products'), orderBy('createdAt', 'desc'), limit(10)),
@@ -305,7 +305,7 @@ export default function AgriMarket() {
   useEffect(() => {
     let cancelled = false;
     let u: (() => void) | undefined;
-    firestoreWarmupPromise.then(() => {
+    waitForFirestoreReady().then(() => {
       if (cancelled) return;
       u = onSnapshot(
         query(collection(db, 'products'), orderBy('whatsappClicks', 'desc'), limit(10)),
@@ -322,7 +322,7 @@ export default function AgriMarket() {
   useEffect(() => {
     let cancelled = false;
     let u: (() => void) | undefined;
-    firestoreWarmupPromise.then(() => {
+    waitForFirestoreReady().then(() => {
       if (cancelled) return;
       u = onSnapshot(
         query(collection(db, 'ads'), where('active', '==', true)),

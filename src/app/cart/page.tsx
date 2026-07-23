@@ -5,7 +5,7 @@ import { useCart } from '@/hooks/useCart';
 import { useAuth } from '@/hooks/useAuth';
 import { useEffect, useState } from 'react';
 import { collection, getDocs, limit, orderBy, query, where } from 'firebase/firestore';
-import { db } from '@/lib/firebase/firebase';
+import { db, firestoreWarmupPromise } from '@/lib/firebase/firebase';
 
 // ⚠️ FIX (cohérence système) : même filet de sécurité que useCart.tsx /
 // userProfile.ts — getDocs() n'a par lui-même aucune limite de temps.
@@ -138,9 +138,21 @@ export default function CartPage() {
     async function loadRecommendations() {
       setLoadingRecs(true);
       try {
+        // ⚡ FIX : même réveil réseau que sur Produits/Auth (voir
+        // firebase.ts) — sans ça, cette fonction pouvait rester bloquée
+        // exactement comme Produits l'était avant ce correctif, quand
+        // l'app est ouverte avec la connexion déjà active.
+        await firestoreWarmupPromise;
         const productsRef = collection(db, 'products');
         const [popularSnap, newSnap] = await withTimeout(Promise.all([
-          getDocs(query(productsRef, orderBy('salesCount', 'desc'), limit(6))),
+          // ⚠️ FIX : 'salesCount' n'est écrit nulle part dans toute l'app —
+          // cette requête renvoyait donc TOUJOURS zéro résultat (Firestore
+          // exclut les documents qui n'ont pas le champ utilisé par
+          // orderBy), indépendamment de tout problème réseau. On utilise le
+          // champ réellement suivi, 'whatsappClicks' (compteur de clics sur
+          // "Contacter"), déjà utilisé par la page Produits pour sa propre
+          // section "Populaires".
+          getDocs(query(productsRef, orderBy('whatsappClicks', 'desc'), limit(6))),
           getDocs(query(productsRef, orderBy('createdAt', 'desc'), limit(6))),
         ]), 8000, 'recommandations populaires/nouveautés');
 

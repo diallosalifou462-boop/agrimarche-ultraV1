@@ -2,11 +2,15 @@
 
 import { Suspense, useState, useEffect } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { collection, addDoc, Timestamp, doc, getDoc, query, where, getDocs } from 'firebase/firestore';
+import { collection, doc, getDoc, query, where, getDocs } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
 import { useAuth } from '@/hooks/useAuth';
 import { apiUrl } from '@/lib/api-config';
 import { ArrowLeft, Star, AlertCircle, CheckCircle, Loader2 } from 'lucide-react';
+// ✅ La création de l'avis passe désormais par la Cloud Function
+// `submitReview` (ownership + statut 'livre' vérifiés côté serveur,
+// anti-doublon atomique) — voir src/lib/reviewActions.ts.
+import { submitOrderReview, ReviewActionError } from '@/lib/reviewActions';
 
 function ReviewContent() {
   const searchParams = useSearchParams();
@@ -96,45 +100,21 @@ function ReviewContent() {
     setSubmitting(true);
 
     try {
-      await addDoc(collection(db, 'reviews'), {
-        orderId: id,
-        sellerId,
-        sellerName,
-        userId: user.uid,
-        userName: user.displayName || 'Client',
-        userEmail: user.email,
-        rating,
-        comment: comment.trim(),
-        productNames,
-        createdAt: Timestamp.now(),
-      });
+      const result = await submitOrderReview(id as string, rating, comment);
 
-      // 🔔 NOTIFICATION AU VENDEUR
-      if (sellerId) {
-        try {
-          const res = await fetch(apiUrl('/api/notifications/send'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              userId: sellerId,
-              type: 'review',
-              icon: '⭐',
-              title: '⭐ Nouvel avis',
-              body: `${user?.displayName || 'Un client'} a noté votre boutique ${rating}/5`,
-              link: '/seller/dashboard',
-            }),
-          });
-          if (!res.ok) {
-            console.warn('⚠️ Notification vendeur avis : réponse non OK', res.status, await res.text().catch(() => ''));
-          } else {
-            console.log('✅ Notification vendeur avis envoyée');
-          }
-        } catch (notifError) {
-          console.error('Erreur envoi notification avis:', notifError);
-        }
-      } else {
-        console.warn('⚠️ sellerId manquant, notification vendeur non envoyée');
+      if (result.alreadyReviewed) {
+        // Idempotent : un avis existait déjà pour cette commande (retry
+        // réseau, double-tap). Pas une erreur — on informe simplement.
+        alert('Vous avez déjà noté cette commande.');
+        router.push('/account/orders');
+        return;
       }
+
+      // 🔔 NOTIFICATION VENDEUR : plus besoin d'appel manuel ici. Le
+      // trigger Firestore `notifyNewReview` (functions/src/index.ts) se
+      // déclenche automatiquement dès que submitReview crée le document
+      // dans 'reviews' — un appel manuel en plus aurait doublé la
+      // notification reçue par le vendeur.
 
       // 🔔 NOTIFICATION À L'ADMIN — chaque avis client doit aussi remonter à l'admin
       try {
@@ -160,9 +140,12 @@ function ReviewContent() {
 
       alert('⭐ Merci pour votre avis !');
       router.push('/account/orders');
-    } catch (error) {
-      console.error('Erreur envoi avis:', error);
-      alert('Erreur lors de l\'envoi');
+    } catch (e) {
+      const err = e instanceof ReviewActionError ? e : null;
+      console.error('[saveReview] Échec sur commande', id, {
+        code: err?.code, message: err?.message,
+      });
+      alert(err?.message ?? "Erreur lors de l'envoi");
     } finally {
       setSubmitting(false);
     }
