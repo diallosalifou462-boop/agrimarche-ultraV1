@@ -5,7 +5,7 @@ import { useCart } from '@/hooks/useCart';
 import { useAuth } from '@/hooks/useAuth';
 import { useEffect, useState } from 'react';
 import { collection, getDocs, limit, orderBy, query, where } from 'firebase/firestore';
-import { db, firestoreWarmupPromise } from '@/lib/firebase/firebase';
+import { db, waitForFirestoreReady } from '@/lib/firebase/firebase';
 
 // ⚠️ FIX (cohérence système) : même filet de sécurité que useCart.tsx /
 // userProfile.ts — getDocs() n'a par lui-même aucune limite de temps.
@@ -142,7 +142,7 @@ export default function CartPage() {
         // firebase.ts) — sans ça, cette fonction pouvait rester bloquée
         // exactement comme Produits l'était avant ce correctif, quand
         // l'app est ouverte avec la connexion déjà active.
-        await firestoreWarmupPromise;
+        await waitForFirestoreReady();
         const productsRef = collection(db, 'products');
         const [popularSnap, newSnap] = await withTimeout(Promise.all([
           // ⚠️ FIX : 'salesCount' n'est écrit nulle part dans toute l'app —
