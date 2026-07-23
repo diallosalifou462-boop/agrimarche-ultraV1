@@ -37,7 +37,7 @@
 
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import type { User } from 'firebase/auth';
-import { db, waitForFirestoreReady } from './firebase';
+import { db, waitForFirestoreReady, trace } from './firebase';
 
 // ⚠️ FIX : getDoc()/setDoc() n'ont, par eux-mêmes, aucune limite de temps.
 // Si le réseau est capricieux au cold-start (typique iOS/WKWebView),
@@ -110,18 +110,19 @@ export async function ensureUserExists(user: User): Promise<AppUserProfile> {
       // client is offline", même sur un réseau qui fonctionne très bien,
       // simplement parce que le SDK n'a pas encore eu le temps de confirmer
       // son propre état de connexion en interne.
+      trace('PROFIL', `ensureUserExists(${user.uid}) — attente waitForFirestoreReady()`);
       await waitForFirestoreReady();
 
-      console.log('[ensureUserExists] getDoc users/', user.uid);
+      trace('PROFIL', `getDoc users/${user.uid}`);
       const userRef = doc(db, 'users', user.uid);
       const snap = await getDocWithRetry(userRef);
 
       if (snap.exists()) {
-        console.log('[ensureUserExists] Profil existant trouvé');
+        trace('PROFIL', 'profil existant trouvé');
         return snap.data() as AppUserProfile;
       }
 
-      console.log('[ensureUserExists] Aucun profil, création...');
+      trace('PROFIL', 'aucun profil, création...');
       const now = new Date().toISOString();
       const defaultProfile: AppUserProfile = {
         uid: user.uid,

@@ -1,6 +1,24 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, setPersistence, browserLocalPersistence, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, sendPasswordResetEmail, updateProfile } from 'firebase/auth';
 import { initializeFirestore, onSnapshotsInSync, collection, query, limit, getDocs, doc, getDoc, setDoc, updateDoc, onSnapshot, Timestamp, arrayUnion, arrayRemove, increment, writeBatch } from 'firebase/firestore';
+
+// =====================================================
+// TRACE — journal d'initialisation avec horodatage relatif
+// =====================================================
+// Point de log UNIQUE pour tout tracer (Auth / Firestore / Profil /
+// Produits / Panier) avec un t+Xms commun depuis le chargement du module,
+// pour reconstituer l'ordre RÉEL des événements dans les logs iOS
+// (Safari Web Inspector / console Xcode), et non l'ordre supposé en
+// lisant le code.
+const __traceStart = typeof performance !== 'undefined' ? performance.now() : Date.now();
+export function trace(tag: string, msg: string, extra?: any) {
+  const t = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - __traceStart);
+  if (extra !== undefined) {
+    console.log(`[INIT t+${t}ms] [${tag}] ${msg}`, extra);
+  } else {
+    console.log(`[INIT t+${t}ms] [${tag}] ${msg}`);
+  }
+}
 import { getStorage, uploadBytes, uploadBytesResumable, getDownloadURL, deleteObject } from 'firebase/storage';
 import { getMessaging, getToken, onMessage, isSupported } from 'firebase/messaging';
 import { getAnalytics, isSupported as analyticsIsSupported } from 'firebase/analytics';
@@ -90,25 +108,72 @@ export const db = initializeFirestore(app, {
 // jamais pour une raison quelconque.
 let firestoreReadyPromise: Promise<void> | null = null;
 
+// 🔴 BUG TROUVÉ (trace du 23/07) : `onSnapshotsInSync` se déclenche dès
+// que TOUS les listeners actifs sont synchronisés — et si AUCUN listener
+// n'est encore attaché au moment de l'appel (ce qui est le cas ici, car
+// c'est justement `waitForFirestoreReady()` qu'on utilise pour décider
+// QUAND attacher les listeners), la condition "tout est synchronisé" est
+// trivialement vraie : 0 listener désynchronisé = "en sync". L'événement
+// part donc quasi immédiatement, AVANT que le SDK ait confirmé un état
+// réseau "online" utilisable.
+//
+// Cohérent avec le scénario rapporté : au cold start avec Internet déjà
+// actif, ce déclenchement trivial arrive très vite (souvent avant que le
+// transport long-polling natif ait fini sa poignée de main) →
+// `waitForFirestoreReady()` résout "trop tôt" → tous les `getDoc()` qui
+// s'y fient (ensureUserExists, panier...) partent alors que le SDK n'a
+// pas encore confirmé son état interne "online" → "client is offline".
+// Démarrer hors-ligne puis rallumer Internet évite ce piège car un
+// listener réel (posé une fois Firestore réactivé) existe déjà quand la
+// resynchro survient — l'événement `onSnapshotsInSync` n'est alors plus
+// trivial.
+//
+// FIX : on attache un listener "canari" AVANT de considérer l'événement
+// `onSnapshotsInSync` comme significatif — un `onSnapshot` réel qui doit
+// recevoir au moins un instantané confirmé par le serveur pour compter.
+// Ça ne peut plus se déclencher trivialement.
 export function waitForFirestoreReady(timeoutMs = 5000): Promise<void> {
   if (typeof window === 'undefined') return Promise.resolve();
 
   if (!firestoreReadyPromise) {
+    trace('firestore', 'waitForFirestoreReady() — premier appel, pose du canari');
     firestoreReadyPromise = new Promise<void>((resolve) => {
       let done = false;
+      let canaryGotServerData = false;
       const finish = (reason: string) => {
         if (done) return;
         done = true;
-        console.log(`[firebase] Firestore prêt (${reason})`);
+        trace('firestore', `prêt (${reason})`);
         resolve();
       };
 
-      const timer = setTimeout(() => finish('timeout de sécurité 5s'), timeoutMs);
+      const timer = setTimeout(() => finish(`timeout de sécurité ${timeoutMs}ms`), timeoutMs);
 
-      const unsubscribe = onSnapshotsInSync(db, () => {
+      // Canari : force un vrai aller-retour serveur avant que
+      // `onSnapshotsInSync` puisse être considéré comme fiable.
+      const unsubCanary = onSnapshot(
+        query(collection(db, 'products'), limit(1)),
+        (snap) => {
+          // `fromCache: false` = donnée confirmée par le serveur, pas
+          // juste servie depuis le cache local instantanément.
+          if (!snap.metadata.fromCache) {
+            canaryGotServerData = true;
+          }
+        },
+        (err) => {
+          trace('firestore', 'canari en erreur (ignoré, le timeout prendra le relais)', err?.code || err);
+        },
+      );
+
+      const unsubSync = onSnapshotsInSync(db, () => {
+        if (!canaryGotServerData) {
+          trace('firestore', 'onSnapshotsInSync ignoré (trivial — canari pas encore confirmé serveur)');
+          return;
+        }
         clearTimeout(timer);
-        unsubscribe();
-        finish('onSnapshotsInSync');
+        unsubSync();
+        unsubCanary();
+        finish('onSnapshotsInSync + canari confirmé serveur');
       });
     });
   }

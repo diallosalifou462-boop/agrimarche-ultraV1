@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { collection, onSnapshot, query, where, orderBy, doc, updateDoc, increment, limit } from 'firebase/firestore';
-import { db, waitForFirestoreReady } from '@/lib/firebase/firebase';
+import { db, waitForFirestoreReady, trace } from '@/lib/firebase/firebase';
 import { logEvent } from 'firebase/analytics';
 import { analytics } from '@/lib/firebase/firebase';
 import { useCart } from '@/hooks/useCart';
@@ -250,9 +250,12 @@ export default function AgriMarket() {
     let cancelled = false;
     let unsubscribe: (() => void) | undefined;
 
+    trace('PRODUITS', 'page montée — attente waitForFirestoreReady()');
     waitForFirestoreReady().then(() => {
       if (cancelled) return;
+      trace('PRODUITS', 'waitForFirestoreReady() résolu — pose du listener principal');
       unsubscribe = onSnapshot(query(collection(db, 'products'), limit(pageLimit)), snap => {
+        trace('PRODUITS', `onSnapshot déclenché — ${snap.docs.length} doc(s), fromCache=${snap.metadata.fromCache}`);
         const d = snap.docs.map(doc => ({ id: doc.id, ...doc.data() })) as ProductData[];
         setProducts(d); setFiltered(d);
         setProductsLoaded(true);

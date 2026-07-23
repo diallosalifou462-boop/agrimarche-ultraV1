@@ -3,15 +3,37 @@
 import Image from 'next/image';
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { onAuthStateChanged } from 'firebase/auth';
-import { auth } from '@/lib/firebase/firebase';
-import { ensureUserExists } from '@/lib/firebase/userProfile';
+import { useAuth } from '@/hooks/useAuth';
+import { trace } from '@/lib/firebase/firebase';
 
+// 🔴 BUG TROUVÉ (trace du 23/07) : ce Splash avait SON PROPRE
+// `onAuthStateChanged` + son propre appel `ensureUserExists()`,
+// complètement indépendant de celui d'`AuthContext.tsx` (qui se
+// présente pourtant comme "la source unique", voir son commentaire
+// d'en-tête). Les deux listeners réagissent au même événement Firebase,
+// mais PAS FORCÉMENT DANS LE MÊME ORDRE — et surtout, ce Splash
+// naviguait (`router.push`) dès qu'IL était prêt, sans jamais attendre
+// que `AuthContext.loading` passe à `false`.
+//
+// Conséquence : la page `/main/products` peut monter alors que
+// `AuthContext` (donc `useAuth().user`/`.profile`, donc `CartProvider`
+// qui dépend de `authLoading`) est ENCORE en train de se résoudre en
+// arrière-plan. Le produit/panier/profil affichés à ce moment-là sont
+// alors ceux d'un état transitoire (souvent "invité"), pas l'état final
+// — exactement le symptôme "compte mal initialisé / panier incorrect"
+// rapporté, et un pur problème de course entre deux listeners Auth
+// redondants, indépendant du réseau lui-même.
+//
+// FIX : le Splash n'a plus SA PROPRE source de vérité Auth. Il consomme
+// le `AuthContext` partagé (unique listener réel dans toute l'app) et
+// attend que `loading === false` avant de décider où naviguer.
 export default function SplashPage() {
   const router = useRouter();
+  const { user, profile, loading: authLoading, authDebugInfo } = useAuth();
   const [progress, setProgress] = useState(0);
 
   useEffect(() => {
+    trace('SPLASH', 'monté — en attente de AuthContext.loading === false');
     // ✅ Progression visuelle rapide (termine avant la redirection)
     const progressInterval = setInterval(() => {
       setProgress((prev) => {
@@ -22,79 +44,50 @@ export default function SplashPage() {
         return prev + 8;
       });
     }, 45);
+    return () => clearInterval(progressInterval);
+  }, []);
 
-    // ✅ Redirection selon le rôle, dès que l'auth est résolue
+  useEffect(() => {
     let redirected = false;
     const safeRedirect = (path: string, reason: string) => {
       if (redirected) return;
       redirected = true;
-      console.log(`[Splash] Redirection vers ${path} (${reason})`);
+      trace('SPLASH', `redirection vers ${path} (${reason})`);
       router.push(path);
     };
 
-    // Filet de sécurité ABSOLU : quoi qu'il arrive (promesse qui ne
-    // résout ni ne rejette jamais, erreur non prévue, etc.), on ne
-    // reste jamais bloqué plus de 5s sur le splash.
+    // Filet de sécurité ABSOLU : si AuthContext ne résout jamais
+    // `loading` (déjà protégé par son propre failsafe de 8s), on ne
+    // reste jamais bloqué plus de 9s sur le splash.
     const failsafeTimer = setTimeout(() => {
-      console.error('[Splash] Timeout de sécurité déclenché (5s) — redirection forcée');
+      console.error('[Splash] Timeout de sécurité déclenché (9s) — redirection forcée');
       safeRedirect('/main/products', 'failsafe timeout');
-    }, 5000);
+    }, 9000);
 
-    // ⚠️ FIX : la vérification d'authentification démarre maintenant
-    // IMMÉDIATEMENT au montage. Avant, un `setTimeout(..., 1200)` retardait
-    // volontairement son démarrage — un délai artificiel qui s'ajoutait à la
-    // vraie latence réseau/Firestore et rendait le lancement de l'app plus
-    // lent qu'il ne devait l'être, sans aucun bénéfice pour l'utilisateur.
-    console.log('[Splash] Démarrage de la vérification auth (onAuthStateChanged)');
-    let unsubscribe: (() => void) | null = null;
-    unsubscribe = onAuthStateChanged(
-      auth,
-      async (firebaseUser) => {
-        try {
-          console.log('[Splash] onAuthStateChanged déclenché, user =', firebaseUser?.uid ?? 'null');
-          unsubscribe?.(); // on ne veut réagir qu'une seule fois ici
+    if (authLoading) {
+      trace('SPLASH', 'AuthContext encore en chargement, on attend...', { authDebugInfo });
+      return () => clearTimeout(failsafeTimer);
+    }
 
-          if (!firebaseUser) {
-            safeRedirect('/main/products', 'non connecté');
-            return;
-          }
+    trace('SPLASH', `AuthContext prêt — user=${user?.uid ?? 'null'}, role=${profile?.role ?? 'n/a'}`);
 
-          console.log('[Splash] Appel ensureUserExists()...');
-          const profile = await ensureUserExists(firebaseUser);
-          console.log('[Splash] Profil récupéré, role =', profile.role);
-          const role = profile.role || 'client';
+    if (!user) {
+      safeRedirect('/main/products', 'non connecté');
+    } else {
+      const role = profile?.role || 'client';
+      if (role === 'admin') {
+        safeRedirect('/admin', 'role admin');
+      } else if (role === 'seller') {
+        safeRedirect('/seller/dashboard', 'role seller');
+      } else if (role === 'delivery') {
+        safeRedirect('/delivery/dashboard', 'role delivery');
+      } else {
+        safeRedirect('/main/products', 'role client');
+      }
+    }
 
-          if (role === 'admin') {
-            safeRedirect('/admin', 'role admin');
-          } else if (role === 'seller') {
-            safeRedirect('/seller/dashboard', 'role seller');
-          } else if (role === 'delivery') {
-            safeRedirect('/delivery/dashboard', 'role delivery');
-          } else {
-            safeRedirect('/main/products', 'role client');
-          }
-        } catch (error) {
-          // ✅ FIX CRITIQUE : sans ce catch, une erreur ici (Firestore,
-          // réseau, permissions...) laissait l'app bloquée indéfiniment
-          // sur le splash, car router.push() n'était jamais atteint.
-          console.error('[Splash] Erreur pendant ensureUserExists()/redirection:', error);
-          safeRedirect('/main/products', 'erreur récupérée (voir logs)');
-        }
-      },
-      (error) => {
-        // Erreur du listener onAuthStateChanged lui-même (rare, mais
-        // possible : mauvaise config Firebase, réseau down, etc.)
-        console.error('[Splash] Erreur onAuthStateChanged (listener):', error);
-        safeRedirect('/main/products', 'erreur listener auth');
-      },
-    );
-
-    return () => {
-      clearTimeout(failsafeTimer);
-      clearInterval(progressInterval);
-      unsubscribe?.();
-    };
-  }, [router]);
+    return () => clearTimeout(failsafeTimer);
+  }, [router, user, profile, authLoading, authDebugInfo]);
 
   return (
     <div className="relative min-h-screen bg-green-50 flex flex-col items-center justify-center p-6 overflow-hidden">
