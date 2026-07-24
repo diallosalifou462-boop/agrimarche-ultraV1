@@ -15,7 +15,7 @@ import { getFunctions, httpsCallable, HttpsCallableResult } from 'firebase/funct
 import { app } from '@/lib/firebase/firebase';
 import { callWithRetry } from '@/lib/callWithRetry';
 
-const functions = getFunctions(app, 'europe-west1'); // meme region que updateOrderStatus
+const functions = getFunctions(app, 'us-central1'); // meme region que toutes les Cloud Functions (functions/src/index.ts)
 
 interface SubmitReviewRequest {
   orderId: string;

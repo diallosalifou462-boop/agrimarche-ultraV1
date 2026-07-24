@@ -11,13 +11,32 @@ import { initializeFirestore, onSnapshotsInSync, collection, query, limit, getDo
 // (Safari Web Inspector / console Xcode), et non l'ordre supposé en
 // lisant le code.
 const __traceStart = typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+// Buffer en mémoire des N derniers logs, pour l'overlay de debug in-app
+// (utile sans Mac/Safari Web Inspector — on ne peut pas lire la console
+// native autrement facilement).
+const TRACE_BUFFER_MAX = 200;
+export const traceBuffer: string[] = [];
+type TraceListener = (line: string) => void;
+const traceListeners: TraceListener[] = [];
+export function onTrace(listener: TraceListener) {
+  traceListeners.push(listener);
+  return () => {
+    const i = traceListeners.indexOf(listener);
+    if (i >= 0) traceListeners.splice(i, 1);
+  };
+}
+
 export function trace(tag: string, msg: string, extra?: any) {
   const t = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - __traceStart);
-  if (extra !== undefined) {
-    console.log(`[INIT t+${t}ms] [${tag}] ${msg}`, extra);
-  } else {
-    console.log(`[INIT t+${t}ms] [${tag}] ${msg}`);
-  }
+  const line = extra !== undefined
+    ? `[INIT t+${t}ms] [${tag}] ${msg} ${(() => { try { return JSON.stringify(extra); } catch { return String(extra); } })()}`
+    : `[INIT t+${t}ms] [${tag}] ${msg}`;
+
+  console.log(line);
+  traceBuffer.push(line);
+  if (traceBuffer.length > TRACE_BUFFER_MAX) traceBuffer.shift();
+  traceListeners.forEach((l) => l(line));
 }
 import { getStorage, uploadBytes, uploadBytesResumable, getDownloadURL, deleteObject } from 'firebase/storage';
 import { getMessaging, getToken, onMessage, isSupported } from 'firebase/messaging';

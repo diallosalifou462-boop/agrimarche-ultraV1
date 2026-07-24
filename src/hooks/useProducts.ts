@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { collection, query, getDocs, where, orderBy, limit, startAfter } from 'firebase/firestore';
-import { db } from '@/lib/firebase/firebase';
+import { db, waitForFirestoreReady } from '@/lib/firebase/firebase';
 
 export function useProducts(filters: any = {}) {
   const [products, setProducts] = useState<any[]>([]);
@@ -14,6 +14,8 @@ export function useProducts(filters: any = {}) {
   const loadProducts = useCallback(async () => {
     setLoading(true);
     try {
+      await waitForFirestoreReady();
+
       let q = query(collection(db, 'products'), orderBy('createdAt', 'desc'), limit(20));
       
       // Ajouter des filtres si nécessaire
@@ -45,6 +47,8 @@ export function useProducts(filters: any = {}) {
     
     setLoading(true);
     try {
+      await waitForFirestoreReady();
+
       let q = query(collection(db, 'products'), orderBy('createdAt', 'desc'), startAfter(lastDoc), limit(20));
       
       if (filters.category) {

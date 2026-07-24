@@ -92,8 +92,11 @@ export default function SplashPage() {
   return (
     <div className="relative min-h-screen bg-green-50 flex flex-col items-center justify-center p-6 overflow-hidden">
 
-      {/* LOGO — plus petit, discret */}
-      <div className="relative z-10">
+      {/* LOGO — plus petit, discret. Tap x5 = ouvre l'overlay de debug */}
+      <div
+        className="relative z-10"
+        onClick={() => (window as any).__debugTraceTap?.()}
+      >
         <Image
           src="/logo.png"
           alt="Agrimarché"
