@@ -33,7 +33,15 @@ workflows:
 
       - name: Build web
         script: |
-          npm run build
+          # ⚠️ FIX CRITIQUE : `next.config.js` n'active `output: 'export'`
+          # (génération du dossier `out/` que Capacitor embarque via
+          # `webDir: 'out'`) QUE si CAPACITOR_BUILD=true. Sans cette
+          # variable, `npm run build` construisait en mode serveur normal
+          # et `out/` n'était JAMAIS régénéré par ce pipeline CI —
+          # `cap sync` recopiait alors un `out/` périmé à chaque build,
+          # déconnecté du code source réel, quels que soient les
+          # correctifs appliqués dans le code.
+          CAPACITOR_BUILD=true npm run build
 
       - name: Sync Capacitor
         script: |
