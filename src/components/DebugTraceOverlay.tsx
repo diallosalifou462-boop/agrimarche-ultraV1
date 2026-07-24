@@ -7,32 +7,16 @@ import { traceBuffer, onTrace } from '@/lib/firebase/firebase';
 // l'écran, avec un bouton "copier". Pensé pour tester sur un iPhone sans
 // Mac à disposition (donc sans accès à Safari Web Inspector).
 //
-// Activation : taper 5 fois sur le logo du splash en moins de 3s.
-// Se ferme avec le bouton "Fermer".
+// ⚠️ v2 SIMPLIFIÉE : la v1 utilisait un geste "taper 5 fois" (sur le logo
+// du splash ou une zone invisible en coin d'écran), qui s'est révélé peu
+// fiable en usage réel (splash trop rapide, zone difficile à cibler avec
+// opacity quasi nulle, pont via window.__debugTraceTap fragile). Remplacé
+// par un simple bouton "DEBUG" toujours visible — un seul tap, zéro
+// ambiguïté sur "est-ce que ça a bien enregistré le tap ou pas".
 export default function DebugTraceOverlay() {
   const [visible, setVisible] = useState(false);
   const [lines, setLines] = useState<string[]>([]);
   const [copied, setCopied] = useState(false);
-  const [tapCount, setTapCount] = useState(0);
-
-  useEffect(() => {
-    if (tapCount === 0) return;
-    const timer = setTimeout(() => setTapCount(0), 3000);
-    if (tapCount >= 5) {
-      setVisible(true);
-      setTapCount(0);
-    }
-    return () => clearTimeout(timer);
-  }, [tapCount]);
-
-  useEffect(() => {
-    // Expose un handler global pour que le logo du splash (ou n'importe
-    // quel autre écran) puisse déclencher les taps sans prop-drilling.
-    (window as any).__debugTraceTap = () => setTapCount((c) => c + 1);
-    return () => {
-      delete (window as any).__debugTraceTap;
-    };
-  }, []);
 
   useEffect(() => {
     if (!visible) return;
@@ -42,27 +26,6 @@ export default function DebugTraceOverlay() {
     });
     return unsub;
   }, [visible]);
-
-  if (!visible) {
-    // Zone de tap x5 toujours accessible (coin bas-droit, quasi invisible)
-    // — utile une fois passé le splash, qui défile trop vite pour y taper.
-    // Ce composant est bien 'use client', donc onClick y est valide
-    // (contrairement à layout.tsx qui est un Server Component).
-    return (
-      <div
-        onClick={() => setTapCount((c) => c + 1)}
-        style={{
-          position: 'fixed',
-          bottom: 0,
-          right: 0,
-          width: 44,
-          height: 44,
-          zIndex: 99998,
-          opacity: 0.01,
-        }}
-      />
-    );
-  }
 
   const fullText = lines.join('\n');
 
@@ -76,6 +39,31 @@ export default function DebugTraceOverlay() {
       setCopied(false);
     }
   };
+
+  if (!visible) {
+    return (
+      <button
+        onClick={() => setVisible(true)}
+        style={{
+          position: 'fixed',
+          bottom: 16,
+          right: 16,
+          zIndex: 99998,
+          background: '#111',
+          color: '#0f0',
+          border: '1px solid #0f0',
+          borderRadius: 20,
+          padding: '8px 14px',
+          fontFamily: 'monospace',
+          fontSize: 12,
+          fontWeight: 'bold',
+          opacity: 0.85,
+        }}
+      >
+        DEBUG ({traceBuffer.length})
+      </button>
+    );
+  }
 
   return (
     <div
