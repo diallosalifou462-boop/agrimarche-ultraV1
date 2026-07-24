@@ -58,14 +58,30 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 // lancé après confirmation de synchronisation peut retomber sur "client
 // is offline" si la connexion vient de retomber entre-temps. On retente
 // alors 2 fois avec un court délai avant d'abandonner pour de bon.
+// ⚠️ FIX (asymétrie de retry — cause de l'incohérence compte/panier vs
+// produits sur iOS) : `waitForFirestoreReady()` a un filet de sécurité
+// fixe de 5s qui résout "prêt" même si le SDK n'a pas RÉELLEMENT confirmé
+// être en ligne (cold start iOS avec réseau déjà actif, négociation
+// long-polling qui peut prendre 6-10s sur un réseau mobile instable).
+// Avec seulement 3 tentatives et un backoff court (~1.5s cumulés), ce
+// getDoc() abandonnait donc définitivement AVANT que Firestore ait
+// vraiment fini sa poignée de main — contrairement au listener produits
+// (src/app/main/products/page.tsx) qui retente indéfiniment et finit
+// toujours par réussir. D'où le compte/panier qui restaient bloqués sur un
+// état par défaut/obsolète alors que les produits finissaient par charger.
+// On aligne ce retry sur le même principe : backoff exponentiel plafonné,
+// beaucoup plus de tentatives, pour laisser le temps réel nécessaire au
+// SDK sans jamais bloquer indéfiniment (plafond ~8s par tentative, 8
+// tentatives max ≈ jusqu'à ~45s cumulés dans le pire cas réseau).
 async function getDocWithRetry(userRef: ReturnType<typeof doc>, attempt = 1): Promise<Awaited<ReturnType<typeof getDoc>>> {
   try {
     return await withTimeout(getDoc(userRef), 8000, `getDoc (essai ${attempt})`);
   } catch (error: any) {
     const isOffline = error?.code === 'unavailable' || /offline/i.test(error?.message ?? '');
-    if (isOffline && attempt < 3) {
-      console.warn(`[ensureUserExists] getDoc hors-ligne, nouvel essai dans ${attempt * 500}ms...`);
-      await new Promise((r) => setTimeout(r, attempt * 500));
+    if (isOffline && attempt < 8) {
+      const delay = Math.min(1000 * 2 ** attempt, 8000);
+      console.warn(`[ensureUserExists] getDoc hors-ligne, nouvel essai dans ${delay}ms... (essai ${attempt})`);
+      await new Promise((r) => setTimeout(r, delay));
       return getDocWithRetry(userRef, attempt + 1);
     }
     throw error;

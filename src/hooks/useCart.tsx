@@ -58,7 +58,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   ]);
 }
 
-// 🔴 BUG TROUVÉ : contrairement à ensureUserExists() (src/lib/firebase/
+// 🔴 BUG TROUVÉ (v1) : contrairement à ensureUserExists() (src/lib/firebase/
 // userProfile.ts), ce getDoc() sur `carts/{uid}` ne faisait NI
 // `await waitForFirestoreReady()` avant de lire, NI retry en cas de
 // "client is offline". Résultat : au cold start avec Internet déjà actif,
@@ -69,14 +69,26 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 // c'est-à-dire l'ancien panier local, potentiellement obsolète/vide,
 // jamais fusionné avec Firestore. D'où "panier incorrect" observé
 // uniquement dans ce scénario précis.
+//
+// ⚠️ FIX (v2 — asymétrie de retry) : `waitForFirestoreReady()` a un filet
+// de sécurité fixe de 5s qui résout "prêt" même si le SDK n'a pas
+// RÉELLEMENT confirmé être en ligne (négociation long-polling iOS qui peut
+// prendre 6-10s sur un réseau mobile instable au cold start). Le retry
+// ci-dessous n'avait que 3 tentatives à backoff court (~1.5s cumulés) :
+// il abandonnait donc définitivement AVANT que Firestore ait vraiment fini
+// sa poignée de main — contrairement au listener produits
+// (src/app/main/products/page.tsx) qui retente indéfiniment et finit
+// toujours par réussir. On aligne ce retry sur le même principe : backoff
+// exponentiel plafonné, beaucoup plus de tentatives.
 async function getCartDocWithRetry(userId: string, attempt = 1): Promise<Awaited<ReturnType<typeof getDoc>>> {
   try {
     return await withTimeout(getDoc(doc(db, 'carts', userId)), 8000, `getDoc carts (essai ${attempt})`);
   } catch (error: any) {
     const isOffline = error?.code === 'unavailable' || /offline/i.test(error?.message ?? '');
-    if (isOffline && attempt < 3) {
-      trace('PANIER', `getDoc carts hors-ligne, nouvel essai dans ${attempt * 500}ms...`);
-      await new Promise((r) => setTimeout(r, attempt * 500));
+    if (isOffline && attempt < 8) {
+      const delay = Math.min(1000 * 2 ** attempt, 8000);
+      trace('PANIER', `getDoc carts hors-ligne, nouvel essai dans ${delay}ms... (essai ${attempt})`);
+      await new Promise((r) => setTimeout(r, delay));
       return getCartDocWithRetry(userId, attempt + 1);
     }
     throw error;
