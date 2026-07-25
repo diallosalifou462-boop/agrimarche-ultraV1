@@ -16,7 +16,7 @@ import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 import { getMessaging, getToken, onMessage, isSupported } from 'firebase/messaging';
 import { Capacitor } from '@capacitor/core';
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
-import { auth, db, waitForFirestoreReady } from '@/lib/firebase/firebase';
+import { auth, db, waitForFirestoreReady, trace } from '@/lib/firebase/firebase';
 import { ensureUserExists } from '@/lib/firebase/userProfile';
 
 // =====================================================
@@ -130,34 +130,41 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // ─── Chargement profil Firestore ──────────────────────
   const fetchUserProfile = async (uid: string, email: string | null) => {
+    trace('AUTH', `fetchUserProfile(${uid}) — début`);
     try {
       if (suppressAutoProfileRef.current) {
+        trace('AUTH', 'fetchUserProfile — branche signUp en cours, attente Firestore');
         await waitForFirestoreReady();
         const userRef = doc(db, 'users', uid);
         const userSnap = await getDoc(userRef);
         setProfile(userSnap.exists() ? userSnap.data() : null);
+        trace('PROFIL', 'profil chargé (branche signUp)');
         return;
       }
 
       const currentUser = auth.currentUser;
       if (!currentUser || currentUser.uid !== uid) {
+        trace('AUTH', 'fetchUserProfile abandonné — currentUser ne correspond plus à uid');
         return;
       }
 
       const profile = await ensureUserExists(currentUser);
       setProfile(profile);
+      trace('PROFIL', `profil chargé, role=${profile?.role}`);
     } catch (error) {
       console.error('Erreur chargement profil:', error);
+      trace('PROFIL', 'ÉCHEC chargement profil', (error as Error)?.message || error);
     }
   };
 
   useEffect(() => {
-    console.log('[AuthContext] Abonnement à onAuthStateChanged (source unique)...');
+    trace('AUTH', 'AuthProvider monté — abonnement à onAuthStateChanged (source unique)');
 
     // 🔎 Sur natif, le plugin @capacitor-firebase/authentication ne
     // synchronise la session vers le SDK JS (`onAuthStateChanged`) qu'en
     // réaction à un appel explicite. On force cette synchro dès le montage.
     if (Capacitor.isNativePlatform()) {
+      trace('AUTH', 'natif détecté — appel FirebaseAuthentication.getCurrentUser() pour forcer la resynchro');
       FirebaseAuthentication.getCurrentUser().catch((err) => {
         console.error('[AuthContext] Échec resynchro native → JS SDK:', err);
       });
@@ -178,7 +185,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       settled = true;
       clearTimeout(failsafe);
       setAuthDebugInfo('');
-      console.log('[AuthContext] onAuthStateChanged déclenché, user =', firebaseUser?.uid ?? 'null');
+      trace('AUTH', `onAuthStateChanged déclenché, user=${firebaseUser?.uid ?? 'null'}`);
       setUser(firebaseUser);
 
       if (firebaseUser) {
@@ -198,6 +205,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setProfile(null);
       }
 
+      trace('AUTH', 'loading=false — AuthContext considéré comme prêt');
       setLoading(false);
     }, (authErr) => {
       settled = true;

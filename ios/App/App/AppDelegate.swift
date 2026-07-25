@@ -7,6 +7,14 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+        // ⚠️ FIX (v2) : FirebaseApp.configure() direct pouvait lever une
+        // NSException incapturable en Swift ("Default app has already been
+        // configured"), à cause d'une race condition connue du SDK Firebase
+        // iOS 26+ entre plugins Capacitor Firebase (auth + messaging) qui
+        // s'auto-configurent chacun de leur côté. Voir
+        // App/FirebaseSafeConfigure.h pour le détail. On utilise maintenant
+        // un wrapper Objective-C qui absorbe cette exception en toute sécurité.
+        SafeFirebaseConfigure()
         // Override point for customization after application launch.
         return true
     }

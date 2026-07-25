@@ -21,7 +21,7 @@ import { getFunctions, httpsCallable, HttpsCallableResult } from 'firebase/funct
 import { app } from '@/lib/firebase/firebase';
 import { callWithRetry } from '@/lib/callWithRetry';
 
-const functions = getFunctions(app, 'europe-west1'); // même région que la Cloud Function
+const functions = getFunctions(app, 'us-central1'); // même région que toutes les Cloud Functions (functions/src/index.ts)
 
 type ClientAction = 'confirm_delivery' | 'cancel';
 

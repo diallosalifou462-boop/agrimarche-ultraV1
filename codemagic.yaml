@@ -33,7 +33,17 @@ workflows:
 
       - name: Build web
         script: |
-          npm run build
+          set -e
+          echo "###### MARQUEUR-DIAGNOSTIC-V3 : ce script Build web vient bien du codemagic.yaml actuel ######"
+          # ⚠️ FIX (v2) : `output: 'export'` refuse les routes API — il faut
+          # utiliser le script dédié qui déplace temporairement api/ hors
+          # de app/ (ou src/app/), nettoie .next, build avec
+          # CAPACITOR_BUILD=true, puis restaure api/. Un simple
+          # `CAPACITOR_BUILD=true npm run build` ne suffit pas : sans le
+          # déplacement de api/, `next build` en mode export aurait échoué
+          # avec une erreur explicite — ou, comme observé, n'activait tout
+          # simplement jamais le mode export du tout.
+          npm run build:capacitor
 
       - name: Sync Capacitor
         script: |
@@ -74,8 +84,19 @@ workflows:
             -exportPath build/ios/ipa \
             -exportOptionsPlist "$HOME/export_options.plist"
 
+      - name: Zip dSYMs (diagnostic)
+        script: |
+          set -e
+          # Nécessaire pour symboliser précisément les crash logs iOS —
+          # sans ça, impossible d'obtenir les noms de fonctions/lignes de
+          # code exactes à partir des adresses mémoire brutes.
+          mkdir -p build/ios/dsyms
+          cp -R "$HOME/build/App.xcarchive/dSYMs" build/ios/dsyms/ || echo "Aucun dossier dSYMs trouvé"
+          cd build/ios/dsyms && zip -r ../dsyms.zip . && cd -
+
     artifacts:
       - build/ios/ipa/*.ipa
+      - build/ios/dsyms.zip
       - /tmp/xcodebuild_logs/*.log
 
     publishing:
