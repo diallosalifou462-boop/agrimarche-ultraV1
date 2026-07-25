@@ -92,6 +92,31 @@ export default function SplashPage() {
   return (
     <div className="relative min-h-screen bg-green-50 flex flex-col items-center justify-center p-6 overflow-hidden">
 
+      {/* 🧪 BANDEAU CANARI — TEMPORAIRE, À RETIRER UNE FOIS LE PIPELINE
+          CODEMAGIC CONFIRMÉ OK. Sert uniquement à vérifier que le build
+          installé sur le téléphone correspond bien au code actuel du
+          repo. Si ce bandeau rouge n'apparaît pas du tout à l'écran une
+          fois l'app relancée, aucun changement de code n'atteint le
+          téléphone — le problème est dans le pipeline de build/déploiement
+          (Codemagic / TestFlight), pas dans le code. */}
+      <div
+        style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          background: 'red',
+          color: 'white',
+          fontSize: 20,
+          fontWeight: 'bold',
+          padding: '16px 12px',
+          zIndex: 999999,
+          textAlign: 'center',
+        }}
+      >
+        TEST-{new Date().toISOString()}
+      </div>
+
       {/* LOGO */}
       <div className="relative z-10">
         <Image

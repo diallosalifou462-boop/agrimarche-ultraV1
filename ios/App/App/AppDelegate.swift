@@ -1,6 +1,5 @@
 import UIKit
 import Capacitor
-import FirebaseCore
 
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -8,14 +7,14 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // 🔴 BUG TROUVÉ : FirebaseApp.configure() n'était jamais appelé.
-        // @capacitor-firebase/authentication est un plugin NATIF (pas juste
-        // le SDK JS Firebase) qui a besoin qu'une FirebaseApp par défaut
-        // existe avant tout appel natif à Firebase Auth. Sans ça, toute
-        // action d'authentification (connexion, création de compte,
-        // déconnexion) plante immédiatement en Swift — exactement le crash
-        // EXC_BREAKPOINT/SIGTRAP observé dans les logs iOS.
-        FirebaseApp.configure()
+        // ⚠️ FIX (v2) : FirebaseApp.configure() direct pouvait lever une
+        // NSException incapturable en Swift ("Default app has already been
+        // configured"), à cause d'une race condition connue du SDK Firebase
+        // iOS 26+ entre plugins Capacitor Firebase (auth + messaging) qui
+        // s'auto-configurent chacun de leur côté. Voir
+        // App/FirebaseSafeConfigure.h pour le détail. On utilise maintenant
+        // un wrapper Objective-C qui absorbe cette exception en toute sécurité.
+        SafeFirebaseConfigure()
         // Override point for customization after application launch.
         return true
     }
