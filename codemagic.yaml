@@ -34,6 +34,7 @@ workflows:
       - name: Build web
         script: |
           set -e
+          echo "###### MARQUEUR-DIAGNOSTIC-V3 : ce script Build web vient bien du codemagic.yaml actuel ######"
           # ⚠️ FIX (v2) : `output: 'export'` refuse les routes API — il faut
           # utiliser le script dédié qui déplace temporairement api/ hors
           # de app/ (ou src/app/), nettoie .next, build avec
