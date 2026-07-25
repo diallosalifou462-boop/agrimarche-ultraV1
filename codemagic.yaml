@@ -84,8 +84,19 @@ workflows:
             -exportPath build/ios/ipa \
             -exportOptionsPlist "$HOME/export_options.plist"
 
+      - name: Zip dSYMs (diagnostic)
+        script: |
+          set -e
+          # Nécessaire pour symboliser précisément les crash logs iOS —
+          # sans ça, impossible d'obtenir les noms de fonctions/lignes de
+          # code exactes à partir des adresses mémoire brutes.
+          mkdir -p build/ios/dsyms
+          cp -R "$HOME/build/App.xcarchive/dSYMs" build/ios/dsyms/ || echo "Aucun dossier dSYMs trouvé"
+          cd build/ios/dsyms && zip -r ../dsyms.zip . && cd -
+
     artifacts:
       - build/ios/ipa/*.ipa
+      - build/ios/dsyms.zip
       - /tmp/xcodebuild_logs/*.log
 
     publishing:
