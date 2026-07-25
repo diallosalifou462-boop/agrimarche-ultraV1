@@ -1,5 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: CORS_HEADERS });
+}
+
 function toE164Senegal(raw: string): string | null {
   if (!raw) return null;
 
@@ -36,7 +46,7 @@ export async function POST(req: NextRequest) {
     if (!to || !message) {
       return NextResponse.json(
         { error: 'Paramètres manquants' },
-        { status: 400 }
+        { status: 400, headers: CORS_HEADERS }
       );
     }
 
@@ -62,7 +72,7 @@ export async function POST(req: NextRequest) {
           error:
             'AFRICASTALKING_USERNAME ou AFRICASTALKING_API_KEY manquant dans .env.local',
         },
-        { status: 500 }
+        { status: 500, headers: CORS_HEADERS }
       );
     }
 
@@ -71,7 +81,7 @@ export async function POST(req: NextRequest) {
     if (!phone) {
       return NextResponse.json(
         { error: 'Numéro invalide' },
-        { status: 400 }
+        { status: 400, headers: CORS_HEADERS }
       );
     }
 
@@ -98,7 +108,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       success: true,
       result,
-    });
+    }, { headers: CORS_HEADERS });
   } catch (error: any) {
     console.error('SMS ERROR:', error);
 
@@ -106,7 +116,7 @@ export async function POST(req: NextRequest) {
       {
         error: error?.message || 'Erreur serveur',
       },
-      { status: 500 }
+      { status: 500, headers: CORS_HEADERS }
     );
   }
 }
