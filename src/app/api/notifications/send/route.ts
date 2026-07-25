@@ -47,6 +47,21 @@ const resend = process.env.RESEND_API_KEY
   ? new Resend(process.env.RESEND_API_KEY)
   : null;
 
+// ── CORS ──────────────────────────────────────────────────────────────────
+// Cette route est appelée depuis le client via apiUrl(), qui pointe vers une
+// URL absolue (agrimarche-ultra-v1.vercel.app) dès qu'on n'est pas sur
+// localhost — y compris depuis les URLs de preview Vercel, qui sont une
+// origine différente. Sans CORS, le navigateur bloque au preflight.
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: CORS_HEADERS });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/notifications/send
 //
@@ -66,7 +81,7 @@ export async function POST(request: NextRequest) {
     if (!userId || !title || !body) {
       return NextResponse.json(
         { success: false, error: 'userId, title et body sont requis' },
-        { status: 400 }
+        { status: 400, headers: CORS_HEADERS }
       );
     }
 
@@ -80,7 +95,7 @@ export async function POST(request: NextRequest) {
     const userData  = userSnap.data();
 
     if (!userData) {
-      return NextResponse.json({ success: false, error: 'Utilisateur introuvable' }, { status: 404 });
+      return NextResponse.json({ success: false, error: 'Utilisateur introuvable' }, { status: 404, headers: CORS_HEADERS });
     }
 
     const userEmail  : string | undefined = userData.email;
@@ -273,13 +288,13 @@ export async function POST(request: NextRequest) {
 
     console.log(`[notifications] userId=${userId}`, results);
 
-    return NextResponse.json({ success: true, results });
+    return NextResponse.json({ success: true, results }, { headers: CORS_HEADERS });
 
   } catch (error: any) {
     console.error('[notifications] Erreur globale:', error);
     return NextResponse.json(
       { success: false, error: error.message || 'Erreur interne' },
-      { status: 500 }
+      { status: 500, headers: CORS_HEADERS }
     );
   }
 }
@@ -364,5 +379,5 @@ function buildEmailHtml({
 }
 
 export async function GET() {
-  return NextResponse.json({ message: 'API notifications en ligne. Utilisez POST.' });
+  return NextResponse.json({ message: 'API notifications en ligne. Utilisez POST.' }, { headers: CORS_HEADERS });
 }

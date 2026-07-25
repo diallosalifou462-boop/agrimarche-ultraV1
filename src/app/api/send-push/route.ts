@@ -5,6 +5,24 @@ import { getFirestore } from "firebase-admin/firestore";
 import type { Firestore } from "firebase-admin/firestore";
 
 // ============================================================
+// CORS
+// Cette route est appelée depuis les URLs de preview Vercel
+// (ex: agrimarche-ultra-v1-xxxxx.vercel.app), qui sont des origines
+// différentes du domaine de production. Sans ces en-têtes, le
+// navigateur bloque la requête au niveau du preflight (OPTIONS)
+// avant même qu'elle n'atteigne ce handler.
+// ============================================================
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: CORS_HEADERS });
+}
+
+// ============================================================
 // FIREBASE ADMIN - Initialisation différée
 // ============================================================
 function getAdminApp() {
@@ -76,7 +94,7 @@ export async function POST(req: NextRequest) {
     const payload = await req.json().catch(() => null);
 
     if (!payload) {
-      return NextResponse.json({ error: "Corps de requête invalide" }, { status: 400 });
+      return NextResponse.json({ error: "Corps de requête invalide" }, { status: 400, headers: CORS_HEADERS });
     }
 
     const { tokens, title, body, deepLink, urgent, icon } = payload as {
@@ -89,13 +107,13 @@ export async function POST(req: NextRequest) {
     };
 
     if (!Array.isArray(tokens) || tokens.length === 0) {
-      return NextResponse.json({ error: "Aucun token FCM fourni" }, { status: 400 });
+      return NextResponse.json({ error: "Aucun token FCM fourni" }, { status: 400, headers: CORS_HEADERS });
     }
     if (tokens.length > 500) {
-      return NextResponse.json({ error: "Maximum 500 tokens par requête (limite FCM multicast)" }, { status: 400 });
+      return NextResponse.json({ error: "Maximum 500 tokens par requête (limite FCM multicast)" }, { status: 400, headers: CORS_HEADERS });
     }
     if (!title || !body) {
-      return NextResponse.json({ error: "Titre et message requis" }, { status: 400 });
+      return NextResponse.json({ error: "Titre et message requis" }, { status: 400, headers: CORS_HEADERS });
     }
 
     // ── Construction du message multicast ──────────────────
@@ -161,16 +179,19 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    return NextResponse.json({
-      successCount: response.successCount,
-      failureCount: response.failureCount,
-      invalidTokensRemoved: invalidTokens.length,
-    });
+    return NextResponse.json(
+      {
+        successCount: response.successCount,
+        failureCount: response.failureCount,
+        invalidTokensRemoved: invalidTokens.length,
+      },
+      { headers: CORS_HEADERS }
+    );
   } catch (error: any) {
     console.error("Erreur send-push:", error);
     return NextResponse.json(
       { error: error?.message ?? "Erreur serveur lors de l'envoi push" },
-      { status: 500 }
+      { status: 500, headers: CORS_HEADERS }
     );
   }
 }

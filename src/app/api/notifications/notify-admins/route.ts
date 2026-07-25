@@ -33,6 +33,16 @@ function getAdminApp() {
   return initializeApp({ credential: cert(serviceAccount) });
 }
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: CORS_HEADERS });
+}
+
 export async function POST(request: NextRequest) {
   try {
     const {
@@ -47,7 +57,7 @@ export async function POST(request: NextRequest) {
     } = await request.json();
 
     if (!title || !body) {
-      return NextResponse.json({ success: false, error: 'title et body sont requis' }, { status: 400 });
+      return NextResponse.json({ success: false, error: 'title et body sont requis' }, { status: 400, headers: CORS_HEADERS });
     }
 
     const adminApp = getAdminApp();
@@ -57,7 +67,7 @@ export async function POST(request: NextRequest) {
 
     if (adminsSnap.empty) {
       console.warn('[notify-admins] Aucun compte avec role=="admin" trouvé.');
-      return NextResponse.json({ success: true, notified: 0, reason: 'no_admin_found' });
+      return NextResponse.json({ success: true, notified: 0, reason: 'no_admin_found' }, { headers: CORS_HEADERS });
     }
 
     // On délègue à /api/notifications/send pour chaque admin : c'est la
@@ -94,9 +104,9 @@ export async function POST(request: NextRequest) {
     const notified = results.filter((r) => r.ok).length;
     console.log(`[notify-admins] ${notified}/${results.length} admin(s) notifié(s)`, results);
 
-    return NextResponse.json({ success: true, notified, results });
+    return NextResponse.json({ success: true, notified, results }, { headers: CORS_HEADERS });
   } catch (error: any) {
     console.error('[notify-admins] Erreur globale:', error);
-    return NextResponse.json({ success: false, error: error.message || 'Erreur interne' }, { status: 500 });
+    return NextResponse.json({ success: false, error: error.message || 'Erreur interne' }, { status: 500, headers: CORS_HEADERS });
   }
 }
