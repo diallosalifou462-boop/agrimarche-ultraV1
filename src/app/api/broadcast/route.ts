@@ -34,6 +34,16 @@ function getAdminApp() {
   return initializeApp({ credential: cert(serviceAccount) });
 }
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: CORS_HEADERS });
+}
+
 export async function POST(request: NextRequest) {
   try {
     const {
@@ -48,7 +58,7 @@ export async function POST(request: NextRequest) {
     } = await request.json();
 
     if (!title || !body) {
-      return NextResponse.json({ success: false, error: 'title et body requis' }, { status: 400 });
+      return NextResponse.json({ success: false, error: 'title et body requis' }, { status: 400, headers: CORS_HEADERS });
     }
 
     const adminApp = getAdminApp();
