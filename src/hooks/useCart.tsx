@@ -29,7 +29,7 @@ import {
   setDoc,
 } from 'firebase/firestore';
 
-import { db } from '@/lib/firebase/firebase';
+import { db, waitForFirestoreReady, trace } from '@/lib/firebase/firebase';
 import type {
   Cart,
   CartItem,
@@ -56,6 +56,43 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
       setTimeout(() => reject(new Error(`[useCart] Timeout (${ms}ms) sur ${label}`)), ms),
     ),
   ]);
+}
+
+// 🔴 BUG TROUVÉ (v1) : contrairement à ensureUserExists() (src/lib/firebase/
+// userProfile.ts), ce getDoc() sur `carts/{uid}` ne faisait NI
+// `await waitForFirestoreReady()` avant de lire, NI retry en cas de
+// "client is offline". Résultat : au cold start avec Internet déjà actif,
+// c'est très probablement CE getDoc() précis qui échoue en premier (avant
+// même que le timeout de 8s ait le temps de se déclencher — l'erreur
+// "offline" est immédiate, pas un vrai timeout réseau), et comme il n'y a
+// pas de retry ici, on tombe direct dans le repli `readLocal(CART_KEY)` —
+// c'est-à-dire l'ancien panier local, potentiellement obsolète/vide,
+// jamais fusionné avec Firestore. D'où "panier incorrect" observé
+// uniquement dans ce scénario précis.
+//
+// ⚠️ FIX (v2 — asymétrie de retry) : `waitForFirestoreReady()` a un filet
+// de sécurité fixe de 5s qui résout "prêt" même si le SDK n'a pas
+// RÉELLEMENT confirmé être en ligne (négociation long-polling iOS qui peut
+// prendre 6-10s sur un réseau mobile instable au cold start). Le retry
+// ci-dessous n'avait que 3 tentatives à backoff court (~1.5s cumulés) :
+// il abandonnait donc définitivement AVANT que Firestore ait vraiment fini
+// sa poignée de main — contrairement au listener produits
+// (src/app/main/products/page.tsx) qui retente indéfiniment et finit
+// toujours par réussir. On aligne ce retry sur le même principe : backoff
+// exponentiel plafonné, beaucoup plus de tentatives.
+async function getCartDocWithRetry(userId: string, attempt = 1): Promise<Awaited<ReturnType<typeof getDoc>>> {
+  try {
+    return await withTimeout(getDoc(doc(db, 'carts', userId)), 8000, `getDoc carts (essai ${attempt})`);
+  } catch (error: any) {
+    const isOffline = error?.code === 'unavailable' || /offline/i.test(error?.message ?? '');
+    if (isOffline && attempt < 8) {
+      const delay = Math.min(1000 * 2 ** attempt, 8000);
+      trace('PANIER', `getDoc carts hors-ligne, nouvel essai dans ${delay}ms... (essai ${attempt})`);
+      await new Promise((r) => setTimeout(r, delay));
+      return getCartDocWithRetry(userId, attempt + 1);
+    }
+    throw error;
+  }
 }
 
 const GUEST_KEY = 'agrimarche_cart_guest';
@@ -158,6 +195,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
 
     let cancelled = false;
     setIsLoading(true);
+    trace('PANIER', `hydratation démarrée — user=${user?.uid ?? 'guest'}`);
 
     (async () => {
       // panier "invité" éventuellement présent avant la connexion
@@ -165,7 +203,10 @@ export function CartProvider({ children }: { children: ReactNode }) {
 
       if (user) {
         try {
-          const snap = await withTimeout(getDoc(doc(db, 'carts', user.uid)), 8000, 'getDoc carts');
+          trace('PANIER', 'attente waitForFirestoreReady() avant getDoc carts');
+          await waitForFirestoreReady();
+          const snap = await getCartDocWithRetry(user.uid);
+          trace('PANIER', 'getDoc carts résolu');
           let items = snap.exists()
             ? validateItems((snap.data() as any).items)
             : [];
@@ -210,6 +251,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
           }
         } catch (e) {
           console.error(e);
+          trace('PANIER', 'ÉCHEC getDoc carts — repli sur le panier local', (e as Error)?.message || e);
           // repli local en cas d'erreur Firestore
           const items = readLocal(CART_KEY);
           if (!cancelled) {
@@ -225,7 +267,10 @@ export function CartProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      if (!cancelled) setIsLoading(false);
+      if (!cancelled) {
+        trace('PANIER', 'hydratation terminée — isLoading=false');
+        setIsLoading(false);
+      }
     })();
 
     return () => { cancelled = true; };
