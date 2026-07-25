@@ -40,24 +40,45 @@ jobs:
       - name: Select Xcode version
         run: sudo xcode-select -s /Applications/Xcode.app
 
+      - name: Check required secrets are set
+        env:
+          CERT_BASE64: ${{ secrets.IOS_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.IOS_P12_PASSWORD }}
+          PROFILE_BASE64: ${{ secrets.APP_STORE_CONNECT_PROFILE }}
+          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+        run: |
+          set -e
+          missing=0
+          for name in CERT_BASE64 CERT_PASSWORD PROFILE_BASE64 API_KEY_ID API_ISSUER_ID API_KEY_BASE64; do
+            if [ -z "${!name}" ]; then
+              echo "❌ Secret manquant ou vide : $name"
+              missing=1
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            echo "→ Vérifie les noms des secrets dans Settings > Secrets and variables > Actions"
+            exit 1
+          fi
+          echo "✅ Tous les secrets requis sont présents."
+
       # --- Code signing : certificat + profil de provisioning ---
-      # Secrets nécessaires (voir le guide fourni à part) :
-      #   IOS_DIST_CERTIFICATE_BASE64   → export .p12 en base64
-      #   IOS_DIST_CERTIFICATE_PASSWORD → mot de passe du .p12
-      #   IOS_PROVISION_PROFILE_BASE64  → .mobileprovision en base64
       - name: Import code signing certificate & profile
         env:
-          CERT_BASE64: ${{ secrets.IOS_DIST_CERTIFICATE_BASE64 }}
-          CERT_PASSWORD: ${{ secrets.IOS_DIST_CERTIFICATE_PASSWORD }}
-          PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+          CERT_BASE64: ${{ secrets.IOS_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.IOS_P12_PASSWORD }}
+          PROFILE_BASE64: ${{ secrets.APP_STORE_CONNECT_PROFILE }}
         run: |
           set -e
           KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
           KEYCHAIN_PASSWORD=$(uuidgen)
 
           # Décoder le certificat et le profil depuis les secrets
-          echo "$CERT_BASE64" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
-          echo "$PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
+          # (macOS utilise BSD base64 : -D pour décoder, -o pour la sortie —
+          # la syntaxe GNU "--decode" n'est pas fiable ici)
+          echo "$CERT_BASE64" | base64 -D -o "$RUNNER_TEMP/certificate.p12"
+          echo "$PROFILE_BASE64" | base64 -D -o "$RUNNER_TEMP/profile.mobileprovision"
 
           # Créer un trousseau temporaire dédié à ce build
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -125,17 +146,15 @@ jobs:
           retention-days: 30
 
       # --- Upload vers TestFlight ---
-      # Secrets nécessaires :
-      #   APPSTORE_API_KEY_ID, APPSTORE_API_ISSUER_ID, APPSTORE_API_KEY_BASE64 (.p8 en base64)
       - name: Upload to TestFlight
         env:
-          API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
-          API_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
-          API_KEY_BASE64: ${{ secrets.APPSTORE_API_KEY_BASE64 }}
+          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
         run: |
           set -e
           mkdir -p ~/private_keys
-          echo "$API_KEY_BASE64" | base64 --decode > ~/private_keys/AuthKey_${API_KEY_ID}.p8
+          echo "$API_KEY_BASE64" | base64 -D -o ~/private_keys/AuthKey_${API_KEY_ID}.p8
           IPA_PATH=$(find build/ios/ipa -name "*.ipa" | head -n 1)
           xcrun altool --upload-app \
             --type ios \
