@@ -101,6 +101,32 @@ export const auth = getAuth(app);
 // beaucoup plus rapide à établir).
 const isNative = typeof window !== 'undefined' && Capacitor.isNativePlatform();
 
+// ⚠️ FIX v7 — CAUSE RACINE probable du blocage au cold start (réseau déjà
+// actif) : sur iOS, la TOUTE PREMIÈRE requête réseau émise depuis le
+// contexte JS de la WKWebView (fetch/XHR — PAS les appels natifs du pont
+// Capacitor, qui empruntent un chemin différent) peut rester bloquée sans
+// jamais aboutir NI échouer, tant qu'aucun véritable événement de
+// connectivité ne force la WebView à (ré)initialiser son moteur réseau
+// interne. C'est un comportement documenté de WKWebView, pas un bug
+// Firestore. C'est exactement pour ça que couper/rallumer le réseau
+// "débloquait" tout : ça fournissait cet événement manquant.
+//
+// `Network.getStatus()` (natif) et `FirebaseAuthentication.getCurrentUser()`
+// (natif) répondent très bien pendant ce blocage — normal, ils ne passent
+// pas par le moteur réseau JS bloqué. Firestore, lui, fait un vrai
+// fetch/XHR (canal long-polling) depuis le JS, et reste donc bloqué.
+//
+// Fix : dès que possible sur natif, on émet nous-mêmes une petite requête
+// HTTP bidon depuis le JS (fire-and-forget, réponse ignorée) — le simple
+// fait qu'elle aboutisse (ou échoue proprement) force la WebView à engager
+// réellement son moteur réseau, avant que Firestore ne tente sa propre
+// connexion juste derrière.
+if (isNative) {
+  fetch('https://www.gstatic.com/generate_204', { cache: 'no-store' })
+    .then(() => trace('firestore', 'réveil réseau WKWebView — requête de test aboutie'))
+    .catch((err) => trace('firestore', 'réveil réseau WKWebView — requête de test en échec (ignoré, non bloquant)', err?.message || err));
+}
+
 export const db = initializeFirestore(app, {
   ...(isNative ? { experimentalForceLongPolling: true } : {}),
 });
