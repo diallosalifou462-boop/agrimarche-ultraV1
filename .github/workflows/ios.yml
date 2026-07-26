@@ -102,11 +102,7 @@ jobs:
             -configuration Release \
             -archivePath "$RUNNER_TEMP/App.xcarchive" \
             -destination "generic/platform=iOS" \
-            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
-            CODE_SIGN_STYLE=Manual \
-            DEVELOPMENT_TEAM=KAMMWG3VQH \
-            PROVISIONING_PROFILE_SPECIFIER="AgriMarche_AppStore_Profile" \
-            CODE_SIGN_IDENTITY="Apple Distribution"
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
 
       - name: Export IPA
         run: |
