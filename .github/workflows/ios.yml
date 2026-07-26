@@ -108,7 +108,10 @@ jobs:
       - name: Archive
         run: |
           set -e
-          BUILD_NUMBER="${{ github.run_number }}"
+          # Basé sur la date/heure UTC (format YYYYMMDDHHmm converti en nombre)
+          # pour garantir un numéro de build toujours strictement croissant,
+          # même si github.run_number est retombé sous une valeur déjà utilisée.
+          BUILD_NUMBER=$(date -u +%y%m%d%H%M)
           xcodebuild archive \
             -project "$XCODE_PROJECT" \
             -scheme "$XCODE_SCHEME" \
