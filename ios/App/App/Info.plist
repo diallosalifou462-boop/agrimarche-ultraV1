@@ -59,21 +59,19 @@
 	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
-	<!-- ⚠️ FIX : Firebase Phone Auth (OTP SMS) a besoin d'un schéma d'URL
-	     personnalisé pour rediriger vers l'app quand sa vérification de
-	     secours par reCAPTCHA (via Safari) doit se déclencher — ce qui
-	     arrive dès que la vérification silencieuse par push (APNs) échoue
-	     ou n'est pas configurée. Sans ce schéma, le SDK natif Firebase n'a
-	     nulle part où rediriger et faisait planter toute l'application
-	     (crash natif, pas juste une erreur JS) — typiquement observé sur
-	     "Mot de passe oublié" lors d'un renvoi de code SMS. Le schéma doit
-	     être exactement l'identifiant du bundle de l'app. -->
+	<!-- ⚠️ FIX v2 : le schéma doit être EXACTEMENT le REVERSED_CLIENT_ID
+	     trouvé dans GoogleService-Info.plist (format
+	     com.googleusercontent.apps.XXXXXXXXX), PAS le bundle ID brut —
+	     c'est ce que le SDK natif Firebase Auth recherche précisément pour
+	     rediriger après la vérification reCAPTCHA de secours (Phone Auth).
+	     Remplacez la valeur ci-dessous par le VRAI REVERSED_CLIENT_ID une
+	     fois GoogleService-Info.plist régénéré avec un client OAuth iOS. -->
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+				<string>com.googleusercontent.apps.21462709831-mabdt4t6d51pqlh8npdibtk9kt8550o6</string>
 			</array>
 		</dict>
 	</array>
