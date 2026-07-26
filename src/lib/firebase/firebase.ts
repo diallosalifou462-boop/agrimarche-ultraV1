@@ -1,6 +1,6 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, setPersistence, browserLocalPersistence, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, sendPasswordResetEmail, updateProfile } from 'firebase/auth';
-import { initializeFirestore, onSnapshotsInSync, collection, query, limit, getDocs, doc, getDoc, setDoc, updateDoc, onSnapshot, Timestamp, arrayUnion, arrayRemove, increment, writeBatch } from 'firebase/firestore';
+import { initializeFirestore, onSnapshotsInSync, disableNetwork, enableNetwork, collection, query, limit, getDocs, doc, getDoc, setDoc, updateDoc, onSnapshot, Timestamp, arrayUnion, arrayRemove, increment, writeBatch } from 'firebase/firestore';
 
 // =====================================================
 // TRACE — journal d'initialisation avec horodatage relatif
@@ -191,14 +191,47 @@ export function waitForFirestoreReady(timeoutMs = 5000): Promise<void> {
     firestoreReadyPromise = new Promise<void>((resolve) => {
       let done = false;
       let canaryGotServerData = false;
+
+      const timer = setTimeout(() => finish(`timeout de sécurité ${timeoutMs}ms`), timeoutMs);
+
+      // ⚠️ FIX v8 — CAUSE RACINE CONFIRMÉE (diagnostic du 26/07) : le réseau
+      // natif est bien connecté, un fetch REST brut vers Firestore répond
+      // HTTP 200 immédiatement — mais le canal de streaming temps réel du
+      // SDK (le "Listen channel" en long-polling utilisé par onSnapshot)
+      // reste "zombie" au cold start : ni donnée, ni erreur, indéfiniment.
+      // C'est un problème isolé à CE canal persistant, pas au réseau ni à
+      // Firestore côté serveur (qui répond très bien aux appels REST).
+      //
+      // C'est exactement pour ça que couper/rallumer le réseau réglait le
+      // problème manuellement : ça force le SDK à fermer et rouvrir ce
+      // canal. On reproduit ça nous-mêmes, automatiquement, via l'API
+      // publique du SDK — sans dépendre d'une action de l'utilisateur.
+      //
+      // Si le canari n'a toujours pas reçu de donnée confirmée serveur
+      // après un délai court (bien avant le timeout final de 5s), on
+      // force un cycle disableNetwork()/enableNetwork() : ça imite
+      // précisément l'effet d'un vrai changement de connectivité, et
+      // force le SDK à relancer son canal de streaming au lieu de rester
+      // bloqué dessus indéfiniment.
+      const reconnectTimer = isNative
+        ? setTimeout(() => {
+            if (canaryGotServerData || done) return;
+            trace('firestore', 'canal encore zombie après 3s — forçage disableNetwork()/enableNetwork() pour relancer la connexion');
+            disableNetwork(db)
+              .then(() => enableNetwork(db))
+              .then(() => trace('firestore', 'disableNetwork()/enableNetwork() terminé — en attente de confirmation serveur'))
+              .catch((err) => trace('firestore', 'échec disableNetwork()/enableNetwork() (ignoré, le timeout prendra le relais)', err?.message || err));
+          }, 3000)
+        : null;
+
       const finish = (reason: string) => {
         if (done) return;
         done = true;
+        clearTimeout(timer);
+        if (reconnectTimer) clearTimeout(reconnectTimer);
         trace('firestore', `prêt (${reason})`);
         resolve();
       };
-
-      const timer = setTimeout(() => finish(`timeout de sécurité ${timeoutMs}ms`), timeoutMs);
 
       // Canari : force un vrai aller-retour serveur avant que
       // `onSnapshotsInSync` puisse être considéré comme fiable.
@@ -221,7 +254,6 @@ export function waitForFirestoreReady(timeoutMs = 5000): Promise<void> {
           trace('firestore', 'onSnapshotsInSync ignoré (trivial — canari pas encore confirmé serveur)');
           return;
         }
-        clearTimeout(timer);
         unsubSync();
         unsubCanary();
         finish('onSnapshotsInSync + canari confirmé serveur');
