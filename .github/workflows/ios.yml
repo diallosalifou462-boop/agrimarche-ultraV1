@@ -102,7 +102,9 @@ jobs:
             -configuration Release \
             -archivePath "$RUNNER_TEMP/App.xcarchive" \
             -destination "generic/platform=iOS" \
-            CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM=KAMMWG3VQH
 
       - name: Export IPA
         run: |
@@ -119,11 +121,6 @@ jobs:
             <string>KAMMWG3VQH</string>
             <key>signingStyle</key>
             <string>manual</string>
-            <key>provisioningProfiles</key>
-            <dict>
-              <key>com.agrimarche.app</key>
-              <string>AgriMarche_AppStore_Profile</string>
-            </dict>
           </dict>
           </plist>
           EOF
@@ -158,6 +155,21 @@ jobs:
           set -e
           mkdir -p ~/private_keys
           echo "$API_KEY_BASE64" | base64 -D -o ~/private_keys/AuthKey_${API_KEY_ID}.p8
+
+          # Vérification : le fichier décodé doit être une vraie clé privée PEM.
+          # Si le secret APP_STORE_CONNECT_API_KEY a été mal encodé (texte brut au
+          # lieu de base64, double encodage, etc.), ce check échoue ici avec un
+          # message clair au lieu de laisser altool planter plus loin avec une
+          # erreur JWT obscure.
+          if ! head -1 ~/private_keys/AuthKey_${API_KEY_ID}.p8 | grep -q "BEGIN PRIVATE KEY"; then
+            echo "❌ Le fichier .p8 décodé est invalide."
+            echo "→ Vérifie que le secret APP_STORE_CONNECT_API_KEY contient bien le"
+            echo "  résultat de : base64 -i AuthKey_XXXXXXXXXX.p8"
+            echo "  et non le contenu brut du fichier .p8."
+            exit 1
+          fi
+          echo "✅ Clé API valide"
+
           IPA_PATH=$(find build/ios/ipa -name "*.ipa" | head -n 1)
           xcrun altool --upload-app \
             --type ios \
