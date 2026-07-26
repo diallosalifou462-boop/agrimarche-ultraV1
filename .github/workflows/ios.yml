@@ -92,6 +92,19 @@ jobs:
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           cp "$RUNNER_TEMP/profile.mobileprovision" ~/Library/MobileDevice/Provisioning\ Profiles/
 
+      - name: Debug - Afficher le contenu du profil installé
+        run: |
+          set -e
+          PROFILE_PATH=$(ls ~/Library/MobileDevice/Provisioning\ Profiles/*.mobileprovision | head -n 1)
+          echo "Profil installé : $PROFILE_PATH"
+          security cms -D -i "$PROFILE_PATH" > "$RUNNER_TEMP/profile.plist"
+          echo "--- Name ---"
+          /usr/libexec/PlistBuddy -c "Print :Name" "$RUNNER_TEMP/profile.plist"
+          echo "--- UUID ---"
+          /usr/libexec/PlistBuddy -c "Print :UUID" "$RUNNER_TEMP/profile.plist"
+          echo "--- Entitlements (doit contenir aps-environment) ---"
+          /usr/libexec/PlistBuddy -c "Print :Entitlements" "$RUNNER_TEMP/profile.plist" || echo "⚠️ Pas d'entitlements trouvés"
+
       - name: Archive
         run: |
           set -e
@@ -121,6 +134,11 @@ jobs:
             <string>KAMMWG3VQH</string>
             <key>signingStyle</key>
             <string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>com.agrimarche.app</key>
+              <string>AgriMarche_AppStore_Profile</string>
+            </dict>
           </dict>
           </plist>
           EOF
