@@ -204,6 +204,7 @@ export default function AgriMarket() {
       }
 
       console.warn('[products] Chargement bloqué (6s) — reprise automatique en arrière-plan. Réseau:', networkInfo, '— Test REST Firestore:', restInfo);
+      trace('DIAG', `blocage 6s — réseau natif: ${networkInfo} — REST Firestore direct: ${restInfo}`);
       setLoadError(true);
       setDebugErrorDetail(prev => prev || `timeout après 6s — réseau : ${networkInfo} — accès direct Firestore : ${restInfo}`);
     }, 6000);

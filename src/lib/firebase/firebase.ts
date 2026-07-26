@@ -121,10 +121,16 @@ const isNative = typeof window !== 'undefined' && Capacitor.isNativePlatform();
 // fait qu'elle aboutisse (ou échoue proprement) force la WebView à engager
 // réellement son moteur réseau, avant que Firestore ne tente sa propre
 // connexion juste derrière.
+// Fix : `generate_204` ne renvoie pas d'en-têtes CORS, donc un `fetch()`
+// en mode CORS normal échoue quasi toujours avec "Load failed" — que le
+// réseau soit prêt ou non. Ça ne prouvait rien. En mode `no-cors`, on
+// n'a pas accès à la réponse (opaque), mais le navigateur/WebView effectue
+// bien le round-trip réseau complet, ce qui est tout ce qu'on veut ici :
+// forcer un vrai aller-retour, pas lire la réponse.
 if (isNative) {
-  fetch('https://www.gstatic.com/generate_204', { cache: 'no-store' })
-    .then(() => trace('firestore', 'réveil réseau WKWebView — requête de test aboutie'))
-    .catch((err) => trace('firestore', 'réveil réseau WKWebView — requête de test en échec (ignoré, non bloquant)', err?.message || err));
+  fetch('https://www.gstatic.com/generate_204', { cache: 'no-store', mode: 'no-cors' })
+    .then(() => trace('firestore', 'réveil réseau WKWebView — requête de test aboutie (no-cors)'))
+    .catch((err) => trace('firestore', 'réveil réseau WKWebView — requête de test en échec MÊME en no-cors (signal réseau réel)', err?.message || err));
 }
 
 export const db = initializeFirestore(app, {
