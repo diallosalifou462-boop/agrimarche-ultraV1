@@ -104,7 +104,8 @@ jobs:
             -destination "generic/platform=iOS" \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
             CODE_SIGN_STYLE=Manual \
-            DEVELOPMENT_TEAM=KAMMWG3VQH
+            DEVELOPMENT_TEAM=KAMMWG3VQH \
+            PROVISIONING_PROFILE_SPECIFIER="AgriMarche_AppStore_Profile"
 
       - name: Export IPA
         run: |
@@ -121,6 +122,11 @@ jobs:
             <string>KAMMWG3VQH</string>
             <key>signingStyle</key>
             <string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>com.agrimarche.app</key>
+              <string>AgriMarche_AppStore_Profile</string>
+            </dict>
           </dict>
           </plist>
           EOF
