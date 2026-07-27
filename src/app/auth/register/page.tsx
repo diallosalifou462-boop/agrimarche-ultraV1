@@ -152,8 +152,10 @@ export default function RegisterPage() {
       setLoading(false);
     });
 
-    const failedSub = FirebaseAuthentication.addListener('phoneVerificationFailed', (event) => {
-      setError(event.message || "Impossible d'envoyer le SMS. Vérifiez le numéro.");
+    const failedSub = FirebaseAuthentication.addListener('phoneVerificationFailed', (event: any) => {
+      console.error('[DEBUG] phoneVerificationFailed — événement complet:', JSON.stringify(event));
+      const detail = event?.code ? ` (code: ${event.code})` : '';
+      setError((event.message || "Impossible d'envoyer le SMS. Vérifiez le numéro.") + detail);
       setLoading(false);
     });
 
