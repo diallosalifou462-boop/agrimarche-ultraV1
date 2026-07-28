@@ -49,7 +49,7 @@ export default function AssignDeliveryPage() {
   useEffect(() => {
     const q = query(collection(db, 'orders'), where('status', 'in', ['en_preparation', 'en_livraison']));
     const unsub = onSnapshot(q, (snapshot) => {
-      const ordersData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Order[];
+      const ordersData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id })) as Order[]; // FIX: id apres le spread (voir checkout/page.tsx)
       setOrders(ordersData);
       setLoading(false);
     });

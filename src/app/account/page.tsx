@@ -121,7 +121,7 @@ export default function AccountPage() {
         const newTs = d.data().updatedAt?.seconds || d.data().createdAt?.seconds || 0;
         const oldTs = existing?.updatedAt?.seconds || existing?.createdAt?.seconds || 0;
         if (!existing || newTs >= oldTs) {
-          ordersMap.set(d.id, { id: d.id, ...d.data(), status: normalized, total: d.data().total || d.data().amount || 0 });
+          ordersMap.set(d.id, { ...d.data(), id: d.id, status: normalized, total: d.data().total || d.data().amount || 0 }); // FIX: id apres le spread, sinon un champ 'id' stocke dans le doc (ex: numero de commande lisible) ecrase le vrai ID Firestore
         }
       });
       const ordersData = Array.from(ordersMap.values()).sort((a, b) => {

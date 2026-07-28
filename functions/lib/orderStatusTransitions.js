@@ -104,7 +104,7 @@ exports.updateOrderStatus = (0, https_1.onCall)({
     // ID token vol é/rejoué. Nécessite d'avoir activé App Check côté client
     // (déjà le cas si le SDK Firebase App Check est initialisé dans
     // firebase.ts — sinon voir DEPLOYMENT.md).
-    enforceAppCheck: true,
+    enforceAppCheck: false, // Étape 0 : désactivé temporairement (Option 1 du guide) — à repasser à true une fois App Check configuré côté client
     // Une transaction à 2 lectures + 2 écritures ne demande ni beaucoup de
     // mémoire ni beaucoup de temps — on le rend explicite plutôt que de
     // laisser les valeurs par défaut, pour un coût prévisible et une

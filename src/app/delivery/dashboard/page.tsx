@@ -535,7 +535,7 @@ export default function DeliveryDashboard() {
       where('status', 'in', ['en_livraison', 'livre'])
     );
     const unsub = onSnapshot(q, (snap) => {
-      setOrders(snap.docs.map(d => ({ id: d.id, ...d.data() } as Order)));
+      setOrders(snap.docs.map(d => ({ ...d.data(), id: d.id } as Order))); // FIX: id apres le spread (voir checkout/page.tsx)
       setLoading(false);
     });
     return () => unsub();
@@ -552,7 +552,7 @@ export default function DeliveryDashboard() {
     const q = query(collection(db, 'orders'), where('status', '==', 'en_attente'));
     const unsub = onSnapshot(q, (snap) => {
       const list = snap.docs
-        .map(d => ({ id: d.id, ...d.data() } as Order))
+        .map(d => ({ ...d.data(), id: d.id } as Order)) // FIX: id apres le spread
         .filter(o => !o.delivererId);
       setAvailableOrders(list);
       // ✅ NOUVEAU : bip + vibration dès qu'une nouvelle commande disponible

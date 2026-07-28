@@ -9,7 +9,7 @@ import { AuthProvider } from '@/contexts/AuthContext';
 import { CartProvider } from '@/hooks/useCart';
 import { NotificationProvider } from '@/components/NotificationProvider';
 import OfflineBanner from '@/components/OfflineBanner';
-import DebugTraceOverlay from '@/components/DebugTraceOverlay';
+// import DebugTraceOverlay from '@/components/DebugTraceOverlay'; // désactivé (bugs résolus le 27/07) — décommenter pour réactiver
 
 // ✅ FIX CRITIQUE : ce fichier (src/app/layout.tsx) est le layout RACINE de
 // toute l'app Next.js — il DOIT contenir <html>/<body> (obligatoire en App
@@ -51,7 +51,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <NotificationProvider>
               <OfflineBanner />
               {children}
-              <DebugTraceOverlay />
+              {/* DebugTraceOverlay retiré (bugs résolus le 27/07) — le
+                  composant reste dans src/components/ si on en a de nouveau
+                  besoin plus tard : il suffira de remettre <DebugTraceOverlay />
+                  ici pour le réactiver, aucune autre modification requise. */}
             </NotificationProvider>
           </CartProvider>
         </AuthProvider>

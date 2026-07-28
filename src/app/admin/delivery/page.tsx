@@ -331,7 +331,7 @@ export default function AdminDeliveryDashboard() {
     if (!user) return;
     const q = query(collection(db, 'orders'), where('status', '==', 'en_livraison'));
     const unsub = onSnapshot(q, (snap) => {
-      const data = snap.docs.map(d => ({ id: d.id, ...d.data() } as Order));
+      const data = snap.docs.map(d => ({ ...d.data(), id: d.id } as Order)); // FIX: id apres le spread (voir checkout/page.tsx pour le contexte du bug)
       setActiveOrders(data);
       setLoading(false);
       setLastRefresh(new Date());
@@ -346,7 +346,7 @@ export default function AdminDeliveryDashboard() {
     const q = query(collection(db, 'orders'), where('status', '==', 'livre'));
     const unsub = onSnapshot(q, (snap) => {
       const data = snap.docs
-        .map(d => ({ id: d.id, ...d.data() } as Order))
+        .map(d => ({ ...d.data(), id: d.id } as Order)) // FIX: id apres le spread
         .sort((a, b) => (b.deliveredAt?.seconds || 0) - (a.deliveredAt?.seconds || 0))
         .slice(0, 10);
       setRecentDelivered(data);

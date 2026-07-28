@@ -75,7 +75,7 @@ function OrdersContent() {
         const raw = (d.data() as any).status || 'en_attente';
         const normalized = normalizeStatus(raw);
         console.log(`[AgriMarché/AccountOrders] Order ${d.id.slice(-6)} | raw="${raw}" → "${normalized}"`);
-        return { id: d.id, ...d.data(), status: normalized } as Order;
+        return { ...d.data(), id: d.id, status: normalized } as Order; // FIX: id apres le spread, sinon un champ 'id' stocke dans le doc ecrase le vrai ID Firestore
       });
       console.log(`[AgriMarché/AccountOrders] Total=${data.length} | statuts: ${[...new Set(data.map(o=>o.status))].join(', ')}`);
       setOrders(data);
