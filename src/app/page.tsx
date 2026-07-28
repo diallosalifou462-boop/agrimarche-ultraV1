@@ -57,12 +57,25 @@ export default function SplashPage() {
     };
 
     // Filet de sécurité ABSOLU : si AuthContext ne résout jamais
-    // `loading` (déjà protégé par son propre failsafe de 8s), on ne
-    // reste jamais bloqué plus de 9s sur le splash.
+    // `loading`, on ne reste pas bloqué indéfiniment sur le splash.
+    //
+    // ⚠️ FIX : ce délai doit être STRICTEMENT SUPÉRIEUR au pire cas réel
+    // du côté AuthContext, pas égal à un de ses sous-délais internes.
+    // Pire cas AuthContext (voir AuthContext.tsx) :
+    //   - jusqu'à 8s pour que `onAuthStateChanged` se déclenche (son
+    //     propre failsafe), PUIS
+    //   - jusqu'à 9s de budget pour `fetchUserProfile()` (Promise.race)
+    //   = jusqu'à 17s avant que `loading` passe à `false`.
+    // Avant ce fix, les deux failsafes tournaient tous les deux sur 9s
+    // mais avec des horloges décalées (celle du Splash démarre au
+    // montage, celle d'AuthContext démarre après onAuthStateChanged) :
+    // le Splash perdait quasi systématiquement la course dès qu'il y
+    // avait un peu de latence réseau/Firestore, redirigeant "en échec"
+    // alors qu'AuthContext était sur le point de résoudre tout seul.
     const failsafeTimer = setTimeout(() => {
-      console.error('[Splash] Timeout de sécurité déclenché (9s) — redirection forcée');
+      console.error('[Splash] Timeout de sécurité déclenché (20s) — redirection forcée');
       safeRedirect('/main/products', 'failsafe timeout');
-    }, 9000);
+    }, 20000);
 
     if (authLoading) {
       trace('SPLASH', 'AuthContext encore en chargement, on attend...', { authDebugInfo });

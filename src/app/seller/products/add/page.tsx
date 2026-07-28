@@ -249,6 +249,11 @@ export default function AddProductPage() {
       setTimeout(() => router.push('/seller/products'), 1200);
     } catch (err: any) {
       console.error(err);
+      // 🔍 Diagnostic temporaire : le toast (3.5s) ne laisse pas le temps de
+      // lire/noter un message d'erreur technique, et la console n'est pas
+      // accessible sur iPhone sans Mac. L'alert() reste affichée tant qu'on
+      // ne la ferme pas — copie ce qu'elle affiche si le problème persiste.
+      alert(`Erreur lors de la publication\n\ncode: ${err?.code ?? 'inconnu'}\nmessage: ${err?.message ?? String(err)}`);
       showToast('error', 'Erreur lors de la publication');
       setSubmitting(false);
     }
