@@ -41,6 +41,14 @@ interface Order {
   createdAt?: any;
 }
 
+interface Review {
+  id: string;
+  userName: string;
+  rating: number;
+  comment: string;
+  createdAt?: any;
+}
+
 // ─── NORMALISATION DES ANCIENS STATUTS FIRESTORE ────────────────────────────
 // Anciens docs : 'expediee'→'en_livraison', 'livree'→'livre', 'annulee'→'annule'
 // + variantes anglaises : 'pending', 'shipped', 'delivered', 'cancelled'
@@ -83,11 +91,17 @@ export default function SellerDashboard() {
   const [hasProfile, setHasProfile] = useState<boolean | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
+  // ✅ FIX : la note était figée en dur (4.9) sans lien avec les vrais avis
+  // clients (collection `reviews`, écrite par src/app/review/page.tsx).
+  // Résultat : le vendeur ne voyait jamais sa vraie moyenne ni les
+  // commentaires — impossible de savoir qui le note mal et pourquoi.
+  const [reviews, setReviews] = useState<Review[]>([]);
   const [stats, setStats] = useState({
     revenue: 0,
     ordersCount: 0,
     productsCount: 0,
-    rating: 4.9,
+    rating: 0,
+    reviewCount: 0,
     pendingCount: 0,
   });
   const [darkMode, setDarkMode] = useState(false);
@@ -118,6 +132,7 @@ export default function SellerDashboard() {
   useEffect(() => {
     let unsubOrders: (() => void) | null = null;
     let unsubProducts: (() => void) | null = null;
+    let unsubReviews: (() => void) | null = null;
 
     const unsubAuth = onAuthStateChanged(auth, async (user) => {
       if (!user) {
@@ -153,6 +168,37 @@ export default function SellerDashboard() {
 
           setStats(prev => ({ ...prev, productsCount: productsData.length }));
         }, (err) => console.error('Produits:', err));
+
+        // ── Avis clients (temps réel) ────────────────────────────────────────
+        // ✅ FIX : remplace la note statique 4.9 par la vraie moyenne calculée
+        // depuis la collection `reviews` (mêmes documents que ceux utilisés
+        // côté acheteur dans account/page.tsx et main/products/page.tsx).
+        const reviewsQuery = query(
+          collection(db, 'reviews'),
+          where('sellerId', '==', user.uid),
+          orderBy('createdAt', 'desc')
+        );
+        unsubReviews = onSnapshot(reviewsQuery, (snap) => {
+          const reviewsData = snap.docs.map(d => ({
+            id:        d.id,
+            userName:  d.data().userName || 'Client',
+            rating:    d.data().rating || 0,
+            comment:   d.data().comment || '',
+            createdAt: d.data().createdAt,
+          })) as Review[];
+          setReviews(reviewsData);
+
+          const reviewCount = reviewsData.length;
+          const avgRating = reviewCount > 0
+            ? reviewsData.reduce((sum, r) => sum + r.rating, 0) / reviewCount
+            : 0;
+
+          setStats(prev => ({
+            ...prev,
+            rating: Math.round(avgRating * 10) / 10,
+            reviewCount,
+          }));
+        }, (err) => console.error('Avis:', err));
 
         // ── Commandes (temps réel) ───────────────────────────────────────────
         const ordersQuery = query(
@@ -228,6 +274,7 @@ export default function SellerDashboard() {
       unsubAuth();
       unsubOrders?.();
       unsubProducts?.();
+      unsubReviews?.();
       clearInterval(interval);
     };
   }, []);
@@ -282,7 +329,7 @@ export default function SellerDashboard() {
     { label: 'CA total',    value: formatRevenue(stats.revenue), unit: 'FCFA', icon: DollarSign, gradient: 'from-emerald-500 to-teal-500',  light: 'bg-emerald-50 dark:bg-emerald-900/30' },
     { label: 'Commandes',   value: stats.ordersCount,            unit: '',     icon: ShoppingBag, gradient: 'from-sky-500 to-blue-500',     light: 'bg-sky-50 dark:bg-sky-900/30' },
     { label: 'Produits',    value: stats.productsCount,          unit: '',     icon: Package,     gradient: 'from-violet-500 to-purple-500', light: 'bg-violet-50 dark:bg-violet-900/30' },
-    { label: 'Note',        value: stats.rating,                 unit: '/5',   icon: Star,        gradient: 'from-amber-500 to-orange-500',  light: 'bg-amber-50 dark:bg-amber-900/30' },
+    { label: 'Note',        value: stats.reviewCount > 0 ? stats.rating : '—',   unit: stats.reviewCount > 0 ? `/5 (${stats.reviewCount})` : '', icon: Star,        gradient: 'from-amber-500 to-orange-500',  light: 'bg-amber-50 dark:bg-amber-900/30' },
     { label: 'En attente',  value: stats.pendingCount,           unit: '',     icon: Clock,       gradient: 'from-orange-500 to-red-500',    light: 'bg-orange-50 dark:bg-orange-900/30' },
   ];
 
@@ -435,6 +482,61 @@ export default function SellerDashboard() {
                         {status.label}
                       </span>
                     </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+
+        {/* ⭐ AVIS RÉCENTS */}
+        {/* ✅ Nouveau : avant, aucun endroit dans l'app ne montrait au vendeur
+            les avis réels de ses clients (juste une note statique 4.9 et une
+            notification push perdue dans le flux). Les notes ≤2/5 sont mises
+            en évidence pour repérer vite un client à recontacter. */}
+        <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-md border border-gray-100/50 dark:border-gray-700 overflow-hidden">
+          <div className="flex items-center justify-between px-5 pt-5 pb-3">
+            <h2 className="text-sm font-black text-gray-700 dark:text-gray-300 uppercase tracking-wider flex items-center gap-2">
+              <Star size={15} className="text-amber-500" />
+              Avis récents
+              {stats.reviewCount > 0 && (
+                <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500">
+                  ({stats.reviewCount})
+                </span>
+              )}
+            </h2>
+          </div>
+
+          <div className="px-5 pb-5 space-y-3">
+            {reviews.length === 0 ? (
+              <div className="text-center py-8">
+                <Star size={32} className="mx-auto text-gray-300 dark:text-gray-600 mb-2" />
+                <p className="text-xs text-gray-400 dark:text-gray-500">Aucun avis pour l'instant</p>
+              </div>
+            ) : (
+              reviews.slice(0, 5).map((review) => {
+                const isLowRating = review.rating <= 2;
+                return (
+                  <div
+                    key={review.id}
+                    className={`py-3 border-b border-gray-100 dark:border-gray-700 last:border-0 px-3 -mx-2 rounded-xl ${
+                      isLowRating ? 'bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800' : ''
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm font-bold text-gray-800 dark:text-gray-200 truncate">{review.userName}</p>
+                      <span className={`shrink-0 inline-flex items-center gap-1 text-xs font-black ${isLowRating ? 'text-rose-600' : 'text-amber-600'}`}>
+                        {review.rating}/5 <Star size={11} className={isLowRating ? 'fill-rose-500 text-rose-500' : 'fill-amber-500 text-amber-500'} />
+                      </span>
+                    </div>
+                    {review.comment && (
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 line-clamp-2">{review.comment}</p>
+                    )}
+                    {isLowRating && (
+                      <p className="text-[10px] font-bold text-rose-500 mt-1 flex items-center gap-1">
+                        <AlertCircle size={10} /> Note faible — envisage de recontacter ce client
+                      </p>
+                    )}
                   </div>
                 );
               })
