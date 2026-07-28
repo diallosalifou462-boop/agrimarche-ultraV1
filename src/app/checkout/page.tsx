@@ -581,7 +581,18 @@ export default function CheckoutPage() {
 
         const selectedMethod = PAYMENT_METHODS_CONFIG[selectedPaymentMethod as keyof typeof PAYMENT_METHODS_CONFIG];
         const newOrder = {
-          id: orderNumber, sellerId: safeSellerId, sellerName: safeSellerName,
+          // 🔒 FIX RACINE : PAS de champ `id` ici. Il dupliquait exactement
+          // `orderNumber` (écrit juste après via updateDoc) et n'avait aucune
+          // utilité propre — mais sa seule présence dans le document faisait
+          // que TOUT code lisant la commande via `{ id: d.id, ...d.data() }`
+          // voyait son vrai ID Firestore silencieusement écrasé par ce champ
+          // `id` stocké (le numéro de commande lisible, ex: "AGR-20260723-1760"),
+          // dès que le spread suivait `id: d.id` dans l'objet. Résultat concret :
+          // les liens "Donner mon avis" pointaient vers un ID qui n'existe nulle
+          // part dans Firestore → "Commande introuvable." Ce champ était un
+          // pur piège, sans bénéfice : `orderNumber` fait exactement ce qu'il
+          // faisait, sous un nom qui ne peut entrer en collision avec rien.
+          sellerId: safeSellerId, sellerName: safeSellerName,
           sellerPhone: safeSellerPhone, sellerRegion: safeSellerRegion,
           userId: user.uid, userName: user?.displayName || 'Client AgriMarché',
           userEmail: user?.email || '', userPhone: (user as any)?.phoneNumber || '',

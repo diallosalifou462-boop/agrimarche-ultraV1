@@ -95,7 +95,7 @@ function isDelivered(raw) {
 }
 exports.submitReview = (0, https_1.onCall)({
     region: 'us-central1', // aligné sur le reste de functions/src/index.ts
-    enforceAppCheck: true,
+    enforceAppCheck: false, // Étape 0 : désactivé temporairement (Option 1 du guide) — à repasser à true une fois App Check configuré côté client
     memory: '256MiB',
     timeoutSeconds: 30,
     // L'ID déterministe (${orderId}_${uid}) fait qu'un même utilisateur ne
