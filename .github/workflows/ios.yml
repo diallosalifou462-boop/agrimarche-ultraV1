@@ -29,9 +29,17 @@ jobs:
         run: npm ci
 
       - name: Build web (Capacitor)
+        env:
+          NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME: ${{ secrets.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME }}
+          NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET: ${{ secrets.NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET }}
         run: |
           set -e
           echo "###### Vérification : ce workflow vient bien de .github/workflows/ios.yml ######"
+          if [ -z "$NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME" ] || [ -z "$NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET" ]; then
+            echo "❌ Variables Cloudinary manquantes ou vides — le build continuerait avec un preset vide (401 garanti à l'upload)."
+            exit 1
+          fi
+          echo "✅ Variables Cloudinary presentes (valeurs non affichees, ce sont des secrets)."
           npm run build:capacitor
 
       - name: Sync Capacitor
