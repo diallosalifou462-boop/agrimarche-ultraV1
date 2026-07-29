@@ -9,6 +9,7 @@ import {
   Store, Truck, CheckCircle, AlertCircle, Sun, Moon
 } from 'lucide-react';
 import { auth, db } from '@/lib/firebase/firebase';
+import { getCurrentPosition } from '@/lib/geolocation';
 import { onAuthStateChanged } from 'firebase/auth';
 import {
   collection,
@@ -245,9 +246,11 @@ export default function SellerDashboard() {
         setLoading(false);
       }
 
-      // Géolocalisation
-      if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(async (pos) => {
+      // Géolocalisation — natif (@capacitor/geolocation) ou web selon la
+      // plateforme, voir src/lib/geolocation.ts. Sur Android ce bloc ne
+      // s'exécutait jamais (permissions manifest absentes jusqu'ici).
+      getCurrentPosition({ enableHighAccuracy: true, timeout: 10000 })
+        .then(async (pos) => {
           try {
             const res = await fetch(
               `https://nominatim.openstreetmap.org/reverse?format=json&lat=${pos.coords.latitude}&lon=${pos.coords.longitude}`
@@ -255,8 +258,8 @@ export default function SellerDashboard() {
             const json = await res.json();
             setSellerLocation(json.address?.city || json.address?.town || json.address?.village || 'Dakar');
           } catch { setSellerLocation('Dakar'); }
-        }, () => setSellerLocation('Dakar'));
-      }
+        })
+        .catch(() => setSellerLocation('Dakar'));
     });
 
     const updateTime = () => {

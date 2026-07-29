@@ -2,6 +2,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { getCurrentPosition, type UnifiedPositionError } from '@/lib/geolocation';
 
 interface UserLocation {
   city: string;
@@ -63,99 +64,80 @@ export function useUserLocation() {
         }
       }
       
-      // 2. Fallback sur la géolocalisation du navigateur
-      return new Promise<UserLocation>((resolve) => {
-        if (!navigator.geolocation) {
+      // 2. Fallback sur la géolocalisation — natif (@capacitor/geolocation,
+      // via FusedLocationProviderClient) sur Android/iOS, navigator.geolocation
+      // sur web/PWA. Voir src/lib/geolocation.ts pour le détail : c'était la
+      // cause du blocage total sur Android (permissions manifest manquantes
+      // + pont WebView non fiable).
+      try {
+        const position = await getCurrentPosition({ enableHighAccuracy: true, timeout: 10000 });
+        const { latitude, longitude } = position.coords;
+
+        try {
+          const response = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&addressdetails=1&accept-language=fr&zoom=18`
+          );
+
+          if (!response.ok) throw new Error('Erreur API');
+
+          const data = await response.json();
+          const city = data.address?.city || data.address?.town || data.address?.village || 'Dakar';
+          const region = data.address?.state || data.address?.region || city;
+          const country = data.address?.country || 'Sénégal';
+
+          const newLocation: UserLocation = {
+            city,
+            region,
+            country,
+            lat: latitude,
+            lng: longitude,
+            detected: true,
+            address: `${city}, ${region}`,
+            isDefault: false,
+          };
+
+          console.log(`📍 Localisation GPS : ${city}`);
+          setLocation(newLocation);
+          localStorage.setItem('user_location', JSON.stringify(newLocation));
+          setLoading(false);
+          return newLocation;
+        } catch (err) {
+          console.error('Erreur reverse geocoding:', err);
           const defaultLocation: UserLocation = {
-            city: '📍 Ville non détectée',
+            city: '📍 Position approximative',
             region: '',
             country: 'Sénégal',
-            lat: 14.7167,
-            lng: -17.4677,
-            detected: false,
+            lat: latitude,
+            lng: longitude,
+            detected: true,
             isDefault: true,
           };
-          setError('📍 Activez la localisation pour une géolocalisation précise');
+          setError('📍 Position approximative - activez la localisation pour plus de précision');
           setLocation(defaultLocation);
           setLoading(false);
-          resolve(defaultLocation);
-          return;
+          return defaultLocation;
         }
-
-        navigator.geolocation.getCurrentPosition(
-          async (position) => {
-            const { latitude, longitude } = position.coords;
-            
-            try {
-              const response = await fetch(
-                `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&addressdetails=1&accept-language=fr&zoom=18`
-              );
-              
-              if (response.ok) {
-                const data = await response.json();
-                const city = data.address?.city || data.address?.town || data.address?.village || 'Dakar';
-                const region = data.address?.state || data.address?.region || city;
-                const country = data.address?.country || 'Sénégal';
-                
-                const newLocation: UserLocation = {
-                  city,
-                  region,
-                  country,
-                  lat: latitude,
-                  lng: longitude,
-                  detected: true,
-                  address: `${city}, ${region}`,
-                  isDefault: false,
-                };
-                
-                console.log(`📍 Localisation GPS : ${city}`);
-                setLocation(newLocation);
-                localStorage.setItem('user_location', JSON.stringify(newLocation));
-                setLoading(false);
-                resolve(newLocation);
-              } else {
-                throw new Error('Erreur API');
-              }
-            } catch (err) {
-              console.error('Erreur reverse geocoding:', err);
-              const defaultLocation: UserLocation = {
-                city: '📍 Position approximative',
-                region: '',
-                country: 'Sénégal',
-                lat: latitude,
-                lng: longitude,
-                detected: true,
-                isDefault: true,
-              };
-              setError('📍 Position approximative - activez la localisation pour plus de précision');
-              setLocation(defaultLocation);
-              setLoading(false);
-              resolve(defaultLocation);
-            }
-          },
-          () => {
-            // Si la géolocalisation échoue, on garde la position IP
-            const defaultLocation: UserLocation = {
-              city: '📍 Position approximative',
-              region: '',
-              country: 'Sénégal',
-              lat: 14.7167,
-              lng: -17.4677,
-              detected: false,
-              isDefault: true,
-            };
-            setError('📍 Position approximative - activez la localisation pour plus de précision');
-            setLocation(defaultLocation);
-            setLoading(false);
-            resolve(defaultLocation);
-          },
-          {
-            enableHighAccuracy: true,
-            timeout: 10000,
-            maximumAge: 0,
-          }
+      } catch (geoErr) {
+        // GPS refusé/indisponible (natif ou web) : on garde la position par défaut.
+        const denied = (geoErr as UnifiedPositionError)?.code === 1;
+        const defaultLocation: UserLocation = {
+          city: denied ? '📍 Ville non détectée' : '📍 Position approximative',
+          region: '',
+          country: 'Sénégal',
+          lat: 14.7167,
+          lng: -17.4677,
+          detected: false,
+          isDefault: true,
+        };
+        setError(
+          denied
+            ? '📍 Activez la localisation pour une géolocalisation précise'
+            : '📍 Position approximative - activez la localisation pour plus de précision'
         );
-      });
+        setLocation(defaultLocation);
+        setLoading(false);
+        return defaultLocation;
+      }
       
     } catch (err) {
       console.error('Erreur détection localisation:', err);
