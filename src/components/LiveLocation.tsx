@@ -21,6 +21,13 @@ import {
   Shield,
   Zap,
 } from 'lucide-react';
+import {
+  getCurrentPosition,
+  watchPosition,
+  clearWatch,
+  checkLocationPermission,
+  type UnifiedPosition,
+} from '@/lib/geolocation';
 
 interface LocationData {
   lat: number;
@@ -76,7 +83,7 @@ interface BigDataCloudResponse {
 
 export function LiveLocation() {
   const [location, setLocation] = useState<LocationData | null>(null);
-  const [watchId, setWatchId] = useState<number | null>(null);
+  const [watchId, setWatchId] = useState<string | number | null>(null);
   const [isWatching, setIsWatching] = useState(false);
   const [status, setStatus] = useState<'idle' | 'searching' | 'found' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -84,27 +91,32 @@ export function LiveLocation() {
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [locationHistory, setLocationHistory] = useState<LocationData[]>([]);
   const [isLocating, setIsLocating] = useState(false);
-  const watchIdRef = useRef<number | null>(null);
+  const watchIdRef = useRef<string | number | null>(null);
   const historyMax = 10;
 
-  // Vérifier la permission initiale
+  // Vérifier la permission initiale (natif : @capacitor/geolocation ; web : Permissions API)
   useEffect(() => {
+    checkLocationPermission().then(setPermissionState);
+
+    // Web uniquement : réagit en direct si la permission change (ex : via
+    // l'icône de cadenas du navigateur) sans attendre un nouveau check. Pas
+    // d'équivalent fiable côté natif — le listener appStateChange plus bas
+    // revérifie déjà au retour au premier plan, ce qui couvre le cas natif
+    // (changement de permission via les Paramètres Android).
     if (typeof navigator !== 'undefined' && 'permissions' in navigator) {
-      navigator.permissions.query({ name: 'geolocation' }).then((result) => {
-        setPermissionState(result.state as 'prompt' | 'granted' | 'denied');
-        result.onchange = () => {
-          setPermissionState(result.state as 'prompt' | 'granted' | 'denied');
-        };
-      });
+      navigator.permissions
+        .query({ name: 'geolocation' as PermissionName })
+        .then((result) => {
+          result.onchange = () => setPermissionState(result.state as 'prompt' | 'granted' | 'denied');
+        })
+        .catch(() => {});
     }
   }, []);
 
   // Nettoyer le watch à la destruction
   useEffect(() => {
     return () => {
-      if (watchIdRef.current !== null) {
-        navigator.geolocation.clearWatch(watchIdRef.current);
-      }
+      clearWatch(watchIdRef.current);
     };
   }, []);
 
@@ -232,7 +244,7 @@ export function LiveLocation() {
   // ============================================================
   // Fonction principale de localisation
   // ============================================================
-  const updateLocation = useCallback(async (position: GeolocationPosition, source: 'gps' | 'ip' = 'gps') => {
+  const updateLocation = useCallback(async (position: UnifiedPosition, source: 'gps' | 'ip' = 'gps') => {
     const { latitude, longitude, accuracy, altitude, speed, heading } = position.coords;
 
     const address = await getAddressFromBigDataCloud(latitude, longitude);
@@ -261,13 +273,7 @@ export function LiveLocation() {
     });
   }, []);
 
-  const startLocationTracking = useCallback(() => {
-    if (!navigator.geolocation) {
-      setStatus('error');
-      setErrorMessage('Votre navigateur ne supporte pas la géolocalisation.');
-      return;
-    }
-
+  const startLocationTracking = useCallback(async () => {
     if (permissionState === 'denied') {
       setStatus('error');
       setErrorMessage('Activez votre position pour voir les produits proches de chez vous. Vous pouvez continuer sans la localisation.');
@@ -280,35 +286,35 @@ export function LiveLocation() {
 
     // Arrêter le watch existant
     if (watchIdRef.current !== null) {
-      navigator.geolocation.clearWatch(watchIdRef.current);
+      await clearWatch(watchIdRef.current);
       watchIdRef.current = null;
     }
 
-    // Démarrer le watch avec haute précision
-    const id = navigator.geolocation.watchPosition(
-      async (position) => {
-        await updateLocation(position, 'gps');
-        setIsLocating(false);
+    // Démarrer le watch avec haute précision — natif (@capacitor/geolocation)
+    // ou web (navigator.geolocation) selon la plateforme, voir src/lib/geolocation.ts
+    const id = await watchPosition(
+      { enableHighAccuracy: true, timeout: 15000 },
+      async (position, error) => {
+        if (error) {
+          console.error('Erreur GPS:', error);
+          setStatus('error');
+          setErrorMessage(
+            error.code === 1
+              ? 'Activez votre position pour voir les produits proches de chez vous. Vous pouvez continuer sans la localisation.'
+              : error.code === 2
+              ? 'Position non disponible. Assurez-vous d\'avoir un signal GPS.'
+              : error.code === 3
+              ? 'Délai de localisation dépassé. Réessayez.'
+              : 'Erreur de localisation.'
+          );
+          setIsLocating(false);
+          return;
+        }
+        if (position) {
+          await updateLocation(position, 'gps');
+          setIsLocating(false);
+        }
       },
-      (error) => {
-        console.error('Erreur GPS:', error);
-        setStatus('error');
-        setErrorMessage(
-          error.code === 1
-            ? 'Activez votre position pour voir les produits proches de chez vous. Vous pouvez continuer sans la localisation.'
-            : error.code === 2
-            ? 'Position non disponible. Assurez-vous d\'avoir un signal GPS.'
-            : error.code === 3
-            ? 'Délai de localisation dépassé. Réessayez.'
-            : 'Erreur de localisation.'
-        );
-        setIsLocating(false);
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 15000,
-        maximumAge: 0,
-      }
     );
 
     watchIdRef.current = id;
@@ -340,12 +346,10 @@ export function LiveLocation() {
         const { App } = await import('@capacitor/app');
         const handle = await App.addListener('appStateChange', ({ isActive }) => {
           if (!isActive) return;
-          if (typeof navigator !== 'undefined' && 'permissions' in navigator) {
-            navigator.permissions.query({ name: 'geolocation' }).then((result) => {
-              setPermissionState(result.state as 'prompt' | 'granted' | 'denied');
-              if (result.state === 'granted') startLocationTracking();
-            });
-          }
+          checkLocationPermission().then((state) => {
+            setPermissionState(state);
+            if (state === 'granted') startLocationTracking();
+          });
         });
         removeListener = () => handle.remove();
       } catch (err) {
@@ -358,7 +362,7 @@ export function LiveLocation() {
 
   const stopLocationTracking = useCallback(() => {
     if (watchIdRef.current !== null) {
-      navigator.geolocation.clearWatch(watchIdRef.current);
+      clearWatch(watchIdRef.current);
       watchIdRef.current = null;
     }
     setWatchId(null);
@@ -367,30 +371,21 @@ export function LiveLocation() {
     setIsLocating(false);
   }, []);
 
-  const getSingleLocation = useCallback(() => {
-    if (!navigator.geolocation) {
-      setStatus('error');
-      setErrorMessage('Géolocalisation non supportée.');
-      return;
-    }
-
+  const getSingleLocation = useCallback(async () => {
     setStatus('searching');
     setErrorMessage(null);
     setIsLocating(true);
 
-    navigator.geolocation.getCurrentPosition(
-      async (position) => {
-        await updateLocation(position, 'gps');
-        setIsLocating(false);
-      },
-      (error) => {
-        setStatus('error');
-        setErrorMessage('Impossible d\'obtenir la position.');
-        console.error(error);
-        setIsLocating(false);
-      },
-      { enableHighAccuracy: true, timeout: 10000 }
-    );
+    try {
+      const position = await getCurrentPosition({ enableHighAccuracy: true, timeout: 10000 });
+      await updateLocation(position, 'gps');
+      setIsLocating(false);
+    } catch (error) {
+      setStatus('error');
+      setErrorMessage('Impossible d\'obtenir la position.');
+      console.error(error);
+      setIsLocating(false);
+    }
   }, [updateLocation]);
 
   // ============================================================
