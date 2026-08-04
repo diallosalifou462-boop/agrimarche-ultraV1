@@ -166,19 +166,24 @@ function LoginContent() {
 
       // Mot de passe OK → envoie l'OTP
       const phoneE164 = toE164(phone);
-      const isNative = await waitForNativeBridge();
-      isNativeRef.current = isNative;
-      if (isNative) {
-        // APK : la suite est gérée par le listener 'phoneCodeSent'
-        await FirebaseAuthentication.signInWithPhoneNumber({ phoneNumber: phoneE164 });
-      } else {
-        setupRecaptcha();
-        const result = await signInWithPhoneNumber(auth, phoneE164, recaptchaRef.current!);
-        setConfirmResult(result);
-        setStep('otp');
-        setResendCooldown(60);
-        setLoading(false);
+      const bridgeLikelyNative = Capacitor.isNativePlatform() || (await waitForNativeBridge());
+      isNativeRef.current = bridgeLikelyNative;
+      if (bridgeLikelyNative) {
+        try {
+          // APK : la suite est gérée par le listener 'phoneCodeSent'
+          await FirebaseAuthentication.signInWithPhoneNumber({ phoneNumber: phoneE164 });
+          return;
+        } catch (nativeErr: any) {
+          const msg = String(nativeErr?.message || nativeErr);
+          if (!/not implemented|not available|unimplemented/i.test(msg)) throw nativeErr;
+        }
       }
+      setupRecaptcha();
+      const result = await signInWithPhoneNumber(auth, phoneE164, recaptchaRef.current!);
+      setConfirmResult(result);
+      setStep('otp');
+      setResendCooldown(60);
+      setLoading(false);
     } catch (err: any) {
       const code = err?.code;
       if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
@@ -200,17 +205,22 @@ function LoginContent() {
     setLoading(true);
     try {
       const phoneE164 = toE164(phone);
-      const isNative = await waitForNativeBridge();
-      isNativeRef.current = isNative;
-      if (isNative) {
-        await FirebaseAuthentication.signInWithPhoneNumber({ phoneNumber: phoneE164 });
-      } else {
-        setupRecaptcha();
-        const result = await signInWithPhoneNumber(auth, phoneE164, recaptchaRef.current!);
-        setConfirmResult(result);
-        setResendCooldown(60);
-        setLoading(false);
+      const bridgeLikelyNative = Capacitor.isNativePlatform() || (await waitForNativeBridge());
+      isNativeRef.current = bridgeLikelyNative;
+      if (bridgeLikelyNative) {
+        try {
+          await FirebaseAuthentication.signInWithPhoneNumber({ phoneNumber: phoneE164 });
+          return;
+        } catch (nativeErr: any) {
+          const msg = String(nativeErr?.message || nativeErr);
+          if (!/not implemented|not available|unimplemented/i.test(msg)) throw nativeErr;
+        }
       }
+      setupRecaptcha();
+      const result = await signInWithPhoneNumber(auth, phoneE164, recaptchaRef.current!);
+      setConfirmResult(result);
+      setResendCooldown(60);
+      setLoading(false);
     } catch {
       setError("Impossible d'envoyer le SMS");
       setLoading(false);

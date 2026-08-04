@@ -196,30 +196,47 @@ export default function RegisterPage() {
     try {
       const phoneE164 = toE164(formData.phone);
 
-      // Attend activement le pont natif (contourne le timing bug)
-      const isNative = await waitForNativeBridge();
-      isNativeRef.current = isNative;
+      // ─── Fix : on ne devine plus via un timeout (source du bug
+      // "internal error" intermittent sur iOS). On essaie D'ABORD le
+      // plugin natif ; on ne bascule sur le flow web/reCAPTCHA que si
+      // le plugin natif est réellement indisponible (erreur Capacitor
+      // "UNIMPLEMENTED"/"not available"), jamais sur un simple délai.
+      const bridgeLikelyNative = Capacitor.isNativePlatform() || (await waitForNativeBridge());
+      isNativeRef.current = bridgeLikelyNative;
 
-      // 🔍 DEBUG TEMPORAIRE — à retirer une fois le diagnostic fait
       console.log('[DEBUG] Capacitor.getPlatform():', Capacitor.getPlatform());
-      console.log('[DEBUG] waitForNativeBridge() résultat:', isNative);
-      console.log('[DEBUG] typeof window.Capacitor:', typeof (window as any).Capacitor);
-      console.log('[DEBUG] window.location.href:', window.location.href);
+      console.log('[DEBUG] bridgeLikelyNative:', bridgeLikelyNative);
 
-      if (isNative) {
-        // APK Android/iOS : vérification native, pas de reCAPTCHA.
-        // La suite (setStep('otp'), etc.) est gérée par le
-        // listener 'phoneCodeSent' ci-dessus.
-        await FirebaseAuthentication.signInWithPhoneNumber({ phoneNumber: phoneE164 });
-      } else {
-        // Web (navigateur/dev) : flow classique + reCAPTCHA
-        setupRecaptcha();
-        const result = await signInWithPhoneNumber(auth, phoneE164, recaptchaRef.current!);
-        setConfirmResult(result);
-        setStep('otp');
-        setResendCooldown(60);
-        setLoading(false);
+      if (bridgeLikelyNative) {
+        try {
+          // APK Android/iOS : vérification native, pas de reCAPTCHA.
+          // La suite (setStep('otp'), etc.) est gérée par le
+          // listener 'phoneCodeSent' ci-dessus.
+          await FirebaseAuthentication.signInWithPhoneNumber({ phoneNumber: phoneE164 });
+          return;
+        } catch (nativeErr: any) {
+          const msg = String(nativeErr?.message || nativeErr);
+          const pluginUnavailable =
+            /not implemented|not available|unimplemented/i.test(msg);
+          console.error('[DEBUG] Échec plugin natif:', msg);
+          if (!pluginUnavailable) {
+            // Vraie erreur Firebase (numéro invalide, quota, etc.) :
+            // on la laisse remonter au catch général, PAS de fallback web.
+            throw nativeErr;
+          }
+          // Sinon (plugin réellement absent, ex: build web pur) : on
+          // continue vers le flow web ci-dessous.
+        }
       }
+
+      // Web (navigateur/dev, ou plugin natif introuvable) : flow
+      // classique + reCAPTCHA
+      setupRecaptcha();
+      const result = await signInWithPhoneNumber(auth, phoneE164, recaptchaRef.current!);
+      setConfirmResult(result);
+      setStep('otp');
+      setResendCooldown(60);
+      setLoading(false);
     } catch (err: any) {
       console.error(err);
       if (err?.code === 'auth/invalid-phone-number') {
