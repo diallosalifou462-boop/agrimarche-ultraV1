@@ -28,6 +28,22 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Read app version from package.json
+        id: app_version
+        run: |
+          set -e
+          # Source unique de vérité pour le numéro de version marketing :
+          # le champ "version" de package.json. Plus besoin de toucher au
+          # project.pbxproj à la main à chaque nouvelle soumission — on
+          # bump juste la version dans package.json (ex: npm version patch).
+          APP_VERSION=$(node -p "require('./package.json').version")
+          if [ -z "$APP_VERSION" ]; then
+            echo "❌ Impossible de lire la version depuis package.json"
+            exit 1
+          fi
+          echo "✅ Version lue depuis package.json : $APP_VERSION"
+          echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
+
       - name: Build web (Capacitor)
         env:
           NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME: ${{ secrets.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME }}
@@ -90,13 +106,9 @@ jobs:
           KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
           KEYCHAIN_PASSWORD=$(uuidgen)
 
-          # Décoder le certificat et le profil depuis les secrets
-          # (macOS utilise BSD base64 : -D pour décoder, -o pour la sortie —
-          # la syntaxe GNU "--decode" n'est pas fiable ici)
           echo "$CERT_BASE64" | base64 -D -o "$RUNNER_TEMP/certificate.p12"
           echo "$PROFILE_BASE64" | base64 -D -o "$RUNNER_TEMP/profile.mobileprovision"
 
-          # Créer un trousseau temporaire dédié à ce build
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -104,7 +116,6 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychain -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed 's/"//g')
 
-          # Installer le profil de provisioning au bon endroit
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           cp "$RUNNER_TEMP/profile.mobileprovision" ~/Library/MobileDevice/Provisioning\ Profiles/
 
@@ -124,10 +135,9 @@ jobs:
       - name: Archive
         run: |
           set -e
-          # Basé sur la date/heure UTC (format YYYYMMDDHHmm converti en nombre)
-          # pour garantir un numéro de build toujours strictement croissant,
-          # même si github.run_number est retombé sous une valeur déjà utilisée.
           BUILD_NUMBER=$(date -u +%y%m%d%H%M)
+          echo "Build number : $BUILD_NUMBER"
+          echo "Marketing version (depuis package.json) : $APP_VERSION"
           xcodebuild archive \
             -project "$XCODE_PROJECT" \
             -scheme "$XCODE_SCHEME" \
@@ -135,6 +145,7 @@ jobs:
             -archivePath "$RUNNER_TEMP/App.xcarchive" \
             -destination "generic/platform=iOS" \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            MARKETING_VERSION="$APP_VERSION" \
             CODE_SIGN_STYLE=Manual \
             DEVELOPMENT_TEAM=KAMMWG3VQH
 
@@ -193,11 +204,6 @@ jobs:
           mkdir -p ~/private_keys
           echo "$API_KEY_BASE64" | base64 -D -o ~/private_keys/AuthKey_${API_KEY_ID}.p8
 
-          # Vérification : le fichier décodé doit être une vraie clé privée PEM.
-          # Si le secret APP_STORE_CONNECT_API_KEY a été mal encodé (texte brut au
-          # lieu de base64, double encodage, etc.), ce check échoue ici avec un
-          # message clair au lieu de laisser altool planter plus loin avec une
-          # erreur JWT obscure.
           if ! head -1 ~/private_keys/AuthKey_${API_KEY_ID}.p8 | grep -q "BEGIN PRIVATE KEY"; then
             echo "❌ Le fichier .p8 décodé est invalide."
             echo "→ Vérifie que le secret APP_STORE_CONNECT_API_KEY contient bien le"
