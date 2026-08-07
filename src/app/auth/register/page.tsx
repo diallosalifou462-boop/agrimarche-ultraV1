@@ -8,10 +8,12 @@ import { useAuth } from '@/hooks/useAuth';
 import {
   RecaptchaVerifier,
   signInWithPhoneNumber,
+  signInWithCustomToken,
   ConfirmationResult,
 } from 'firebase/auth';
 import { auth } from '@/lib/firebase/firebase';
 import { Capacitor } from '@capacitor/core';
+import { detectCarrier } from '@/lib/carrier';
 
 // ─── Attend que le pont natif Capacitor soit prêt ─────
 // Sur certains démarrages, window.Capacitor s'injecte avec
@@ -98,6 +100,9 @@ export default function RegisterPage() {
   const [loading, setLoading] = useState(false);
   const [resendCooldown, setResendCooldown] = useState(0);
   const isNativeRef = useRef(false);
+  // true si on utilise le système OTP maison (Africa's Talking) au lieu
+  // de Firebase Phone Auth — cas des numéros Free/Expresso, voir lib/carrier.ts
+  const useCustomOtpRef = useRef(false);
 
   useEffect(() => { setIsClient(true); }, []);
 
@@ -195,6 +200,32 @@ export default function RegisterPage() {
     setLoading(true);
     try {
       const phoneE164 = toE164(formData.phone);
+
+      // ─── Routage par opérateur ──────────────────────────
+      // Firebase Phone Auth (SMS Google) est fiable sur Orange, mais
+      // échoue très souvent sur Free/Expresso au Sénégal. Pour ces
+      // deux opérateurs, on passe par notre propre système OTP
+      // (Africa's Talking) au lieu de Firebase. Voir src/lib/carrier.ts.
+      const carrier = detectCarrier(formData.phone);
+      if (carrier === 'free' || carrier === 'expresso') {
+        useCustomOtpRef.current = true;
+        const res = await fetch('/api/otp/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone: phoneE164 }),
+        });
+        const json = await res.json();
+        if (!res.ok) {
+          setError(json.error || "Erreur lors de l'envoi du code");
+          setLoading(false);
+          return;
+        }
+        setStep('otp');
+        setResendCooldown(60);
+        setLoading(false);
+        return;
+      }
+      useCustomOtpRef.current = false;
 
       // ─── Fix : on ne devine plus via un timeout (source du bug
       // "internal error" intermittent sur iOS). On essaie D'ABORD le
@@ -344,6 +375,26 @@ export default function RegisterPage() {
     setLoading(true);
     setError('');
     try {
+      if (useCustomOtpRef.current) {
+        // Free/Expresso : vérification via notre API (Africa's Talking),
+        // puis connexion Firebase avec le jeton personnalisé retourné.
+        const phoneE164 = toE164(formData.phone);
+        const res = await fetch('/api/otp/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone: phoneE164, code }),
+        });
+        const json = await res.json();
+        if (!res.ok) {
+          setError(json.error || 'Code incorrect');
+          setLoading(false);
+          return;
+        }
+        await signInWithCustomToken(auth, json.customToken);
+        await finalizeRegistration();
+        return;
+      }
+
       if (isNativeRef.current) {
         if (!verificationId) { setError('Session expirée, renvoyez le code'); setLoading(false); return; }
         await FirebaseAuthentication.confirmVerificationCode({ verificationId, verificationCode: code });

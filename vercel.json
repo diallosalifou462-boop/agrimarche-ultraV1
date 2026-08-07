@@ -1,1 +1,12 @@
-{"version":2,"framework":"nextjs","buildCommand":"npm run build","outputDirectory":".next"}
+{
+  "version": 2,
+  "framework": "nextjs",
+  "buildCommand": "npm run build",
+  "outputDirectory": ".next",
+  "crons": [
+    {
+      "path": "/api/cron/promote-stale-products",
+      "schedule": "0 3 * * *"
+    }
+  ]
+}

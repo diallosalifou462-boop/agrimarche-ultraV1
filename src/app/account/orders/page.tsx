@@ -38,6 +38,13 @@ interface Order {
   createdAt: any;
   cancelledBy?: string;
   cancelledAt?: any;
+  // ✅ NOUVEAU — le client doit voir qui a pris en charge la livraison de sa
+  // commande (nom + téléphone du livreur), pas seulement le statut "En cours
+  // de livraison". Champs écrits par le livreur au moment où il accepte la
+  // commande (voir claimOrder dans delivery/dashboard/page.tsx).
+  delivererId?: string;
+  delivererName?: string;
+  delivererPhone?: string;
 }
 
 // Statut, couleurs, icônes et normalisation viennent tous de @/lib/orderStatus.
@@ -300,6 +307,39 @@ function OrdersContent() {
                         <span style={{ fontSize: 14, fontWeight: 700, color: '#1A1A1A' }}>{formatFCFA(selectedOrder.total)}</span>
                       </div>
                     </div>
+
+                    {/* ✅ NOUVEAU — Livreur assigné : dès qu'un livreur accepte
+                        la commande (delivererId présent), le client voit qui
+                        prend en charge sa livraison, avec un accès direct pour
+                        l'appeler ou lui écrire sur WhatsApp. */}
+                    {selectedOrder.delivererName && ['en_livraison', 'livre'].includes(selectedOrder.status) && (
+                      <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 12, padding: '12px 14px', marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                        <div>
+                          <p style={{ margin: 0, fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', color: '#2563eb', textTransform: 'uppercase' }}>🚴 Votre livreur</p>
+                          <p style={{ margin: '3px 0 0', fontSize: 13, fontWeight: 600, color: '#1A1A1A' }}>{selectedOrder.delivererName}</p>
+                        </div>
+                        {selectedOrder.delivererPhone && (
+                          <div style={{ display: 'flex', gap: 8 }}>
+                            <a
+                              href={`tel:${selectedOrder.delivererPhone}`}
+                              style={{ width: 34, height: 34, borderRadius: '50%', background: '#2563eb', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', textDecoration: 'none' }}
+                              aria-label="Appeler le livreur"
+                            >
+                              <svg width={15} height={15} viewBox="0 0 24 24" fill="currentColor"><path d="M6.62 10.79a15.05 15.05 0 006.59 6.59l2.2-2.2a1 1 0 011.01-.24 11.36 11.36 0 003.57.57 1 1 0 011 1V20a1 1 0 01-1 1C10.61 21 3 13.39 3 4a1 1 0 011-1h3.5a1 1 0 011 1 11.36 11.36 0 00.57 3.57 1 1 0 01-.25 1.01l-2.2 2.21z"/></svg>
+                            </a>
+                            <a
+                              href={`https://wa.me/${selectedOrder.delivererPhone.replace(/\D/g, '')}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{ width: 34, height: 34, borderRadius: '50%', background: '#059669', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', textDecoration: 'none' }}
+                              aria-label="WhatsApp le livreur"
+                            >
+                              <svg width={15} height={15} viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.149-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.095 3.2 5.076 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 0C5.373 0 0 5.373 0 12c0 2.125.558 4.121 1.531 5.856L.073 23.27a.75.75 0 00.918.882l5.57-1.461A11.944 11.944 0 0012 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 21.75a9.73 9.73 0 01-4.964-1.363l-.355-.212-3.676.965.978-3.576-.232-.368A9.713 9.713 0 012.25 12C2.25 6.615 6.615 2.25 12 2.25S21.75 6.615 21.75 12 17.385 21.75 12 21.75z"/></svg>
+                            </a>
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                     {/* Actions */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
