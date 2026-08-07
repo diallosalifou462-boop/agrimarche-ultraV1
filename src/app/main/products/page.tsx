@@ -26,7 +26,7 @@ const CATEGORIES = [
   { label: 'Elevage',  icon: '', color: '#E74C3C' },
 ];
 
-const WA_NUMBER = '221779747073';
+const WA_NUMBER = '221701104338';
 const PAGE_SIZE = 40; // Nombre de produits chargés par page — évite de télécharger tout le catalogue d'un coup
 
 function WaIcon({ s = 16 }: { s?: number }) {
@@ -255,7 +255,22 @@ export default function AgriMarket() {
     waitForFirestoreReady().then(() => {
       if (cancelled) return;
       trace('PRODUITS', 'waitForFirestoreReady() résolu — pose du listener principal');
-      unsubscribe = onSnapshot(query(collection(db, 'products'), limit(pageLimit)), snap => {
+      // ⚠️ FIX : avant, cette requête ignorait totalement `cat` — elle
+      // chargeait juste les `pageLimit` premiers produits du catalogue
+      // (ordre arbitraire par ID de document), et le filtre par catégorie
+      // (voir plus bas) ne s'appliquait qu'à ce petit lot déjà en mémoire.
+      // Résultat : taper sur "Fruits" ne montrait que les fruits présents
+      // par hasard dans les 40 premiers produits chargés — pas tous les
+      // fruits du catalogue. Avec un catalogue nombreux, la plupart des
+      // produits d'une catégorie restaient invisibles tant qu'on n'avait
+      // pas cliqué "Voir plus" assez de fois pour tous les charger.
+      // On interroge maintenant Firestore avec `where('category', '==', cat)`
+      // dès qu'une catégorie précise est sélectionnée, pour recevoir les
+      // vrais produits de cette catégorie, pas un sous-ensemble arbitraire.
+      const productsQuery = cat === 'Tous'
+        ? query(collection(db, 'products'), limit(pageLimit))
+        : query(collection(db, 'products'), where('category', '==', cat), limit(pageLimit));
+      unsubscribe = onSnapshot(productsQuery, snap => {
         trace('PRODUITS', `onSnapshot déclenché — ${snap.docs.length} doc(s), fromCache=${snap.metadata.fromCache}`);
         const d = snap.docs.map(doc => ({ id: doc.id, ...doc.data() })) as ProductData[];
         setProducts(d); setFiltered(d);
@@ -285,7 +300,16 @@ export default function AgriMarket() {
       cancelled = true;
       unsubscribe?.();
     };
-  }, [pageLimit, retryTick]);
+  }, [pageLimit, retryTick, cat]);
+
+  // ⚠️ FIX : quand on change de catégorie, on repart d'une première page
+  // fraîche (PAGE_SIZE) au lieu de garder le pageLimit accumulé pendant la
+  // navigation dans "Tous" — sinon changer de catégorie pouvait redemander
+  // d'un coup un lot bien plus gros que nécessaire, ou au contraire rester
+  // bloqué sur une pagination pensée pour une autre catégorie.
+  useEffect(() => {
+    setPageLimit(PAGE_SIZE);
+  }, [cat]);
 
   // Requêtes séparées, triées côté serveur, indépendantes de la pagination ci-dessus :
   // sans ça, "Nouveautés" et "Les plus demandés" ne regarderaient que les 40 premiers
@@ -343,11 +367,50 @@ export default function AgriMarket() {
     });
     return () => { cancelled = true; u?.(); };
   }, []);
+  // Pendant une recherche active, on ne garde que les annonces/promos qui
+  // correspondent réellement au terme recherché (produit, sous-titre ou
+  // partenaire) — sinon l'utilisateur voit des pubs sans rapport et doit
+  // scroller inutilement avant d'atteindre les résultats de sa recherche.
+  //
+  // ⚠️ FIX : ce filtre ne dépendait que de `search`, donc cliquer sur une
+  // catégorie ou changer le tri ne changeait jamais rien dans le bandeau
+  // d'annonces — il fallait aussi tenir compte de `cat` et `sort`.
+  // - Catégorie : seules les promos liées à un produit précis (type
+  //   'promotion', avec un productId) sont filtrées par catégorie, en
+  //   retrouvant la catégorie du produit dans `products`. Les bannières
+  //   partenaires génériques (type 'publicite') ne sont pas liées à un
+  //   produit et restent donc toujours visibles.
+  // - Tri : quand un tri prix est actif, les promos sont réordonnées par
+  //   prix (asc/desc) comme la liste de produits ; les bannières partenaires
+  //   n'ayant pas de prix passent en fin de liste.
+  const filteredAds = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    let list = ads.filter((a: any) => {
+      if (cat !== 'Tous' && a.type === 'promotion') {
+        const product = products.find(p => p.id === a.productId);
+        if (product && product.category !== cat) return false;
+      }
+      if (!q) return true;
+      const haystack = `${a.title || ''} ${a.subtitle || ''} ${a.partnerName || ''}`.toLowerCase();
+      return haystack.includes(q);
+    });
+    if (sort === 'asc' || sort === 'desc') {
+      list = [...list].sort((a: any, b: any) => {
+        const pa = a.type === 'promotion' ? (a.discountedPrice ?? Infinity) : Infinity;
+        const pb = b.type === 'promotion' ? (b.discountedPrice ?? Infinity) : Infinity;
+        return sort === 'asc' ? pa - pb : pb - pa;
+      });
+    }
+    return list;
+  }, [ads, search, cat, sort, products]);
+
+  useEffect(() => { setAdIdx(0); }, [filteredAds.length, search]);
+
   useEffect(() => {
-    if (ads.length <= 1) return;
-    const t = setInterval(() => setAdIdx(i => (i + 1) % ads.length), 4500);
+    if (filteredAds.length <= 1) return;
+    const t = setInterval(() => setAdIdx(i => (i + 1) % filteredAds.length), 4500);
     return () => clearInterval(t);
-  }, [ads.length]);
+  }, [filteredAds.length]);
 
 
   useEffect(() => {
@@ -395,12 +458,23 @@ export default function AgriMarket() {
   //   à montrer — jamais de rangée à moitié vide ou de donnée simulée.
   // ============================================================
   const homeSections = useMemo(() => {
-    const inStock = products.filter(p => p.stock === undefined || p.stock === null || p.stock > 0);
+    // Pendant une recherche, ces rangées de découverte ("Nouveautés", "Près de
+    // chez vous", "Les plus demandés") n'ont plus lieu d'être : elles ne
+    // correspondent pas au terme recherché et forceraient l'utilisateur à
+    // scroller dans le vide avant d'atteindre les vrais résultats.
+    if (search.trim()) return [];
+    // FIX : ces rangées de découverte ne dépendaient que de `search`, donc
+    // cliquer sur une catégorie ne changeait jamais rien ici (contrairement à
+    // la grille principale juste en dessous, qui filtre déjà par `cat`).
+    // On applique désormais le même filtre de catégorie à chaque rangée.
+    const byCat = <T extends { category?: string }>(arr: T[]) =>
+      cat === 'Tous' ? arr : arr.filter(p => p.category === cat);
+    const inStock = byCat(products).filter(p => p.stock === undefined || p.stock === null || p.stock > 0);
     const sections: { key: string; title: string; icon: string; items: ProductData[]; distances?: Map<string, number> }[] = [];
 
     // Basé sur la requête dédiée orderBy(createdAt) — précis quel que soit le nombre
     // de produits déjà chargés dans la page principale.
-    const fresh = freshProducts.filter(p => p.stock === undefined || p.stock === null || p.stock > 0);
+    const fresh = byCat(freshProducts).filter(p => p.stock === undefined || p.stock === null || p.stock > 0);
     if (fresh.length >= 3) {
       sections.push({ key: 'new', title: 'Nouveautés du jour', icon: '✦', items: fresh.slice(0, 10) });
     }
@@ -418,7 +492,7 @@ export default function AgriMarket() {
 
     // Basé sur la requête dédiée orderBy(whatsappClicks) — précis même si le produit
     // le plus demandé ne fait pas partie des 40 premiers chargés dans la grille.
-    const popular = popularProducts.filter(p =>
+    const popular = byCat(popularProducts).filter(p =>
       (p.whatsappClicks ?? 0) > 0 && (p.stock === undefined || p.stock === null || p.stock > 0)
     );
     if (popular.length >= 3) {
@@ -426,7 +500,7 @@ export default function AgriMarket() {
     }
 
     return sections;
-  }, [products, freshProducts, popularProducts, location]);
+  }, [products, freshProducts, popularProducts, location, search, cat]);
 
   const recommendationSections = useMemo(() => {
     if (!selected) return [] as { title: string; badge: string; items: ProductData[]; distances?: Map<string, number> }[];
@@ -497,6 +571,17 @@ export default function AgriMarket() {
     // Exclure les produits en rupture de stock
     r = r.filter(p => p.stock === undefined || p.stock === null || p.stock > 0);
     if (search) r = r.filter(p => p.name?.toLowerCase().includes(search.toLowerCase()));
+    // ⚠️ FIX (retour en arrière) : j'avais retiré cette ligne en pensant
+    // qu'elle faisait double emploi avec le `where('category', ...)` côté
+    // Firestore (voir plus haut). Erreur : `products` peut, pendant un bref
+    // instant (ou si le listener échoue silencieusement), contenir le
+    // cache localStorage de la dernière visite — qui n'est PAS filtré par
+    // catégorie. Sans ce filtre client, ce cache s'affiche tel quel dès
+    // l'ouverture, non filtré, ce qui donnait l'impression que le clic sur
+    // une catégorie ne faisait rien. On garde donc les deux : Firestore
+    // ramène TOUS les produits de la catégorie (pas juste les premiers
+    // chargés), et ce filtre garantit que l'affichage reste correct à
+    // tout moment, y compris avant que Firestore ait répondu.
     if (cat !== 'Tous') r = r.filter(p => p.category === cat);
     if (sort === 'asc')  r.sort((a,b) => (a.price||0)-(b.price||0));
     if (sort === 'desc') r.sort((a,b) => (b.price||0)-(a.price||0));
@@ -1546,17 +1631,19 @@ export default function AgriMarket() {
       ))}
 
       {/* ── CARROUSEL ANNONCES ── */}
-      {ads.length > 0 && (
+      {/* Filtrées par filteredAds : ne montre que les annonces qui correspondent
+          au terme recherché (ou toutes, si aucune recherche n'est en cours). */}
+      {filteredAds.length > 0 && (
         <div style={{ padding: '0 16px 4px', position: 'relative' }}>
           <div
-            onClick={() => { const ad = ads[adIdx]; if (ad?.linkUrl) window.location.href = ad.linkUrl; }}
-            style={{ position: 'relative', borderRadius: 18, overflow: 'hidden', cursor: ads[adIdx]?.linkUrl ? 'pointer' : 'default', boxShadow: '0 8px 32px rgba(13,74,31,0.14)' }}
+            onClick={() => { const ad = filteredAds[adIdx]; if (ad?.linkUrl) window.location.href = ad.linkUrl; }}
+            style={{ position: 'relative', borderRadius: 18, overflow: 'hidden', cursor: filteredAds[adIdx]?.linkUrl ? 'pointer' : 'default', boxShadow: '0 8px 32px rgba(13,74,31,0.14)' }}
           >
             {/* Image avec fallback couleur si URL cassée */}
-            {ads[adIdx]?.imageUrl && ads[adIdx].imageUrl.startsWith('http') ? (
+            {filteredAds[adIdx]?.imageUrl && filteredAds[adIdx].imageUrl.startsWith('http') ? (
               <img
-                src={cld(ads[adIdx].imageUrl, 800, 320)}
-                alt={ads[adIdx]?.title || 'Annonce'}
+                src={cld(filteredAds[adIdx].imageUrl, 800, 320)}
+                alt={filteredAds[adIdx]?.title || 'Annonce'}
                 loading="lazy"
                 decoding="async"
                 onError={e => { const el = e.currentTarget; el.style.display = 'none'; (el.nextElementSibling as HTMLElement).style.display = 'flex'; }}
@@ -1565,7 +1652,7 @@ export default function AgriMarket() {
             ) : null}
             {/* Fallback si pas d'image valide */}
             <div style={{
-              display: (ads[adIdx]?.imageUrl && ads[adIdx].imageUrl.startsWith('http')) ? 'none' : 'flex',
+              display: (filteredAds[adIdx]?.imageUrl && filteredAds[adIdx].imageUrl.startsWith('http')) ? 'none' : 'flex',
               width: '100%', height: 160,
               background: 'linear-gradient(135deg, var(--forest), var(--jade))',
               alignItems: 'center', justifyContent: 'center',
@@ -1573,26 +1660,26 @@ export default function AgriMarket() {
             }}>🌾</div>
             {/* Overlay bas */}
             <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, background: 'linear-gradient(transparent, rgba(0,0,0,0.72))', padding: '28px 14px 12px' }}>
-              {ads[adIdx]?.badge && (
+              {filteredAds[adIdx]?.badge && (
                 <span style={{ display: 'inline-block', background: '#ef4444', color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 8px', borderRadius: 6, marginBottom: 4, letterSpacing: '0.06em' }}>
-                  {ads[adIdx].badge}
+                  {filteredAds[adIdx].badge}
                 </span>
               )}
-              <div style={{ color: '#fff', fontWeight: 700, fontSize: 14, lineHeight: 1.2 }}>{ads[adIdx]?.title}</div>
-              {ads[adIdx]?.type === 'promotion' && ads[adIdx]?.discountedPrice ? (
+              <div style={{ color: '#fff', fontWeight: 700, fontSize: 14, lineHeight: 1.2 }}>{filteredAds[adIdx]?.title}</div>
+              {filteredAds[adIdx]?.type === 'promotion' && filteredAds[adIdx]?.discountedPrice ? (
                 <div style={{ marginTop: 3, display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ color: '#00ff87', fontWeight: 800, fontSize: 13 }}>{ads[adIdx].discountedPrice.toLocaleString()} FCFA</span>
-                  {ads[adIdx]?.originalPrice && <span style={{ textDecoration: 'line-through', color: 'rgba(255,255,255,0.5)', fontSize: 11 }}>{ads[adIdx].originalPrice.toLocaleString()}</span>}
-                  <span style={{ background: '#ef4444', color: '#fff', fontSize: 10, fontWeight: 700, padding: '1px 5px', borderRadius: 4 }}>-{ads[adIdx].discountPercent}%</span>
+                  <span style={{ color: '#00ff87', fontWeight: 800, fontSize: 13 }}>{filteredAds[adIdx].discountedPrice.toLocaleString()} FCFA</span>
+                  {filteredAds[adIdx]?.originalPrice && <span style={{ textDecoration: 'line-through', color: 'rgba(255,255,255,0.5)', fontSize: 11 }}>{filteredAds[adIdx].originalPrice.toLocaleString()}</span>}
+                  <span style={{ background: '#ef4444', color: '#fff', fontSize: 10, fontWeight: 700, padding: '1px 5px', borderRadius: 4 }}>-{filteredAds[adIdx].discountPercent}%</span>
                 </div>
-              ) : ads[adIdx]?.partnerName ? (
-                <div style={{ color: 'rgba(255,255,255,0.65)', fontSize: 11, marginTop: 2 }}>Partenaire · {ads[adIdx].partnerName}</div>
+              ) : filteredAds[adIdx]?.partnerName ? (
+                <div style={{ color: 'rgba(255,255,255,0.65)', fontSize: 11, marginTop: 2 }}>Partenaire · {filteredAds[adIdx].partnerName}</div>
               ) : null}
             </div>
             {/* Dots */}
-            {ads.length > 1 && (
+            {filteredAds.length > 1 && (
               <div style={{ position: 'absolute', bottom: 10, right: 12, display: 'flex', gap: 5 }}>
-                {ads.map((_: any, i: number) => (
+                {filteredAds.map((_: any, i: number) => (
                   <button
                     key={i}
                     onClick={e => { e.stopPropagation(); setAdIdx(i); }}

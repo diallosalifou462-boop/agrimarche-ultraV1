@@ -12,12 +12,6 @@ function isNativePlatform(): boolean {
   return Boolean((window as any).Capacitor?.isNativePlatform?.());
 }
 
-// ⚠️ FIX : la plateforme était codée en dur à 'android' dans le listener
-// 'registration' ci-dessous, MÊME quand l'app tournait sur iOS. Les tokens
-// des devices iOS (TestFlight) étaient donc enregistrés dans Firestore
-// avec platform: 'android' — ce qui casse silencieusement tout envoi
-// backend qui adapte le format du payload selon la plateforme (APNs vs
-// FCM data message), et fausse toute stat "devices par plateforme".
 function getNativePlatformName(): 'ios' | 'android' | 'web' {
   if (typeof window === 'undefined') return 'web';
   return ((window as any).Capacitor?.getPlatform?.() as 'ios' | 'android') ?? 'web';
@@ -39,10 +33,16 @@ export function useFCMToken() {
       setIsNative(native);
 
       if (native) {
-        // Sur natif, on délègue le statut de permission à Capacitor
+        // ⚠️ FIX : on utilise désormais @capacitor-firebase/messaging plutôt que
+        // @capacitor/push-notifications pour interroger le statut de permission
+        // ET pour obtenir le token. @capacitor/push-notifications renvoie, sur
+        // iOS, le token APNs BRUT (pas un token FCM) — Firebase Admin SDK rejette
+        // ces tokens silencieusement côté /api/send-push. @capacitor-firebase/
+        // messaging fait le pont natif APNs → FCM en interne et renvoie un vrai
+        // token FCM, sur iOS comme sur Android.
         try {
-          const { PushNotifications } = await import('@capacitor/push-notifications');
-          const status = await PushNotifications.checkPermissions();
+          const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
+          const status = await FirebaseMessaging.checkPermissions();
           setPermission(
             status.receive === 'granted'
               ? 'granted'
@@ -52,7 +52,7 @@ export function useFCMToken() {
           );
           setIsSupportedBrowser(false);
         } catch (err) {
-          console.warn('@capacitor/push-notifications non installé ou indisponible:', err);
+          console.warn('@capacitor-firebase/messaging non installé ou indisponible:', err);
         }
         setLoading(false);
         return;
@@ -68,7 +68,7 @@ export function useFCMToken() {
     checkSupport();
   }, []);
 
-  // Enregistrer le token natif dans Firestore - CORRIGÉ
+  // Enregistrer le token natif dans Firestore
   const saveTokenToFirestore = useCallback(
     async (fcmToken: string, platform: string) => {
       if (!user) {
@@ -88,61 +88,56 @@ export function useFCMToken() {
     [user]
   );
 
-  // Brancher les listeners Capacitor une fois pour toutes (natif uniquement)
+  // Brancher les listeners Firebase Messaging natifs (natif uniquement)
   useEffect(() => {
     if (!isNative || !user) return;
 
-    let registrationListener: any;
-    let errorListener: any;
-    let receivedListener: any;
+    let tokenListener: any;
+    let notificationListener: any;
 
     const setupNativePush = async () => {
       try {
-        const { PushNotifications } = await import('@capacitor/push-notifications');
+        const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
 
-        registrationListener = await PushNotifications.addListener(
-          'registration',
+        // Émis quand un token FCM est généré ou rafraîchi par le SDK natif.
+        tokenListener = await FirebaseMessaging.addListener(
+          'tokenReceived',
           async (tokenData) => {
-            setToken(tokenData.value);
+            setToken(tokenData.token);
             setPermission('granted');
-            await saveTokenToFirestore(tokenData.value, getNativePlatformName());
+            await saveTokenToFirestore(tokenData.token, getNativePlatformName());
           }
         );
 
-        errorListener = await PushNotifications.addListener('registrationError', (err) => {
-          console.error('Erreur enregistrement push natif:', err);
-        });
-
-        receivedListener = await PushNotifications.addListener(
-          'pushNotificationReceived',
-          (notification) => {
+        notificationListener = await FirebaseMessaging.addListener(
+          'notificationReceived',
+          (event) => {
             if (messageCallbackRef.current) {
               // On reformate au même shape que le payload FCM web pour rester compatible
               messageCallbackRef.current({
                 notification: {
-                  title: notification.title,
-                  body: notification.body,
+                  title: event.notification?.title,
+                  body: event.notification?.body,
                 },
-                data: notification.data,
+                data: event.notification?.data,
               });
             }
           }
         );
       } catch (err) {
-        console.warn("Impossible d'initialiser PushNotifications:", err);
+        console.warn("Impossible d'initialiser FirebaseMessaging natif:", err);
       }
     };
 
     setupNativePush();
 
     return () => {
-      registrationListener?.remove?.();
-      errorListener?.remove?.();
-      receivedListener?.remove?.();
+      tokenListener?.remove?.();
+      notificationListener?.remove?.();
     };
   }, [isNative, user, saveTokenToFirestore]);
 
-  // Demander la permission et obtenir le token - CORRIGÉ
+  // Demander la permission et obtenir le token
   const requestPermission = useCallback(async (): Promise<string | null> => {
     if (!user) {
       console.warn('Utilisateur non connecté. Le token sera enregistré plus tard.');
@@ -152,12 +147,12 @@ export function useFCMToken() {
     // --- Branche native (Android/iOS via Capacitor) ---
     if (isNative) {
       try {
-        const { PushNotifications } = await import('@capacitor/push-notifications');
-        const status = await PushNotifications.checkPermissions();
+        const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
+        const status = await FirebaseMessaging.checkPermissions();
         let finalStatus = status.receive;
 
         if (finalStatus === 'prompt' || finalStatus === 'prompt-with-rationale') {
-          const requested = await PushNotifications.requestPermissions();
+          const requested = await FirebaseMessaging.requestPermissions();
           finalStatus = requested.receive;
         }
 
@@ -168,8 +163,16 @@ export function useFCMToken() {
         }
 
         setPermission('granted');
-        await PushNotifications.register();
-        // Le token arrive de façon asynchrone via le listener 'registration' ci-dessus
+
+        // getToken() effectue lui-même, sur iOS, l'enregistrement APNs puis le
+        // pont vers Firebase — pas besoin d'appeler register() séparément ni
+        // de bridger manuellement le device token dans l'AppDelegate.
+        const { token: fcmToken } = await FirebaseMessaging.getToken();
+        if (fcmToken) {
+          setToken(fcmToken);
+          await saveTokenToFirestore(fcmToken, getNativePlatformName());
+          return fcmToken;
+        }
         return null;
       } catch (err) {
         console.error('Erreur demande permission push native:', err);
@@ -197,7 +200,15 @@ export function useFCMToken() {
         return null;
       }
 
-      const swRegistration = await navigator.serviceWorker.ready;
+      await navigator.serviceWorker.register('/sw.js').catch((err) => {
+        console.warn('[FCM] Échec enregistrement du Service Worker:', err);
+      });
+      const swRegistration = await Promise.race([
+        navigator.serviceWorker.ready,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('serviceWorker.ready timeout')), 8000),
+        ),
+      ]);
       const messaging = getMessaging();
       const fcmToken = await getToken(messaging, {
         vapidKey: process.env.NEXT_PUBLIC_VAPID_KEY,
@@ -229,10 +240,10 @@ export function useFCMToken() {
 
       if (isNative) {
         try {
-          const { PushNotifications } = await import('@capacitor/push-notifications');
-          await PushNotifications.unregister();
+          const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
+          await FirebaseMessaging.deleteToken();
         } catch (err) {
-          console.warn('Erreur unregister push natif:', err);
+          console.warn('Erreur suppression token push natif:', err);
         }
       }
     } catch (error) {
@@ -246,7 +257,7 @@ export function useFCMToken() {
       messageCallbackRef.current = callback;
 
       if (isNative) {
-        // Le listener Capacitor est déjà branché dans le useEffect ci-dessus
+        // Le listener natif est déjà branché dans le useEffect ci-dessus
         return () => {
           messageCallbackRef.current = null;
         };

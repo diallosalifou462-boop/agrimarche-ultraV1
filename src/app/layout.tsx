@@ -9,6 +9,13 @@ import { AuthProvider } from '@/contexts/AuthContext';
 import { CartProvider } from '@/hooks/useCart';
 import { NotificationProvider } from '@/components/NotificationProvider';
 import OfflineBanner from '@/components/OfflineBanner';
+// ✅ FIX : `toast(...)` (sonner) est déjà utilisé dans plusieurs pages
+// (admin/page.tsx, delivery/dashboard/page.tsx) mais aucun <Toaster />
+// n'était jamais monté nulle part dans l'app — chaque appel `toast.success`/
+// `toast.error` s'exécutait donc dans le vide, sans jamais rien afficher à
+// l'écran. Monté une seule fois ici, au niveau racine, pour que tous les
+// toasts de l'app (livreur, admin, etc.) s'affichent réellement.
+import { Toaster } from 'sonner';
 // import DebugTraceOverlay from '@/components/DebugTraceOverlay'; // désactivé (bugs résolus le 27/07) — décommenter pour réactiver
 
 // ✅ FIX CRITIQUE : ce fichier (src/app/layout.tsx) est le layout RACINE de
@@ -51,6 +58,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <NotificationProvider>
               <OfflineBanner />
               {children}
+              <Toaster position="top-center" richColors closeButton />
               {/* DebugTraceOverlay retiré (bugs résolus le 27/07) — le
                   composant reste dans src/components/ si on en a de nouveau
                   besoin plus tard : il suffira de remettre <DebugTraceOverlay />

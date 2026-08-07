@@ -13,8 +13,10 @@ import {
   MapPin, Phone, CheckCircle, User,
   Wifi, WifiOff, Package, ChevronDown, ChevronUp,
   AlertCircle, Eye, Target, LogOut, Navigation,
-  Calendar, MessageCircle, Save, Zap
+  Calendar, MessageCircle, Save, Zap,
+  Wallet, X, TrendingUp, Award, Clock
 } from 'lucide-react';
+import { toast } from 'sonner';
 import { ORDER_STATUS_CONFIG, statusTint, formatFCFA } from '@/lib/orderStatus';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -35,6 +37,12 @@ interface Order {
   delivererName?: string;
   delivererPhone?: string;
   total?: number;
+  // Frais de livraison = la part qui revient réellement au livreur pour
+  // cette course (calculé au checkout, voir src/app/checkout/page.tsx).
+  // C'est CE montant qu'il faut afficher/compter comme "gain du livreur" —
+  // pas `total`/`totalAmount` qui est le prix payé par le client (produits
+  // + livraison), un montant qui n'appartient pas au livreur.
+  deliveryFee?: number;
   tracking?: {
     currentLocation?: Location;
     lastUpdate?: any;
@@ -317,9 +325,12 @@ function OrderCard({ order, onMarkDelivered, currentLocation }: { order: Order; 
             <p style={{ color: '#64748b', fontSize: '13px', marginTop: '4px', fontWeight: 500 }}>{order.userName}</p>
           </div>
           <div style={{ textAlign: 'right' }}>
-            {order.totalAmount && (
-              <p style={{ color: ORDER_STATUS_CONFIG.livre.color, fontWeight: 700, fontSize: '17px' }}>{formatFCFA(order.totalAmount)}</p>
-            )}
+            {/* ✅ FIX : affichait `order.totalAmount` (champ quasi jamais
+                rempli côté checkout, et de toute façon le prix CLIENT, pas
+                le gain du livreur). On affiche maintenant `deliveryFee` —
+                le montant qui sera comptabilisé dans le solde du livreur
+                une fois le bouton "Livré" pressé. */}
+            <p style={{ color: '#059669', fontWeight: 800, fontSize: '17px' }}>+{formatFCFA(order.deliveryFee ?? 0)}</p>
             {lastUpdateStr && (
               <p style={{ color: '#94a3b8', fontSize: '10px', marginTop: '2px' }}>MAJ {lastUpdateStr}</p>
             )}
@@ -491,6 +502,125 @@ function btnStyleBtn(bg: string, color: string): React.CSSProperties {
   return { ...btnStyle(bg, color), border: 'none', cursor: 'pointer' };
 }
 
+// ─── Earnings Modal ────────────────────────────────────────────────────────────
+// ✅ NOUVEAU — panneau "Mes gains" ouvert en tapant l'avatar en haut à droite.
+// Répond au besoin : voir l'historique de ses livraisons ("affiliations",
+// c'est-à-dire toutes les commandes rattachées à ce livreur) ainsi que le
+// montant total gagné. Le gain de chaque commande = `deliveryFee` (les frais
+// de livraison réellement encaissés par le livreur), jamais `total` (prix
+// payé par le client, qui inclut les produits — ne lui appartient pas).
+
+function EarningsModal({
+  profile, totalEarnings, todayEarnings, weekEarnings, completedDeliveries, onClose,
+}: {
+  profile: any;
+  totalEarnings: number;
+  todayEarnings: number;
+  weekEarnings: number;
+  completedDeliveries: Order[];
+  onClose: () => void;
+}) {
+  const history = [...completedDeliveries].sort((a, b) => {
+    const ta = a.deliveredAt?.toDate?.()?.getTime?.() ?? 0;
+    const tb = b.deliveredAt?.toDate?.()?.getTime?.() ?? 0;
+    return tb - ta;
+  });
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.55)', zIndex: 200,
+        display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          width: '100%', maxWidth: '480px', maxHeight: '88vh', overflowY: 'auto',
+          background: '#f8fafc', borderRadius: '28px 28px 0 0', padding: '20px 18px 28px',
+          animation: 'slideUp 0.25s ease-out',
+        }}
+      >
+        <style>{`@keyframes slideUp{from{transform:translateY(24px);opacity:0.6}to{transform:translateY(0);opacity:1}}`}</style>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '18px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{ width: '40px', height: '40px', borderRadius: '50%', background: '#0f172a', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <User size={18} color="#fff" />
+            </div>
+            <div>
+              <p style={{ color: '#1e293b', fontSize: '15px', fontWeight: 700 }}>{profile?.displayName || 'Livreur'}</p>
+              <p style={{ color: '#94a3b8', fontSize: '11px' }}>{profile?.phone || ''}</p>
+            </div>
+          </div>
+          <button onClick={onClose} style={{ width: '34px', height: '34px', borderRadius: '50%', border: 'none', background: '#e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+            <X size={16} color="#475569" />
+          </button>
+        </div>
+
+        {/* Solde total */}
+        <div style={{ background: 'linear-gradient(135deg, #0f172a, #1e293b)', borderRadius: '22px', padding: '22px', marginBottom: '14px', boxShadow: '0 8px 24px rgba(15,23,42,0.25)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '7px', marginBottom: '6px' }}>
+            <Wallet size={15} color="#10b981" />
+            <p style={{ color: '#94a3b8', fontSize: '11px', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase' }}>Total gagné</p>
+          </div>
+          <p style={{ color: '#fff', fontSize: '32px', fontWeight: 800, letterSpacing: '-0.5px' }}>{formatFCFA(totalEarnings)}</p>
+          <p style={{ color: '#64748b', fontSize: '12px', marginTop: '4px' }}>{completedDeliveries.length} livraison(s) validée(s)</p>
+        </div>
+
+        {/* Aujourd'hui / cette semaine */}
+        <div style={{ display: 'flex', gap: '10px', marginBottom: '18px' }}>
+          <div style={{ flex: 1, background: '#fff', border: '1px solid #e2e8f0', borderRadius: '16px', padding: '13px 14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '4px' }}>
+              <Clock size={12} color="#f97316" />
+              <p style={{ color: '#94a3b8', fontSize: '10px', fontWeight: 600 }}>Aujourd'hui</p>
+            </div>
+            <p style={{ color: '#1e293b', fontSize: '16px', fontWeight: 700 }}>{formatFCFA(todayEarnings)}</p>
+          </div>
+          <div style={{ flex: 1, background: '#fff', border: '1px solid #e2e8f0', borderRadius: '16px', padding: '13px 14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '4px' }}>
+              <TrendingUp size={12} color="#3b82f6" />
+              <p style={{ color: '#94a3b8', fontSize: '10px', fontWeight: 600 }}>7 derniers jours</p>
+            </div>
+            <p style={{ color: '#1e293b', fontSize: '16px', fontWeight: 700 }}>{formatFCFA(weekEarnings)}</p>
+          </div>
+        </div>
+
+        {/* Historique des livraisons */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '10px' }}>
+          <Award size={13} color="#7c3aed" />
+          <p style={{ color: '#334155', fontSize: '12px', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase' }}>Historique des livraisons</p>
+        </div>
+
+        {history.length === 0 ? (
+          <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '16px', padding: '28px 18px', textAlign: 'center' }}>
+            <p style={{ color: '#94a3b8', fontSize: '13px' }}>Aucune livraison validée pour le moment</p>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {history.map(o => (
+              <div key={o.id} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '14px', padding: '12px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <p style={{ color: '#1e293b', fontSize: '13px', fontWeight: 600, fontFamily: 'monospace' }}>
+                    #{o.orderNumber || o.id.slice(-6).toUpperCase()}
+                  </p>
+                  <p style={{ color: '#94a3b8', fontSize: '11px', marginTop: '1px' }}>
+                    {o.userName || '—'}{o.deliveredAt?.toDate ? ` · ${formatDate(o.deliveredAt.toDate().toISOString())}` : ''}
+                  </p>
+                </div>
+                <span style={{ padding: '4px 10px', background: '#ecfdf5', borderRadius: '99px', color: '#059669', fontSize: '12px', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                  +{formatFCFA(o.deliveryFee ?? 0)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
 
 export default function DeliveryDashboard() {
@@ -505,6 +635,7 @@ export default function DeliveryDashboard() {
   const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<'disponibles' | 'encours' | 'terminees'>('encours');
   const [autoTabSet, setAutoTabSet] = useState(false);
+  const [showEarnings, setShowEarnings] = useState(false);
   const ordersRef = useRef<Order[]>([]);
 
   useEffect(() => { ordersRef.current = orders; }, [orders]);
@@ -629,12 +760,22 @@ export default function DeliveryDashboard() {
 
   const markAsDelivered = async (orderId: string) => {
     if (!confirm('Confirmer la livraison ?')) return;
+    // Le montant du gain (deliveryFee) est capturé AVANT l'updateDoc pour
+    // l'afficher dans le toast de confirmation — il vient s'ajouter au
+    // "montant" total du livreur (visible dans le panneau Mes gains, calculé
+    // dynamiquement à partir de toutes les commandes status:'livre').
+    const order = ordersRef.current.find(o => o.id === orderId);
     try {
       await updateDoc(doc(db, 'orders', orderId), {
         status: 'livre', statusLabel: 'Livrée',
         deliveredAt: serverTimestamp(), 'tracking.enabled': false,
       });
-    } catch { alert('Erreur lors de la validation'); }
+      toast.success(
+        order?.deliveryFee
+          ? `Livraison confirmée ! +${formatFCFA(order.deliveryFee)} ajoutés à votre solde`
+          : 'Livraison confirmée !'
+      );
+    } catch { toast.error('Erreur lors de la validation'); }
   };
 
   const handleLogout = async () => {
@@ -681,6 +822,19 @@ export default function DeliveryDashboard() {
     return ts && ts.toDateString() === todayStr;
   }).length;
 
+  // ✅ NOUVEAU : montant total gagné par le livreur — somme des `deliveryFee`
+  // (frais de livraison, PAS le prix des produits) de toutes ses commandes
+  // marquées "livre". Recalculé en direct depuis Firestore à chaque rendu :
+  // pas de compteur séparé à faire dériver, donc jamais désynchronisé.
+  const totalEarnings = completedDeliveries.reduce((sum, o) => sum + (o.deliveryFee ?? 0), 0);
+  const todayEarnings = completedDeliveries
+    .filter(o => { const ts = o.deliveredAt?.toDate?.(); return ts && ts.toDateString() === todayStr; })
+    .reduce((sum, o) => sum + (o.deliveryFee ?? 0), 0);
+  const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const weekEarnings = completedDeliveries
+    .filter(o => { const ts = o.deliveredAt?.toDate?.(); return ts && ts.getTime() >= weekAgo; })
+    .reduce((sum, o) => sum + (o.deliveryFee ?? 0), 0);
+
   // ✅ NOUVEAU : tri par proximité — les commandes les plus proches du
   // livreur (position GPS actuelle) apparaissent en premier, dans les deux
   // listes. Sans position GPS active, l'ordre reste celui de Firestore.
@@ -718,14 +872,39 @@ export default function DeliveryDashboard() {
               <h1 style={{ color: '#fff', fontSize: '19px', fontWeight: 700, marginTop: '1px' }}>{profile?.displayName || 'Livreur'}</h1>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <div style={{ width: '38px', height: '38px', borderRadius: '50%', background: 'rgba(255,255,255,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              {/* ✅ NOUVEAU : avatar cliquable → ouvre "Mes gains" (historique
+                  des livraisons + montant total encaissé). Avant, cette icône
+                  était purement décorative. */}
+              <button
+                onClick={() => setShowEarnings(true)}
+                style={{ width: '38px', height: '38px', borderRadius: '50%', background: 'rgba(255,255,255,0.1)', border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
+                aria-label="Mes gains"
+              >
                 <User size={17} color="#fff" />
-              </div>
+              </button>
               <button onClick={handleLogout} style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '7px 13px', background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: '40px', color: '#fca5a5', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}>
                 <LogOut size={13} />
               </button>
             </div>
           </div>
+
+          {/* ✅ NOUVEAU : solde total, cliquable, toujours visible en haut —
+              répond au besoin de voir "le montant" du livreur d'un coup
+              d'œil, sans devoir ouvrir le panneau détaillé. */}
+          <button
+            onClick={() => setShowEarnings(true)}
+            style={{
+              width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.28)',
+              borderRadius: '14px', padding: '11px 14px', marginBottom: '12px', cursor: 'pointer',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Wallet size={15} color="#34d399" />
+              <span style={{ color: '#a7f3d0', fontSize: '12px', fontWeight: 600 }}>Mon solde</span>
+            </div>
+            <span style={{ color: '#fff', fontSize: '16px', fontWeight: 800 }}>{formatFCFA(totalEarnings)}</span>
+          </button>
 
           {/* ✅ NOUVEAU : bilan du jour — la stat la plus attendue par un
               livreur en fin/cours de journée, absente avant. */}
@@ -856,8 +1035,12 @@ export default function DeliveryDashboard() {
                         </p>
                       )}
                     </div>
-                    <span style={{ padding: '4px 10px', background: '#dbeafe', borderRadius: '99px', color: '#2563eb', fontSize: '11px', fontWeight: 600, whiteSpace: 'nowrap' }}>
-                      {formatFCFA(order.total ?? order.totalAmount)}
+                    {/* ✅ FIX : c'était `order.total` (prix payé par le CLIENT,
+                        produits + livraison) affiché ici — trompeur pour un
+                        livreur qui doit voir CE QU'IL GAGNE, c'est-à-dire
+                        `deliveryFee` uniquement. */}
+                    <span style={{ padding: '4px 10px', background: '#dcfce7', borderRadius: '99px', color: '#059669', fontSize: '11px', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                      Gain {formatFCFA(order.deliveryFee ?? 0)}
                     </span>
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: pickup ? '1fr 1fr' : '1fr', gap: '8px' }}>
@@ -919,9 +1102,16 @@ export default function DeliveryDashboard() {
                       {order.dateLivree && <span style={{ fontSize: '10px', color: '#10b981' }}>✅ {formatDate(order.dateLivree)}</span>}
                     </div>
                   </div>
-                  <span style={{ padding: '4px 12px', background: statusTint('livre', 0.12), borderRadius: '99px', color: ORDER_STATUS_CONFIG.livre.color, fontSize: '11px', fontWeight: 600 }}>
-                    {ORDER_STATUS_CONFIG.livre.icon} {ORDER_STATUS_CONFIG.livre.label}
-                  </span>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
+                    <span style={{ padding: '4px 12px', background: statusTint('livre', 0.12), borderRadius: '99px', color: ORDER_STATUS_CONFIG.livre.color, fontSize: '11px', fontWeight: 600 }}>
+                      {ORDER_STATUS_CONFIG.livre.icon} {ORDER_STATUS_CONFIG.livre.label}
+                    </span>
+                    {/* ✅ NOUVEAU : gain comptabilisé pour cette livraison,
+                        visible directement dans l'onglet "Terminées". */}
+                    <span style={{ color: '#059669', fontSize: '12px', fontWeight: 700 }}>
+                      +{formatFCFA(order.deliveryFee ?? 0)}
+                    </span>
+                  </div>
                 </div>
               ))}
             </div>
@@ -930,6 +1120,17 @@ export default function DeliveryDashboard() {
 
         <div style={{ height: '16px' }} />
       </div>
+
+      {showEarnings && (
+        <EarningsModal
+          profile={profile}
+          totalEarnings={totalEarnings}
+          todayEarnings={todayEarnings}
+          weekEarnings={weekEarnings}
+          completedDeliveries={completedDeliveries}
+          onClose={() => setShowEarnings(false)}
+        />
+      )}
     </div>
   );
 }

@@ -41,17 +41,36 @@ export function phoneToEmail(phone: string): string {
   return `${phone.replace(/\D/g, '')}@agrimarche.sn`;
 }
 
-// ─── Demander permission + enregistrer token FCM ─────────
+// ─── Rafraîchir le token FCM (SANS jamais demander la permission) ─────────
+//
+// ⚠️ FIX CRITIQUE : cette fonction appelait auparavant
+// `Notification.requestPermission()` elle-même, à CHAQUE connexion, via
+// `onAuthStateChanged` — donc hors de tout geste utilisateur (clic).
+// Deux conséquences graves et silencieuses :
+//   1. La plupart des navigateurs bloquent ou ignorent un prompt de
+//      permission qui n'est pas déclenché par un clic. Et si l'utilisateur
+//      le refuse quand même, `Notification.permission` devient 'denied' de
+//      façon PERMANENTE pour cette origine — impossible de redemander en JS
+//      ensuite, y compris via le vrai bouton "Activer les notifications"
+//      (NotificationProvider.tsx / useFCMToken.ts), qui est censé être la
+//      SEULE source de vérité pour cette demande.
+//   2. Même quand ça fonctionnait, le token obtenu était écrit dans
+//      users/{uid}.fcmToken — un champ que PLUS AUCUNE route d'envoi ne lit
+//      (voir les commentaires dans /api/notifications/send,
+//      /api/send-push, /api/orders/notify-seller : elles lisent toutes la
+//      sous-collection users/{uid}/tokens/{token}, écrite par
+//      useFCMToken.ts). Un utilisateur pouvait donc "accepter" les
+//      notifications via ce chemin et n'en recevoir strictement aucune.
+//
+// Maintenant : on ne fait plus que RAFRAÎCHIR le token si la permission est
+// déjà accordée (utile après un changement d'appareil ou une expiration de
+// token), et on écrit au bon endroit — la même sous-collection que
+// useFCMToken.ts, pour rester lisible par toutes les routes d'envoi.
 async function registerNotificationToken(uid: string) {
   try {
     const supported = await isSupported();
     if (!supported) return;
-
-    const permission = await Notification.requestPermission();
-    if (permission !== 'granted') {
-      console.log('[FCM] Permission refusée');
-      return;
-    }
+    if (typeof window === 'undefined' || Notification.permission !== 'granted') return;
 
     // Sécurité : sous Capacitor iOS, `navigator.serviceWorker.ready` ne se
     // résout jamais (pas de SW actif sous le scheme capacitor://). On plafonne
@@ -80,17 +99,19 @@ async function registerNotificationToken(uid: string) {
       }
 
       await setDoc(
-        doc(db, 'users', uid),
+        doc(db, 'users', uid, 'tokens', token),
         {
-          fcmToken: token,
-          fcmTokenUpdatedAt: new Date().toISOString(),
+          token,
+          createdAt: new Date(),
+          platform: 'web',
+          ...(typeof navigator !== 'undefined' ? { userAgent: navigator.userAgent } : {}),
         },
         { merge: true },
       );
-      console.log('[FCM] Token enregistré ✅');
+      console.log('[FCM] Token rafraîchi ✅');
     }
   } catch (error) {
-    console.error('[FCM] Erreur enregistrement token:', error);
+    console.error('[FCM] Erreur rafraîchissement token:', error);
   }
 }
 

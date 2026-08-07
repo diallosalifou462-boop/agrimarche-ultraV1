@@ -23,6 +23,15 @@ interface Order {
   userPhone?: string;
   status: string;
   customerLocation?: { address?: string; lat?: number; lng?: number };
+  // ✅ NOUVEAU — identité du livreur qui a pris la commande (auto-assignée
+  // depuis delivery/dashboard/page.tsx via claimOrder, ou assignée
+  // manuellement par l'admin). Avant : cette page de suivi live n'affichait
+  // JAMAIS quel livreur était derrière chaque 🛵 sur la carte — seul un
+  // champ `tracking.deliveryUserId`, qui n'est écrit nulle part dans toute
+  // l'appli, était utilisé (silencieusement toujours vide).
+  delivererId?: string;
+  delivererName?: string;
+  delivererPhone?: string;
   tracking?: {
     currentLocation?: Location;
     lastUpdate?: any;
@@ -122,7 +131,7 @@ function AdminMap({ orders, selectedOrderId, onSelectOrder }: {
     markersRef.current = {};
 
     orders.forEach((order) => {
-      const { primary: color, light: lightColor } = getDriverColor(order.tracking?.deliveryUserId || order.id);
+      const { primary: color, light: lightColor } = getDriverColor(order.delivererId || order.id);
       const isSelected = order.id === selectedOrderId;
 
       if (order.tracking?.currentLocation) {
@@ -161,6 +170,7 @@ function AdminMap({ orders, selectedOrderId, onSelectOrder }: {
                   <div style="color:#666;font-size:11px">${order.userName || '—'}</div>
                 </div>
               </div>
+              ${order.delivererName ? `<div style="font-size:12px;color:#333;margin-bottom:4px">🚴 ${order.delivererName}${order.delivererPhone ? ` · ${order.delivererPhone}` : ''}</div>` : ''}
               ${order.totalAmount ? `<div style="font-size:12px;color:#333">💰 ${order.totalAmount.toLocaleString()} FCFA</div>` : ''}
               ${order.customerLocation?.address ? `<div style="font-size:11px;color:#888;margin-top:4px">📍 ${order.customerLocation.address.slice(0, 40)}</div>` : ''}
               <button onclick="window.selectOrder('${order.id}')" style="margin-top:8px;width:100%;padding:6px;background:${color};border:none;border-radius:8px;color:#fff;font-size:11px;cursor:pointer">Voir détails</button>
@@ -236,7 +246,7 @@ function StatCard({ icon, label, value, trend, color, bg }: {
 function OrderCard({ order, isSelected, onSelect }: {
   order: Order; isSelected: boolean; onSelect: () => void;
 }) {
-  const { primary: color, light: lightColor, gradient } = getDriverColor(order.tracking?.deliveryUserId || order.id);
+  const { primary: color, light: lightColor, gradient } = getDriverColor(order.delivererId || order.id);
   const lastUp = order.tracking?.lastUpdate?.toDate?.();
   const secAgo = lastUp ? Math.round((Date.now() - lastUp.getTime()) / 1000) : null;
   const isLive = secAgo !== null && secAgo < 30;
@@ -268,6 +278,13 @@ function OrderCard({ order, isSelected, onSelect }: {
               )}
             </div>
             <p className="text-sm text-gray-600">{order.userName}</p>
+            {/* ✅ NOUVEAU : identité du livreur assigné, visible directement
+                dans la liste sans avoir à cliquer sur la commande. */}
+            {order.delivererName ? (
+              <p className="text-xs font-medium" style={{ color }}>🚴 {order.delivererName}</p>
+            ) : (
+              <p className="text-xs text-gray-400 italic">Aucun livreur assigné</p>
+            )}
           </div>
         </div>
         {order.totalAmount && (
@@ -294,13 +311,25 @@ function OrderCard({ order, isSelected, onSelect }: {
         )}
       </div>
 
-      {order.userPhone && (
+      {/* Contact livreur (distinct du contact client ci-dessous) */}
+      {order.delivererPhone && (
         <div className="mt-3 flex gap-2">
-          <a href={`tel:${order.userPhone}`} className="flex items-center gap-1 px-2 py-1 bg-gray-100 rounded-lg text-xs text-gray-600 hover:bg-gray-200">
-            <Phone size={10} /> Appeler
+          <a href={`tel:${order.delivererPhone}`} onClick={e => e.stopPropagation()} className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs hover:opacity-80" style={{ background: `${color}15`, color }}>
+            <Phone size={10} /> Appeler le livreur
           </a>
-          <a href={`https://wa.me/${order.userPhone.replace(/\D/g, '')}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 px-2 py-1 bg-green-50 text-green-600 rounded-lg text-xs hover:bg-green-100">
-            <MessageCircle size={10} /> WhatsApp
+          <a href={`https://wa.me/${order.delivererPhone.replace(/\D/g, '')}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="flex items-center gap-1 px-2 py-1 bg-green-50 text-green-600 rounded-lg text-xs hover:bg-green-100">
+            <MessageCircle size={10} /> WhatsApp livreur
+          </a>
+        </div>
+      )}
+
+      {order.userPhone && (
+        <div className="mt-2 flex gap-2">
+          <a href={`tel:${order.userPhone}`} className="flex items-center gap-1 px-2 py-1 bg-gray-100 rounded-lg text-xs text-gray-600 hover:bg-gray-200">
+            <Phone size={10} /> Client
+          </a>
+          <a href={`https://wa.me/${order.userPhone.replace(/\D/g, '')}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 px-2 py-1 bg-gray-100 rounded-lg text-xs text-gray-600 hover:bg-gray-200">
+            <MessageCircle size={10} /> Client
           </a>
         </div>
       )}
@@ -376,7 +405,7 @@ export default function AdminDeliveryDashboard() {
     .reduce((a, b) => a + b, 0) / (activeOrders.length || 1);
 
   const selectedOrder = activeOrders.find(o => o.id === selectedOrderId);
-  const { primary: selectedColor } = selectedOrder ? getDriverColor(selectedOrder.tracking?.deliveryUserId || selectedOrder.id) : { primary: '#6366f1' };
+  const { primary: selectedColor } = selectedOrder ? getDriverColor(selectedOrder.delivererId || selectedOrder.id) : { primary: '#6366f1' };
 
   if (authLoading || loading) {
     return (
@@ -438,7 +467,9 @@ export default function AdminDeliveryDashboard() {
                           <p className="text-sm text-gray-700">
                             🛵 Livraison #{driver.orderNumber || driver.id.slice(-6)} en cours
                           </p>
-                          <p className="text-xs text-gray-400">{driver.userName}</p>
+                          <p className="text-xs text-gray-400">
+                            {driver.userName}{driver.delivererName ? ` · 🚴 ${driver.delivererName}` : ''}
+                          </p>
                         </div>
                       ))}
                       {liveDrivers.length === 0 && (
@@ -495,7 +526,7 @@ export default function AdminDeliveryDashboard() {
           <StatCard
             icon={<Users size={18} />}
             label="Livreurs actifs"
-            value={new Set(activeOrders.map(o => o.tracking?.deliveryUserId).filter(Boolean)).size}
+            value={new Set(activeOrders.map(o => o.delivererId).filter(Boolean)).size}
             color="#ec4899"
             bg="bg-pink-50"
           />
@@ -602,7 +633,9 @@ export default function AdminDeliveryDashboard() {
                     <div key={order.id} className="bg-white rounded-xl p-3 border border-gray-100 flex items-center justify-between opacity-70">
                       <div>
                         <p className="text-sm font-semibold text-gray-700">#{order.orderNumber || order.id.slice(-6).toUpperCase()}</p>
-                        <p className="text-xs text-gray-500">{order.userName}</p>
+                        <p className="text-xs text-gray-500">
+                          {order.userName}{order.delivererName ? ` · 🚴 ${order.delivererName}` : ''}
+                        </p>
                       </div>
                       <span className="flex items-center gap-1 text-xs text-green-600 bg-green-50 px-2 py-1 rounded-full">
                         <CheckCircle size={10} /> Livrée
@@ -627,7 +660,7 @@ export default function AdminDeliveryDashboard() {
             ) : (
               <div className="grid grid-cols-1 gap-4 max-h-[600px] overflow-y-auto">
                 {filteredOrders.map(order => {
-                  const { primary: color } = getDriverColor(order.tracking?.deliveryUserId || order.id);
+                  const { primary: color } = getDriverColor(order.delivererId || order.id);
                   const lu = order.tracking?.lastUpdate?.toDate?.();
                   const sec = lu ? Math.round((Date.now() - lu.getTime()) / 1000) : null;
                   const live = sec !== null && sec < 30;
@@ -644,6 +677,11 @@ export default function AdminDeliveryDashboard() {
                               {live && <span className="text-[9px] font-semibold text-green-600 bg-green-50 px-1.5 py-0.5 rounded-full">LIVE</span>}
                             </div>
                             <p className="text-sm text-gray-600">{order.userName}</p>
+                            {order.delivererName ? (
+                              <p className="text-xs font-medium" style={{ color }}>🚴 {order.delivererName}</p>
+                            ) : (
+                              <p className="text-xs text-gray-400 italic">Aucun livreur assigné</p>
+                            )}
                           </div>
                         </div>
                         {order.totalAmount && <p className="font-bold text-emerald-600">{order.totalAmount.toLocaleString()} FCFA</p>}
@@ -662,13 +700,23 @@ export default function AdminDeliveryDashboard() {
                         )}
                       </div>
 
-                      {order.userPhone && (
+                      {order.delivererPhone && (
                         <div className="mt-3 flex gap-2 pt-2 border-t border-gray-100">
-                          <a href={`tel:${order.userPhone}`} className="flex-1 flex items-center justify-center gap-1 py-2 bg-gray-100 rounded-lg text-xs text-gray-600 hover:bg-gray-200">
-                            <Phone size={12} /> Appeler
+                          <a href={`tel:${order.delivererPhone}`} className="flex-1 flex items-center justify-center gap-1 py-2 rounded-lg text-xs hover:opacity-80" style={{ background: `${color}15`, color }}>
+                            <Phone size={12} /> Livreur
                           </a>
-                          <a href={`https://wa.me/${order.userPhone.replace(/\D/g, '')}`} target="_blank" rel="noopener noreferrer" className="flex-1 flex items-center justify-center gap-1 py-2 bg-green-50 text-green-600 rounded-lg text-xs hover:bg-green-100">
-                            <MessageCircle size={12} /> WhatsApp
+                          <a href={`https://wa.me/${order.delivererPhone.replace(/\D/g, '')}`} target="_blank" rel="noopener noreferrer" className="flex-1 flex items-center justify-center gap-1 py-2 bg-green-50 text-green-600 rounded-lg text-xs hover:bg-green-100">
+                            <MessageCircle size={12} /> Livreur
+                          </a>
+                        </div>
+                      )}
+                      {order.userPhone && (
+                        <div className="mt-2 flex gap-2">
+                          <a href={`tel:${order.userPhone}`} className="flex-1 flex items-center justify-center gap-1 py-2 bg-gray-100 rounded-lg text-xs text-gray-600 hover:bg-gray-200">
+                            <Phone size={12} /> Client
+                          </a>
+                          <a href={`https://wa.me/${order.userPhone.replace(/\D/g, '')}`} target="_blank" rel="noopener noreferrer" className="flex-1 flex items-center justify-center gap-1 py-2 bg-gray-100 rounded-lg text-xs text-gray-600 hover:bg-gray-200">
+                            <MessageCircle size={12} /> Client
                           </a>
                         </div>
                       )}
@@ -691,6 +739,11 @@ export default function AdminDeliveryDashboard() {
                     <div>
                       <p className="font-bold text-gray-800">#{selectedOrder.orderNumber || selectedOrder.id.slice(-6).toUpperCase()}</p>
                       <p className="text-sm text-gray-600">{selectedOrder.userName}</p>
+                      {selectedOrder.delivererName ? (
+                        <p className="text-xs font-medium" style={{ color: selectedColor }}>🚴 {selectedOrder.delivererName}</p>
+                      ) : (
+                        <p className="text-xs text-gray-400 italic">Aucun livreur assigné</p>
+                      )}
                     </div>
                   </div>
                   <button onClick={() => setSelectedOrderId(null)} className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center hover:bg-gray-200">
@@ -722,13 +775,23 @@ export default function AdminDeliveryDashboard() {
                   </div>
                 </div>
 
-                {selectedOrder.userPhone && (
+                {selectedOrder.delivererPhone && (
                   <div className="mt-3 flex gap-2">
-                    <a href={`tel:${selectedOrder.userPhone}`} className="flex-1 flex items-center justify-center gap-2 py-2 bg-blue-500 text-white rounded-lg text-sm font-medium">
-                      <Phone size={14} /> Appeler
+                    <a href={`tel:${selectedOrder.delivererPhone}`} className="flex-1 flex items-center justify-center gap-2 py-2 text-white rounded-lg text-sm font-medium" style={{ background: selectedColor }}>
+                      <Phone size={14} /> Appeler le livreur
                     </a>
-                    <a href={`https://wa.me/${selectedOrder.userPhone.replace(/\D/g, '')}`} target="_blank" rel="noopener noreferrer" className="flex-1 flex items-center justify-center gap-2 py-2 bg-green-500 text-white rounded-lg text-sm font-medium">
-                      <MessageCircle size={14} /> WhatsApp
+                    <a href={`https://wa.me/${selectedOrder.delivererPhone.replace(/\D/g, '')}`} target="_blank" rel="noopener noreferrer" className="flex-1 flex items-center justify-center gap-2 py-2 bg-green-500 text-white rounded-lg text-sm font-medium">
+                      <MessageCircle size={14} /> WhatsApp livreur
+                    </a>
+                  </div>
+                )}
+                {selectedOrder.userPhone && (
+                  <div className="mt-2 flex gap-2">
+                    <a href={`tel:${selectedOrder.userPhone}`} className="flex-1 flex items-center justify-center gap-2 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium">
+                      <Phone size={14} /> Client
+                    </a>
+                    <a href={`https://wa.me/${selectedOrder.userPhone.replace(/\D/g, '')}`} target="_blank" rel="noopener noreferrer" className="flex-1 flex items-center justify-center gap-2 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium">
+                      <MessageCircle size={14} /> Client
                     </a>
                   </div>
                 )}

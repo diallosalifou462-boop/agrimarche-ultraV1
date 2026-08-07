@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp, doc, updateDoc, increment, Timestamp } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
 import { useCart } from '@/hooks/useCart';
 import { useAuth } from '@/hooks/useAuth';
@@ -65,6 +65,23 @@ export default function CheckoutPage() {
         updatedAt: serverTimestamp(),
       };
       const ref = await addDoc(collection(db, 'orders'), order);
+
+      // 🤖 Compteur de commandes par produit — alimente la détection des
+      // "produits ajoutés mais jamais commandés" côté cron IA
+      // (/api/cron/promote-stale-products). Best-effort, ne bloque jamais la commande.
+      try {
+        await Promise.all(
+          cart.items.map((item) =>
+            item?.product?.id
+              ? updateDoc(doc(db, 'products', item.product.id), {
+                  orderCount: increment(item.quantity || 1),
+                  lastOrderedAt: Timestamp.now(),
+                }).catch(() => {})
+              : Promise.resolve()
+          )
+        );
+      } catch (e) { console.error('orderCount increment', e); }
+
       clearCart();
       router.push(`/orders?success=${ref.id}`);
     } catch (err) {

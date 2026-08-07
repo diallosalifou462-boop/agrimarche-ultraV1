@@ -627,6 +627,23 @@ export default function CheckoutPage() {
         });
         await initDeliveryTracking(docRef.id);
 
+        // 🤖 Compteur de commandes par produit — alimente la détection des
+        // "produits ajoutés mais jamais commandés" côté cron IA
+        // (/api/cron/promote-stale-products). On ne bloque jamais le checkout
+        // si ça échoue : simple best-effort en parallèle.
+        try {
+          await Promise.all(
+            items.map((item) =>
+              item?.product?.id
+                ? updateDoc(doc(db, 'products', item.product.id), {
+                    orderCount: increment(item.quantity || 1),
+                    lastOrderedAt: Timestamp.now(),
+                  }).catch(() => {})
+                : Promise.resolve()
+            )
+          );
+        } catch (e) { console.error('orderCount increment', e); }
+
         // Notifier le vendeur dans seller_orders
         // ✅ FIX : setDoc avec docRef.id (même ID que "orders") au lieu de
         // addDoc (qui générait un ID aléatoire différent). Sans ça, account/page.tsx,

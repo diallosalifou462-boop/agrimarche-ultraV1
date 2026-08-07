@@ -698,6 +698,15 @@ export default function AdminDashboard() {
   const [pushAllForm, setPushAllForm]       = useState({ title:'', body:'', icon:'📢', deepLink:'', urgent:false });
   const [pushAllSending, setPushAllSending] = useState(false);
 
+  // ── 🤖 PROMOTION IA AUTOMATIQUE (produits sans commande) ────
+  const [aiPromoSettings, setAiPromoSettings] = useState({
+    enabled: false, thresholdHours: 48, cooldownDays: 7, maxPerRun: 8, scope: 'region' as 'all' | 'region',
+  });
+  const [aiPromoLoading, setAiPromoLoading]   = useState(true);
+  const [aiPromoSaving, setAiPromoSaving]     = useState(false);
+  const [aiPromoHistory, setAiPromoHistory]   = useState<any[]>([]);
+  const [aiPromoRunning, setAiPromoRunning]   = useState(false);
+
   // ── IA ────────────────────────────────────────────────────
   const [creditScoringAI]                   = useState(new CreditScoringAI());
   const [anomalies, setAnomalies]           = useState<any[]>([]);
@@ -951,6 +960,21 @@ export default function AdminDashboard() {
           priority: 'high',
         });
       }
+
+      // ⚠️ FIX : seul l'acheteur était notifié ici — le livreur lui-même ne
+      // l'était jamais. Il ne découvrait la commande qu'en rouvrant son
+      // dashboard par hasard. `deliveryId` est bien l'uid du compte livreur
+      // (voir `deliveryPersons`, filtré sur `role === 'delivery'`, juste
+      // au-dessus dans ce fichier), donc directement utilisable ici.
+      notifyUser({
+        userId: deliveryId,
+        type: 'delivery',
+        title: '📦 Nouvelle livraison assignée',
+        body: `Commande #${assignedOrder?.orderNumber ?? orderId} à récupérer chez ${assignedOrder?.sellerName ?? 'le vendeur'}.`,
+        icon: '📦',
+        link: '/delivery/dashboard',
+        priority: 'high',
+      });
     } catch { toast.error('Erreur assignation'); }
   };
 
@@ -1504,6 +1528,59 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
       toast.error('Erreur lors de l\'envoi du push');
     } finally {
       setPushAllSending(false);
+    }
+  };
+
+  // ── 🤖 PROMOTION IA AUTOMATIQUE : chargement des réglages + historique ──
+  useEffect(() => {
+    (async () => {
+      try {
+        const snap = await getDoc(doc(db, 'settings', 'aiPromotion'));
+        if (snap.exists()) {
+          setAiPromoSettings(prev => ({ ...prev, ...snap.data() }));
+        }
+      } catch (e) { console.error('aiPromotion settings load', e); }
+      finally { setAiPromoLoading(false); }
+    })();
+
+    const q = query(collection(db, 'ai_promotions'), orderBy('createdAt', 'desc'), limit(10));
+    const unsub = onSnapshot(q, (snap) => {
+      setAiPromoHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (e) => console.error('ai_promotions listen', e));
+    return () => unsub();
+  }, []);
+
+  const saveAiPromoSettings = async (next: typeof aiPromoSettings) => {
+    setAiPromoSaving(true);
+    try {
+      await setDoc(doc(db, 'settings', 'aiPromotion'), next, { merge: true });
+      setAiPromoSettings(next);
+      toast.success(next.enabled ? 'Promotion IA activée' : 'Promotion IA désactivée');
+    } catch (e) {
+      console.error(e);
+      toast.error('Erreur sauvegarde des réglages');
+    } finally {
+      setAiPromoSaving(false);
+    }
+  };
+
+  // Déclenchement manuel immédiat (hors planning cron), pratique pour tester.
+  const runAiPromoNow = async () => {
+    setAiPromoRunning(true);
+    try {
+      const idToken = await auth.currentUser?.getIdToken();
+      const res = await fetch(apiUrl('/api/cron/promote-stale-products'), {
+        headers: idToken ? { Authorization: `Bearer ${idToken}` } : {},
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { toast.error(data?.error || 'Erreur lors du déclenchement'); return; }
+      if (data?.skipped) { toast.info(data.reason || 'Rien à promouvoir pour le moment'); return; }
+      toast.success(`${data?.processed ?? 0} produit(s) promu(s)`);
+    } catch (e) {
+      console.error(e);
+      toast.error('Erreur réseau');
+    } finally {
+      setAiPromoRunning(false);
     }
   };
 
@@ -3410,7 +3487,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                   <div style={{ marginBottom:12 }}>
                     <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Icône</label>
                     <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
-                      {['📢','⚡','🎉','⚠️','💰','🌾','🚚','🔔','✅'].map(e=>(
+                      {['🔥','⭐','🎯','💥','🚀','💎','🏆','⚡','🎁','📣','✨','🚨'].map(e=>(
                         <button key={e} onClick={()=>setPushAllForm({...pushAllForm,icon:e})} style={{ width:34, height:34, borderRadius:8, border:`2px solid ${pushAllForm.icon===e?'#10b981':'transparent'}`, background:pushAllForm.icon===e?'rgba(16,185,129,.1)':'#1f2127', fontSize:16, cursor:'pointer' }}>{e}</button>
                       ))}
                     </div>
@@ -3433,6 +3510,76 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                   <button onClick={sendPushToAllTokens} disabled={pushAllSending||!pushAllForm.title||!pushAllForm.body} className="btn-primary" style={{ width:'100%', justifyContent:'center', opacity:(pushAllSending||!pushAllForm.title||!pushAllForm.body)?0.5:1 }}>
                     {pushAllSending ? 'Envoi…' : <><Send size={14}/> Envoyer à tous les tokens</>}
                   </button>
+                </div>
+
+                {/* ── 🤖 Promotion IA automatique (produits sans commande) ── */}
+                <div className="glass-card" style={{ padding:20 }}>
+                  <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:4 }}>
+                    <h3 style={{ fontSize:15, fontWeight:600 }}>🤖 Promotion IA automatique</h3>
+                    <label style={{ display:'flex', alignItems:'center', gap:6, cursor: aiPromoLoading ? 'wait' : 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        disabled={aiPromoLoading || aiPromoSaving}
+                        checked={aiPromoSettings.enabled}
+                        onChange={e => saveAiPromoSettings({ ...aiPromoSettings, enabled: e.target.checked })}
+                        style={{ width:'auto', cursor:'pointer' }}
+                      />
+                      <span style={{ fontSize:12, color: aiPromoSettings.enabled ? '#10b981' : '#6b7280' }}>
+                        {aiPromoSettings.enabled ? 'Activée' : 'Désactivée'}
+                      </span>
+                    </label>
+                  </div>
+                  <p style={{ fontSize:11, color:'#6b7280', marginBottom:16 }}>
+                    Détecte les produits ajoutés sans aucune commande depuis un certain délai, génère un message
+                    avec l'IA (DeepSeek) et l'envoie automatiquement en push. Planifié via Vercel Cron une fois par jour.
+                  </p>
+
+                  <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginBottom:12 }}>
+                    <div>
+                      <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Délai avant relance (heures)</label>
+                      <input type="number" min={1} value={aiPromoSettings.thresholdHours}
+                        onChange={e => setAiPromoSettings({ ...aiPromoSettings, thresholdHours: Number(e.target.value) || 1 })}
+                        onBlur={() => saveAiPromoSettings(aiPromoSettings)} />
+                    </div>
+                    <div>
+                      <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Anti-spam (jours entre 2 relances)</label>
+                      <input type="number" min={1} value={aiPromoSettings.cooldownDays}
+                        onChange={e => setAiPromoSettings({ ...aiPromoSettings, cooldownDays: Number(e.target.value) || 1 })}
+                        onBlur={() => saveAiPromoSettings(aiPromoSettings)} />
+                    </div>
+                    <div>
+                      <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Max produits / exécution</label>
+                      <input type="number" min={1} max={50} value={aiPromoSettings.maxPerRun}
+                        onChange={e => setAiPromoSettings({ ...aiPromoSettings, maxPerRun: Number(e.target.value) || 1 })}
+                        onBlur={() => saveAiPromoSettings(aiPromoSettings)} />
+                    </div>
+                    <div>
+                      <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Cible</label>
+                      <select value={aiPromoSettings.scope}
+                        onChange={e => saveAiPromoSettings({ ...aiPromoSettings, scope: e.target.value as 'all' | 'region' })}>
+                        <option value="region">Région du produit</option>
+                        <option value="all">Tous les tokens</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <button onClick={runAiPromoNow} disabled={aiPromoRunning} className="btn-primary" style={{ width:'100%', justifyContent:'center', opacity: aiPromoRunning ? 0.5 : 1, marginBottom:14 }}>
+                    {aiPromoRunning ? 'Analyse en cours…' : <><Sparkles size={14}/> Lancer maintenant (test manuel)</>}
+                  </button>
+
+                  {aiPromoHistory.length > 0 && (
+                    <div>
+                      <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Dernières promotions envoyées</label>
+                      <div style={{ display:'flex', flexDirection:'column', gap:6, maxHeight:220, overflowY:'auto' }}>
+                        {aiPromoHistory.map(h => (
+                          <div key={h.id} style={{ padding:8, borderRadius:8, background:'#1f2127', fontSize:11 }}>
+                            <div style={{ fontWeight:600 }}>{h.icon} {h.title}</div>
+                            <div style={{ color:'#6b7280', marginTop:2 }}>{h.productName} · {h.recipientCount} destinataire(s) · {h.pushSuccessCount} réussi(s)</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 </div>

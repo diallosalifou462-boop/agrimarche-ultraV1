@@ -8,11 +8,13 @@ import { useAuth } from '@/hooks/useAuth';
 import {
   RecaptchaVerifier,
   signInWithPhoneNumber,
+  signInWithCustomToken,
   ConfirmationResult,
   signInWithEmailAndPassword,
 } from 'firebase/auth';
 import { auth } from '@/lib/firebase/firebase';
 import { Capacitor } from '@capacitor/core';
+import { detectCarrier } from '@/lib/carrier';
 
 // ─── Attend que le pont natif Capacitor soit prêt ─────
 async function waitForNativeBridge(timeoutMs = 1500): Promise<boolean> {
@@ -70,6 +72,7 @@ function LoginContent() {
   const recaptchaRef = useRef<RecaptchaVerifier | null>(null);
   const [resendCooldown, setResendCooldown] = useState(0);
   const isNativeRef = useRef(false);
+  const useCustomOtpRef = useRef(false);
 
   // UI
   const [loading, setLoading] = useState(false);
@@ -166,6 +169,28 @@ function LoginContent() {
 
       // Mot de passe OK → envoie l'OTP
       const phoneE164 = toE164(phone);
+
+      const carrier = detectCarrier(phone);
+      if (carrier === 'free' || carrier === 'expresso') {
+        useCustomOtpRef.current = true;
+        const res = await fetch('/api/otp/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone: phoneE164 }),
+        });
+        const json = await res.json();
+        if (!res.ok) {
+          setError(json.error || "Erreur lors de l'envoi du code");
+          setLoading(false);
+          return;
+        }
+        setStep('otp');
+        setResendCooldown(60);
+        setLoading(false);
+        return;
+      }
+      useCustomOtpRef.current = false;
+
       const bridgeLikelyNative = Capacitor.isNativePlatform() || (await waitForNativeBridge());
       isNativeRef.current = bridgeLikelyNative;
       if (bridgeLikelyNative) {
@@ -205,6 +230,27 @@ function LoginContent() {
     setLoading(true);
     try {
       const phoneE164 = toE164(phone);
+
+      const carrier = detectCarrier(phone);
+      if (carrier === 'free' || carrier === 'expresso') {
+        useCustomOtpRef.current = true;
+        const res = await fetch('/api/otp/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone: phoneE164 }),
+        });
+        const json = await res.json();
+        if (!res.ok) {
+          setError(json.error || "Erreur lors de l'envoi du code");
+          setLoading(false);
+          return;
+        }
+        setResendCooldown(60);
+        setLoading(false);
+        return;
+      }
+      useCustomOtpRef.current = false;
+
       const bridgeLikelyNative = Capacitor.isNativePlatform() || (await waitForNativeBridge());
       isNativeRef.current = bridgeLikelyNative;
       if (bridgeLikelyNative) {
@@ -250,6 +296,24 @@ function LoginContent() {
     setLoading(true);
     setError('');
     try {
+      if (useCustomOtpRef.current) {
+        const phoneE164 = toE164(phone);
+        const res = await fetch('/api/otp/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone: phoneE164, code }),
+        });
+        const json = await res.json();
+        if (!res.ok) {
+          setError(json.error || 'Code incorrect');
+          setLoading(false);
+          return;
+        }
+        await signInWithCustomToken(auth, json.customToken);
+        router.replace(redirect);
+        return;
+      }
+
       if (isNativeRef.current) {
         if (!verificationId) { setError('Session expirée, renvoyez le code'); setLoading(false); return; }
         await FirebaseAuthentication.confirmVerificationCode({ verificationId, verificationCode: code });
