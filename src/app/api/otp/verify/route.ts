@@ -51,7 +51,7 @@ const MAX_ATTEMPTS = 5;
 
 export async function POST(req: NextRequest) {
   try {
-    const { phone, code } = await req.json();
+    const { phone, code, registration } = await req.json();
     const phoneE164 = toE164Senegal(String(phone || ''));
     const submittedCode = String(code || '').trim();
 
@@ -103,20 +103,66 @@ export async function POST(req: NextRequest) {
     // Code correct : on consomme le document (usage unique)
     await docRef.delete();
 
-    // Crée l'utilisateur Firebase Auth s'il n'existe pas déjà pour ce
-    // numéro, puis génère un jeton personnalisé pour que le client se
-    // connecte avec (signInWithCustomToken). Le reste du flow (écriture
-    // du profil Firestore users/, etc.) est ensuite géré normalement
-    // côté client par AuthContext.signUp / la logique de login existante,
-    // exactement comme pour le flow Firebase Phone Auth natif (Orange).
+    // ⚠️ FIX : tout se fait maintenant côté serveur avec l'Admin SDK
+    // (mot de passe + profil Firestore), au lieu de laisser le client
+    // faire linkWithCredential() + setDoc() après signInWithCustomToken().
+    // Raison : un compte connecté via jeton personnalisé (customToken) a
+    // un sign_in_provider "custom", différent du sign_in_provider "phone"
+    // utilisé par le flow Orange (Firebase Phone Auth natif). Si les
+    // règles de sécurité Firestore vérifient ce provider pour autoriser
+    // l'écriture dans users/{uid}, l'écriture échouait silencieusement
+    // pour les comptes Free/Yas et Expresso : le compte Firebase Auth
+    // était bien créé, mais sans son document Firestore ("pas de page").
+    // L'Admin SDK contourne entièrement les règles de sécurité, donc ce
+    // problème ne peut plus se poser, quelles que soient les règles.
     const adminAuth = getAuth(app);
     let uid: string;
+    let userExisted = false;
     try {
       const existingUser = await adminAuth.getUserByPhoneNumber(phoneE164);
       uid = existingUser.uid;
+      userExisted = true;
     } catch {
       const newUser = await adminAuth.createUser({ phoneNumber: phoneE164 });
       uid = newUser.uid;
+    }
+
+    // Si des données d'inscription sont fournies (premier passage), on
+    // finalise le compte : mot de passe + nom + document de profil.
+    if (registration && !userExisted) {
+      const { password, name, region, departement, commune, quartier } = registration;
+      const syntheticEmail = `${phoneE164.replace(/\D/g, '')}@agrimarche.sn`;
+
+      // ⚠️ FIX : on attache désormais l'email/mot de passe comme second
+      // provider sur le compte Firebase Auth lui-même (pas seulement dans
+      // Firestore), pour que ce compte ait exactement la même structure
+      // que ceux créés via le flow Orange (Firebase Phone Auth natif +
+      // EmailAuthProvider lié côté client dans AuthContext.signUp()).
+      // Sans ça, la console Firebase n'affichait qu'un seul provider
+      // ("phone") pour les comptes Free/Yas et Expresso, contre deux
+      // ("phone" + "password") pour les comptes Orange.
+      await adminAuth.updateUser(uid, {
+        email: syntheticEmail,
+        emailVerified: true,
+        password: String(password || ''),
+        displayName: String(name || ''),
+      });
+
+      const userProfile = {
+        uid,
+        email: syntheticEmail,
+        displayName: String(name || ''),
+        phone: phoneE164,
+        phoneVerified: true,
+        role: 'client',
+        region: String(region || ''),
+        departement: String(departement || ''),
+        commune: String(commune || ''),
+        quartier: String(quartier || ''),
+        createdAt: new Date().toISOString(),
+      };
+
+      await db.collection('users').doc(uid).set(userProfile, { merge: true });
     }
 
     const customToken = await adminAuth.createCustomToken(uid);

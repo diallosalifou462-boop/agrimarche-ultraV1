@@ -1,0 +1,50 @@
+// ============================================================
+// EXTRAIT A FUSIONNER DANS firestore.rules (bloc match /databases/...)
+// ============================================================
+//
+// Portee : uniquement les avis LIES A UNE COMMANDE (le document contient
+// un champ `orderId`). Le widget ReviewsSection.tsx cree des avis SANS
+// orderId (avis general sur un vendeur) -- ce flux n'est pas concerne
+// par ce changement et continue d'ecrire directement.
+//
+// Avant : la creation directe d'un avis avec orderId dependait
+// probablement d'un get(orders/{orderId}) pour verifier
+// statut=='livre' + ownership -- fragile et invisible en cas d'echec
+// (juste "permission-denied" generique cote client). Une commande
+// restee bloquee a un statut anterieur (bug de batch corrige
+// precedemment sur orders/seller_orders) faisait donc aussi echouer la
+// creation de l'avis, par ricochet.
+//
+// Apres : la Cloud Function `submitReview` (Admin SDK) fait cette
+// verification explicitement et de maniere testable. Le client n'a
+// plus besoin d'un droit d'ecriture direct pour CE cas precis.
+
+match /reviews/{reviewId} {
+  // Lecture publique : les avis s'affichent sur les pages vendeur/produit
+  // sans authentification (ReviewsSection, main/products). Ne pas
+  // restreindre la lecture ici, sous peine de casser cet affichage public.
+  allow read: if true;
+
+  // Avis general (ReviewsSection.tsx) : pas de champ orderId dans le
+  // payload. Inchange par rapport a l'existant -- ownership + forme
+  // minimale du document.
+  allow create: if
+    !('orderId' in request.resource.data) &&
+    request.auth != null &&
+    request.resource.data.userId == request.auth.uid &&
+    request.resource.data.rating is int &&
+    request.resource.data.rating >= 1 &&
+    request.resource.data.rating <= 5;
+
+  // Avis lie a une commande (review/page.tsx) : desormais interdit en
+  // ecriture directe cote client -- passe exclusivement par la Cloud
+  // Function submitReview (Admin SDK, hors regles).
+  allow create: if 'orderId' in request.resource.data && false;
+
+  // Suppression : par l'auteur de l'avis (ReviewsSection, admin/page.tsx)
+  // ou l'admin. Inchange par rapport a l'existant.
+  allow delete: if request.auth != null &&
+    (request.auth.uid == resource.data.userId || isAdmin());
+
+  allow update: if false;
+}

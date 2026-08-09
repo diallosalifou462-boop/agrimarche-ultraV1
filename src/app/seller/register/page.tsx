@@ -84,14 +84,27 @@ export default function SellerRegisterPage() {
       const exists = userDoc.exists();
 
       // ✅ Correction : créer un objet avec toutes les propriétés nécessaires
+      //
+      // ⚠️ FIX : `email` n'est plus inclus dans une mise à jour (doc déjà
+      // existant). Les règles Firestore interdisent à un update() de
+      // changer ce champ (doesNotChange(['uid','email','createdAt'])).
+      // Pour les comptes Free/Yas/Expresso (créés via /api/otp/verify,
+      // sans email attaché à l'objet Firebase Auth avant leur premier
+      // signIn), auth.currentUser.email vaut `null` côté client alors que
+      // le document Firestore a déjà `email: "<tel>@agrimarche.sn"` —
+      // envoyer `email: user.email` écrasait ce champ par null et violait
+      // la règle → "permission-denied" sur CE formulaire. En omettant la
+      // clé lors d'un update (merge:true), on ne touche pas au champ
+      // existant et la règle passe. On ne l'envoie qu'à la création,
+      // où il est requis par hasFields(['email','createdAt','role']).
       const dataToSave: {
         displayName: string;
         phone: string;
         region: string;
         city: string;
-        email: string | null;
         role: string;
         updatedAt: Date;
+        email?: string | null;
         createdAt?: Date;
         uid?: string;
       } = {
@@ -99,7 +112,6 @@ export default function SellerRegisterPage() {
         phone: form.phone.trim(),
         region: form.region,
         city: form.city || '',
-        email: user.email,
         role: 'seller',
         updatedAt: new Date(),
       };
@@ -107,6 +119,7 @@ export default function SellerRegisterPage() {
       if (!exists) {
         dataToSave.createdAt = new Date();
         dataToSave.uid = user.uid;
+        dataToSave.email = user.email;
       }
 
       await setDoc(userRef, dataToSave, { merge: true });

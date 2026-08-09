@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+  background: #fafaf8;
+  font-family: sans-serif;
+}
+
+/* ⚠️ FIX : marge de sécurité appliquée globalement (une seule fois, pour
+   toutes les pages) sous l'encoche/la barre de statut en haut, et
+   au-dessus de la barre d'accueil en bas, sur iOS. Nécessite
+   `viewportFit: 'cover'` dans src/app/layout.tsx pour que ces valeurs
+   `env(...)` ne soient pas toujours égales à 0. */
+body {
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+* {
+  box-sizing: border-box;
+}
