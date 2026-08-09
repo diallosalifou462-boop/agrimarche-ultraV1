@@ -3,6 +3,7 @@ import { initializeApp, getApps, cert } from "firebase-admin/app";
 import { getMessaging } from "firebase-admin/messaging";
 import { getFirestore } from "firebase-admin/firestore";
 import type { Firestore } from "firebase-admin/firestore";
+import { logPushAttempt, type PushPlatform } from "@/lib/pushDebugLog";
 
 // ============================================================
 // CORS
@@ -163,6 +164,20 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // ── Récupérer la plateforme (ios/android/web) de chaque token ──
+    // ⚠️ Nécessaire pour le log de diagnostic ci-dessous : sans ça, impossible
+    // de savoir si un échec touche spécifiquement iOS. Une seule lecture
+    // collectionGroup, réutilisée aussi pour le nettoyage des tokens
+    // invalides plus bas (au lieu d'une 2e requête séparée).
+    const allTokenDocsSnap = await adminDb.collectionGroup("tokens").get();
+    const platformByToken = new Map<string, PushPlatform>();
+    const refByToken = new Map<string, FirebaseFirestore.DocumentReference>();
+    allTokenDocsSnap.docs.forEach((d) => {
+      const platform = (d.data()?.platform as PushPlatform) ?? "unknown";
+      platformByToken.set(d.id, platform);
+      refByToken.set(d.id, d.ref);
+    });
+
     // ── Construction du message multicast ──────────────────
     const message = {
       tokens: validTokens,
@@ -208,27 +223,55 @@ export async function POST(req: NextRequest) {
     const response = await messaging.sendEachForMulticast(message);
     console.log(`[send-push] Résultat FCM — success=${response.successCount}, failure=${response.failureCount}`);
 
-    // ── Nettoyage des tokens invalides / désinstallés ────────
+    // ── Nettoyage des tokens invalides / désinstallés + log détaillé ────────
     const invalidTokens: string[] = [];
-    response.responses.forEach((res, idx) => {
+    const logEntries = response.responses.map((res, idx) => {
+      const token = validTokens[idx];
+      const platform = platformByToken.get(token) ?? "unknown";
       if (!res.success) {
         const code = res.error?.code;
-        console.warn(`[send-push] Échec token ${maskToken(validTokens[idx])} — ${code}: ${res.error?.message}`);
+        console.warn(`[send-push] Échec token ${maskToken(token)} (${platform}) — ${code}: ${res.error?.message}`);
         if (
           code === "messaging/invalid-registration-token" ||
           code === "messaging/registration-token-not-registered"
         ) {
-          invalidTokens.push(validTokens[idx]);
+          invalidTokens.push(token);
         }
       }
+      return {
+        token,
+        platform,
+        success: res.success,
+        errorCode: res.error?.code,
+        errorMessage: res.error?.message,
+        messageId: res.success ? res.messageId : undefined,
+      };
+    });
+
+    // ⚠️ Log persistant Firestore (collection `push_debug_logs`) — c'est ici
+    // qu'on voit précisément, après un test sur iPhone, pourquoi un token
+    // iOS échoue (code d'erreur exact APNs/FCM), au lieu de deviner depuis
+    // les logs éphémères Vercel.
+    await logPushAttempt(adminDb, {
+      source: "send-push",
+      title: title!,
+      body: body!,
+      entries: logEntries,
     });
 
     if (invalidTokens.length > 0) {
       console.warn(`[send-push] ${invalidTokens.length} token(s) invalide(s)/désinstallé(s) détecté(s) post-envoi, suppression Firestore en cours…`);
-      await cleanupInvalidTokens(adminDb, invalidTokens).catch((err) =>
-        console.warn("[send-push] Erreur nettoyage tokens FCM:", err)
-      );
-      console.log(`[send-push] Nettoyage tokens invalides terminé.`);
+      const batch = adminDb.batch();
+      let removed = 0;
+      invalidTokens.forEach((t) => {
+        const ref = refByToken.get(t);
+        if (ref) {
+          batch.delete(ref);
+          removed++;
+        }
+      });
+      if (removed > 0) await batch.commit().catch((err) => console.warn("[send-push] Erreur nettoyage tokens FCM:", err));
+      console.log(`[send-push] Nettoyage tokens invalides terminé (${removed} supprimé(s)).`);
     }
 
     console.log(

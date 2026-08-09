@@ -18,6 +18,7 @@ import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getFirestore, FieldValue }      from 'firebase-admin/firestore';
 import { getMessaging }                  from 'firebase-admin/messaging';
 import { Resend }                        from 'resend';
+import { logPushAttempt, type PushPlatform } from '@/lib/pushDebugLog';
 
 // ── Firebase Admin (singleton) ───────────────────────────────────────────────
 function getAdminApp() {
@@ -114,6 +115,11 @@ export async function POST(request: NextRequest) {
     if (activeChannels.includes('push')) {
       const tokensSnap = await db.collection('users').doc(userId).collection('tokens').get();
       const deviceTokens = tokensSnap.docs.map((d) => d.id); // doc ID = valeur du token
+      // Plateforme de chaque token, pour le log de diagnostic ci-dessous.
+      const platformByToken = new Map<string, PushPlatform>();
+      tokensSnap.docs.forEach((d) => {
+        platformByToken.set(d.id, (d.data()?.platform as PushPlatform) ?? 'unknown');
+      });
 
       if (deviceTokens.length === 0) {
         results.push = { sent: false, reason: 'no_token' };
@@ -156,18 +162,39 @@ export async function POST(request: NextRequest) {
           });
 
           // Nettoyer les tokens invalides / désinstallés (même sous-collection)
+          // + construire le log de diagnostic par token (plateforme, code
+          // d'erreur exact) pour comprendre précisément un échec sur iOS.
           const invalidTokens: string[] = [];
-          multicast.responses.forEach((res, idx) => {
+          const logEntries = multicast.responses.map((res, idx) => {
+            const token = deviceTokens[idx];
+            const platform = platformByToken.get(token) ?? 'unknown';
             if (!res.success) {
               const code = res.error?.code;
               if (
                 code === 'messaging/invalid-registration-token' ||
                 code === 'messaging/registration-token-not-registered'
               ) {
-                invalidTokens.push(deviceTokens[idx]);
+                invalidTokens.push(token);
               }
             }
+            return {
+              token,
+              platform,
+              success: res.success,
+              errorCode: res.error?.code,
+              errorMessage: res.error?.message,
+              messageId: res.success ? res.messageId : undefined,
+            };
           });
+
+          await logPushAttempt(db, {
+            source: 'notifications-send',
+            userId,
+            title,
+            body,
+            entries: logEntries,
+          });
+
           if (invalidTokens.length > 0) {
             const batch = db.batch();
             invalidTokens.forEach((t) =>

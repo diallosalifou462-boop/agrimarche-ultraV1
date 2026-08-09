@@ -1,5 +1,6 @@
 import UIKit
 import Capacitor
+import FirebaseCore
 
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -7,14 +8,16 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // ⚠️ FIX (v2) : FirebaseApp.configure() direct pouvait lever une
-        // NSException incapturable en Swift ("Default app has already been
-        // configured"), à cause d'une race condition connue du SDK Firebase
-        // iOS 26+ entre plugins Capacitor Firebase (auth + messaging) qui
-        // s'auto-configurent chacun de leur côté. Voir
-        // App/FirebaseSafeConfigure.h pour le détail. On utilise maintenant
-        // un wrapper Objective-C qui absorbe cette exception en toute sécurité.
-        SafeFirebaseConfigure()
+        // ⚠️ FIX : sans cet appel, le SDK Firebase natif n'est jamais
+        // initialisé sur iOS (contrairement à Android où le plugin Gradle
+        // google-services s'en charge automatiquement via google-services.json).
+        // @capacitor-firebase/messaging arrive quand même à obtenir un token
+        // et FCM répond "succès" à l'envoi, mais la notification n'atteint
+        // jamais le device — silencieusement, sans aucune erreur ni côté
+        // serveur ni côté app. C'était la cause du "push OK sur Android,
+        // jamais reçu sur iPhone" malgré des envois FCM sans erreur.
+        FirebaseApp.configure()
+
         // Override point for customization after application launch.
         return true
     }
@@ -50,11 +53,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any], fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
-        // Note : Capacitor n'expose pas de notification `.capacitorDidReceiveRemoteNotification`
-        // (seules `.capacitorDidRegisterForRemoteNotifications` et
-        // `.capacitorDidFailToRegisterForRemoteNotifications` existent). Si un plugin
-        // (ex. Firebase Messaging) a besoin de ce callback, branche-le ici directement.
-        completionHandler(.newData)
+        NotificationCenter.default.post(name: .capacitorDidReceiveRemoteNotification, object: userInfo, userInfo: ["completionHandler": completionHandler])
     }
 
     func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
