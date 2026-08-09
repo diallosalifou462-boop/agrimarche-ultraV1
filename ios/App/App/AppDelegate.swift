@@ -53,7 +53,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any], fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
-        NotificationCenter.default.post(name: .capacitorDidReceiveRemoteNotification, object: userInfo, userInfo: ["completionHandler": completionHandler])
+        // ⚠️ FIX : `.capacitorDidReceiveRemoteNotification` n'existe pas dans
+        // l'API publique de Capacitor 8 (seuls `.capacitorDidRegisterForRemoteNotifications`
+        // et `.capacitorDidFailToRegisterForRemoteNotifications` sont exposés
+        // — voir capacitorjs.com/docs/apis/push-notifications). Cette ligne
+        // faisait échouer la compilation ("has no member"). Le plugin
+        // @capacitor-firebase/messaging gère lui-même la réception des
+        // notifications silencieuses/data en arrière-plan en interne ; il
+        // n'y a rien à relayer manuellement ici.
+        completionHandler(.newData)
     }
 
     func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
