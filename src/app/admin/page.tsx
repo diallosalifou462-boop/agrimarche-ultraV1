@@ -126,6 +126,12 @@ interface Order {
   delivererName?: string;
   delivererPhone?: string;
   delivererAssignedAt?: Timestamp;
+  // ⚠️ Ajoutés pour l'onglet "Livreurs" : ces champs existaient déjà dans
+  // les documents Firestore (deliveryFee écrit par checkout/page.tsx,
+  // deliveredAt écrit par delivery/dashboard/page.tsx::markAsDelivered)
+  // mais n'étaient pas déclarés ici, donc invisibles/non typés côté admin.
+  deliveryFee?: number;
+  deliveredAt?: Timestamp;
   paymentMethod?: 'wave' | 'orange' | 'free' | 'card';
   paymentStatus?: 'pending' | 'paid' | 'failed';
   commission?: number;
@@ -698,6 +704,40 @@ export default function AdminDashboard() {
   const [pushAllForm, setPushAllForm]       = useState({ title:'', body:'', icon:'📢', deepLink:'', urgent:false });
   const [pushAllSending, setPushAllSending] = useState(false);
 
+  // ── 🤖 PROMOTION IA AUTOMATIQUE (produits sans commande) ────
+  const [aiPromoSettings, setAiPromoSettings] = useState({
+    enabled: false, thresholdHours: 48, cooldownDays: 7, maxPerRun: 8, scope: 'region' as 'all' | 'region',
+  });
+  const [aiPromoLoading, setAiPromoLoading]   = useState(true);
+  const [aiPromoSaving, setAiPromoSaving]     = useState(false);
+  const [aiPromoHistory, setAiPromoHistory]   = useState<any[]>([]);
+  const [aiPromoRunning, setAiPromoRunning]   = useState(false);
+
+  // ── Notifications automatiques (sans cron — voir /api/products/check-stock
+  // et /api/system/periodic-checks) ──────────────────────────────────────
+  const [lowStockSettings, setLowStockSettings] = useState({
+    enabled: false, threshold: 5, cooldownHours: 24,
+  });
+  const [lowStockLoading, setLowStockLoading] = useState(true);
+  const [lowStockSaving, setLowStockSaving]   = useState(false);
+  const [lowStockHistory, setLowStockHistory] = useState<any[]>([]);
+
+  const [pendingOrdersSettings, setPendingOrdersSettings] = useState({
+    enabled: false, thresholdHours: 6, cooldownHours: 6, escalateAfterHours: 24, maxPerRun: 50,
+  });
+  const [pendingOrdersLoading, setPendingOrdersLoading] = useState(true);
+  const [pendingOrdersSaving, setPendingOrdersSaving]   = useState(false);
+  const [pendingOrdersHistory, setPendingOrdersHistory] = useState<any[]>([]);
+
+  const [inactiveClientsSettings, setInactiveClientsSettings] = useState({
+    enabled: false, thresholdDays: 30, cooldownDays: 14, maxPerRun: 100,
+  });
+  const [inactiveClientsLoading, setInactiveClientsLoading] = useState(true);
+  const [inactiveClientsSaving, setInactiveClientsSaving]   = useState(false);
+  const [inactiveClientsHistory, setInactiveClientsHistory] = useState<any[]>([]);
+
+  const [periodicChecksRunning, setPeriodicChecksRunning] = useState(false);
+
   // ── IA ────────────────────────────────────────────────────
   const [creditScoringAI]                   = useState(new CreditScoringAI());
   const [anomalies, setAnomalies]           = useState<any[]>([]);
@@ -741,6 +781,51 @@ export default function AdminDashboard() {
   const totalRevenue    = useMemo(() => orders.filter(o => o.status === 'livre').reduce((s,o) => s + (o.amount ?? 0), 0), [orders]);
   const platformRevenue = useMemo(() => Math.round(totalRevenue * COMMISSION_RATE), [totalRevenue]);
   const deliveredOrders = useMemo(() => orders.filter(o => o.status === 'livre').length, [orders]);
+
+  // ✅ NOUVEAU — Onglet "Livreurs" : gains par livreur.
+  // Même source de vérité que app/delivery/dashboard/page.tsx::EarningsModal
+  // (totalEarnings/todayEarnings) : on somme `deliveryFee` — les frais de
+  // livraison réellement encaissés pour la course — jamais `amount`/`total`,
+  // qui est le prix payé par le client (produits inclus, ne revient pas au
+  // livreur). Recalculé en direct depuis `orders` à chaque rendu : pas de
+  // compteur séparé à faire dériver, donc jamais désynchronisé du dashboard
+  // livreur lui-même.
+  // ⚠️ Ceci affiche ce qui est GAGNÉ, pas ce qui a été VERSÉ : il n'existe
+  // aujourd'hui aucun champ "payé/à payer" sur la commande. Si un jour un
+  // vrai virement/paiement des livreurs est mis en place, ajouter un champ
+  // dédié (ex. `delivererPaidAt`) plutôt que de déduire un statut de
+  // paiement à partir d'autres champs.
+  // ⚠️ FIX : todayStr/weekAgoTs ne doivent PAS être recalculés à chaque
+  // rendu (Date.now() change à la milliseconde près), sinon ça invalide le
+  // useMemo ci-dessous à chaque fois puisqu'ils sont dans son tableau de
+  // dépendances. On les stabilise via nowTick, recalculé une fois par
+  // minute (suffisant pour un total "aujourd'hui/7 jours").
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+  const todayStr = useMemo(() => new Date(nowTick).toDateString(), [nowTick]);
+  const weekAgoTs = useMemo(() => nowTick - 7 * 24 * 60 * 60 * 1000, [nowTick]);
+  const delivererEarnings = useMemo(() => {
+    const map: Record<string, { total: number; today: number; week: number; count: number }> = {};
+    for (const o of orders) {
+      if (o.status !== 'livre' || !o.delivererId) continue;
+      const fee = o.deliveryFee ?? 0;
+      const ts = o.deliveredAt?.toDate?.();
+      if (!map[o.delivererId]) map[o.delivererId] = { total: 0, today: 0, week: 0, count: 0 };
+      map[o.delivererId].total += fee;
+      map[o.delivererId].count += 1;
+      if (ts && ts.toDateString() === todayStr) map[o.delivererId].today += fee;
+      if (ts && ts.getTime() >= weekAgoTs) map[o.delivererId].week += fee;
+    }
+    return map;
+  }, [orders, todayStr, weekAgoTs]);
+  const totalDelivererEarnings = useMemo(
+    () => Object.values(delivererEarnings).reduce((s, d) => s + d.total, 0),
+    [delivererEarnings]
+  );
+
   const pendingLoans    = useMemo(() => loans.filter(l => l.status === 'pending').length, [loans]);
   const totalLoanVolume = useMemo(() => loans.reduce((s,l) => s + (l.amount ?? 0), 0), [loans]);
 
@@ -774,6 +859,17 @@ export default function AdminDashboard() {
       }
     });
   }, [authUser, router]);
+
+  // ✅ Second déclencheur (sans cron) pour les relances "commandes en
+  // attente" / "clients inactifs" : à chaque ouverture de l'admin, en plus
+  // du déclenchement à chaque checkout (voir checkout/page.tsx). Couvre
+  // les périodes sans achat mais où l'admin est actif. Auto-throttlé
+  // côté serveur (settings/periodicChecksLock) : sans risque même
+  // rechargé souvent.
+  useEffect(() => {
+    if (!authUser) return;
+    fetch(apiUrl('/api/system/periodic-checks'), { method: 'POST' }).catch(() => {});
+  }, [authUser]);
 
   // ── FIREBASE LISTENERS ────────────────────────────────────
   useEffect(() => {
@@ -1519,6 +1615,173 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
       toast.error('Erreur lors de l\'envoi du push');
     } finally {
       setPushAllSending(false);
+    }
+  };
+
+  // ── 🤖 PROMOTION IA AUTOMATIQUE : chargement des réglages + historique ──
+  useEffect(() => {
+    (async () => {
+      try {
+        const snap = await getDoc(doc(db, 'settings', 'aiPromotion'));
+        if (snap.exists()) {
+          setAiPromoSettings(prev => ({ ...prev, ...snap.data() }));
+        }
+      } catch (e) { console.error('aiPromotion settings load', e); }
+      finally { setAiPromoLoading(false); }
+    })();
+
+    const q = query(collection(db, 'ai_promotions'), orderBy('createdAt', 'desc'), limit(10));
+    const unsub = onSnapshot(q, (snap) => {
+      setAiPromoHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (e) => console.error('ai_promotions listen', e));
+    return () => unsub();
+  }, []);
+
+  const saveAiPromoSettings = async (next: typeof aiPromoSettings) => {
+    setAiPromoSaving(true);
+    try {
+      await setDoc(doc(db, 'settings', 'aiPromotion'), next, { merge: true });
+      setAiPromoSettings(next);
+      toast.success(next.enabled ? 'Promotion IA activée' : 'Promotion IA désactivée');
+    } catch (e) {
+      console.error(e);
+      toast.error('Erreur sauvegarde des réglages');
+    } finally {
+      setAiPromoSaving(false);
+    }
+  };
+
+  // Déclenchement manuel immédiat (hors planning cron), pratique pour tester.
+  const runAiPromoNow = async () => {
+    setAiPromoRunning(true);
+    try {
+      const idToken = await auth.currentUser?.getIdToken();
+      const res = await fetch(apiUrl('/api/cron/promote-stale-products'), {
+        headers: idToken ? { Authorization: `Bearer ${idToken}` } : {},
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { toast.error(data?.error || 'Erreur lors du déclenchement'); return; }
+      if (data?.skipped) { toast.info(data.reason || 'Rien à promouvoir pour le moment'); return; }
+      toast.success(`${data?.processed ?? 0} produit(s) promu(s)`);
+    } catch (e) {
+      console.error(e);
+      toast.error('Erreur réseau');
+    } finally {
+      setAiPromoRunning(false);
+    }
+  };
+
+  // ── 🔔 NOTIFICATIONS AUTOMATIQUES (sans cron) ────────────────────────
+  // Stock bas / rupture : réglages + historique. Pas de "run now" ici —
+  // cette alerte est événementielle (voir /api/products/check-stock,
+  // déclenchée à chaque checkout), pas de scan global à forcer.
+  useEffect(() => {
+    (async () => {
+      try {
+        const snap = await getDoc(doc(db, 'settings', 'lowStockAlerts'));
+        if (snap.exists()) setLowStockSettings(prev => ({ ...prev, ...snap.data() }));
+      } catch (e) { console.error('lowStockAlerts settings load', e); }
+      finally { setLowStockLoading(false); }
+    })();
+    const q = query(collection(db, 'low_stock_alerts'), orderBy('createdAt', 'desc'), limit(10));
+    const unsub = onSnapshot(q, (snap) => {
+      setLowStockHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (e) => console.error('low_stock_alerts listen', e));
+    return () => unsub();
+  }, []);
+
+  const saveLowStockSettings = async (next: typeof lowStockSettings) => {
+    setLowStockSaving(true);
+    try {
+      await setDoc(doc(db, 'settings', 'lowStockAlerts'), next, { merge: true });
+      setLowStockSettings(next);
+      toast.success(next.enabled ? 'Alertes stock bas activées' : 'Alertes stock bas désactivées');
+    } catch (e) {
+      console.error(e);
+      toast.error('Erreur sauvegarde des réglages');
+    } finally {
+      setLowStockSaving(false);
+    }
+  };
+
+  // Commandes en attente + Clients inactifs partagent la même route
+  // (/api/system/periodic-checks), déclenchée par le trafic réel
+  // (checkout + ouverture admin) plutôt que par un cron.
+  useEffect(() => {
+    (async () => {
+      try {
+        const [poSnap, icSnap] = await Promise.all([
+          getDoc(doc(db, 'settings', 'pendingOrdersAlerts')),
+          getDoc(doc(db, 'settings', 'inactiveClientsAlerts')),
+        ]);
+        if (poSnap.exists()) setPendingOrdersSettings(prev => ({ ...prev, ...poSnap.data() }));
+        if (icSnap.exists()) setInactiveClientsSettings(prev => ({ ...prev, ...icSnap.data() }));
+      } catch (e) { console.error('periodic-checks settings load', e); }
+      finally { setPendingOrdersLoading(false); setInactiveClientsLoading(false); }
+    })();
+
+    const qPending = query(collection(db, 'pending_order_alerts'), orderBy('createdAt', 'desc'), limit(10));
+    const unsubPending = onSnapshot(qPending, (snap) => {
+      setPendingOrdersHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (e) => console.error('pending_order_alerts listen', e));
+
+    const qInactive = query(collection(db, 'inactive_client_alerts'), orderBy('createdAt', 'desc'), limit(10));
+    const unsubInactive = onSnapshot(qInactive, (snap) => {
+      setInactiveClientsHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (e) => console.error('inactive_client_alerts listen', e));
+
+    return () => { unsubPending(); unsubInactive(); };
+  }, []);
+
+  const savePendingOrdersSettings = async (next: typeof pendingOrdersSettings) => {
+    setPendingOrdersSaving(true);
+    try {
+      await setDoc(doc(db, 'settings', 'pendingOrdersAlerts'), next, { merge: true });
+      setPendingOrdersSettings(next);
+      toast.success(next.enabled ? 'Relances commandes en attente activées' : 'Relances commandes en attente désactivées');
+    } catch (e) {
+      console.error(e);
+      toast.error('Erreur sauvegarde des réglages');
+    } finally {
+      setPendingOrdersSaving(false);
+    }
+  };
+
+  const saveInactiveClientsSettings = async (next: typeof inactiveClientsSettings) => {
+    setInactiveClientsSaving(true);
+    try {
+      await setDoc(doc(db, 'settings', 'inactiveClientsAlerts'), next, { merge: true });
+      setInactiveClientsSettings(next);
+      toast.success(next.enabled ? 'Relances clients inactifs activées' : 'Relances clients inactifs désactivées');
+    } catch (e) {
+      console.error(e);
+      toast.error('Erreur sauvegarde des réglages');
+    } finally {
+      setInactiveClientsSaving(false);
+    }
+  };
+
+  // Déclenchement manuel immédiat, bypass le verrou de fréquence
+  // puisqu'appelé avec le jeton admin (voir dual-auth dans la route).
+  const runPeriodicChecksNow = async () => {
+    setPeriodicChecksRunning(true);
+    try {
+      const idToken = await auth.currentUser?.getIdToken();
+      const res = await fetch(apiUrl('/api/system/periodic-checks'), {
+        method: 'POST',
+        headers: idToken ? { Authorization: `Bearer ${idToken}` } : {},
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { toast.error(data?.error || 'Erreur lors du déclenchement'); return; }
+      if (data?.skipped) { toast.info(data.reason || 'Rien à relancer pour le moment'); return; }
+      const poCount = data?.pendingOrders?.notified ?? 0;
+      const icCount = data?.inactiveClients?.notified ?? 0;
+      toast.success(`${poCount} commande(s) relancée(s), ${icCount} client(s) relancé(s)`);
+    } catch (e) {
+      console.error(e);
+      toast.error('Erreur réseau');
+    } finally {
+      setPeriodicChecksRunning(false);
     }
   };
 
@@ -3425,7 +3688,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                   <div style={{ marginBottom:12 }}>
                     <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Icône</label>
                     <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
-                      {['📢','⚡','🎉','⚠️','💰','🌾','🚚','🔔','✅'].map(e=>(
+                      {['🔥','⭐','🎯','💥','🚀','💎','🏆','⚡','🎁','📣','✨','🚨'].map(e=>(
                         <button key={e} onClick={()=>setPushAllForm({...pushAllForm,icon:e})} style={{ width:34, height:34, borderRadius:8, border:`2px solid ${pushAllForm.icon===e?'#10b981':'transparent'}`, background:pushAllForm.icon===e?'rgba(16,185,129,.1)':'#1f2127', fontSize:16, cursor:'pointer' }}>{e}</button>
                       ))}
                     </div>
@@ -3450,6 +3713,235 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                   </button>
                 </div>
 
+                {/* ── 🤖 Promotion IA automatique (produits sans commande) ── */}
+                <div className="glass-card" style={{ padding:20 }}>
+                  <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:4 }}>
+                    <h3 style={{ fontSize:15, fontWeight:600 }}>🤖 Promotion IA automatique</h3>
+                    <label style={{ display:'flex', alignItems:'center', gap:6, cursor: aiPromoLoading ? 'wait' : 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        disabled={aiPromoLoading || aiPromoSaving}
+                        checked={aiPromoSettings.enabled}
+                        onChange={e => saveAiPromoSettings({ ...aiPromoSettings, enabled: e.target.checked })}
+                        style={{ width:'auto', cursor:'pointer' }}
+                      />
+                      <span style={{ fontSize:12, color: aiPromoSettings.enabled ? '#10b981' : '#6b7280' }}>
+                        {aiPromoSettings.enabled ? 'Activée' : 'Désactivée'}
+                      </span>
+                    </label>
+                  </div>
+                  <p style={{ fontSize:11, color:'#6b7280', marginBottom:16 }}>
+                    Détecte les produits ajoutés sans aucune commande depuis un certain délai, génère un message
+                    avec l'IA (DeepSeek) et l'envoie automatiquement en push. Planifié via Vercel Cron une fois par jour.
+                  </p>
+
+                  <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginBottom:12 }}>
+                    <div>
+                      <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Délai avant relance (heures)</label>
+                      <input type="number" min={1} value={aiPromoSettings.thresholdHours}
+                        onChange={e => setAiPromoSettings({ ...aiPromoSettings, thresholdHours: Number(e.target.value) || 1 })}
+                        onBlur={() => saveAiPromoSettings(aiPromoSettings)} />
+                    </div>
+                    <div>
+                      <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Anti-spam (jours entre 2 relances)</label>
+                      <input type="number" min={1} value={aiPromoSettings.cooldownDays}
+                        onChange={e => setAiPromoSettings({ ...aiPromoSettings, cooldownDays: Number(e.target.value) || 1 })}
+                        onBlur={() => saveAiPromoSettings(aiPromoSettings)} />
+                    </div>
+                    <div>
+                      <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Max produits / exécution</label>
+                      <input type="number" min={1} max={50} value={aiPromoSettings.maxPerRun}
+                        onChange={e => setAiPromoSettings({ ...aiPromoSettings, maxPerRun: Number(e.target.value) || 1 })}
+                        onBlur={() => saveAiPromoSettings(aiPromoSettings)} />
+                    </div>
+                    <div>
+                      <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Cible</label>
+                      <select value={aiPromoSettings.scope}
+                        onChange={e => saveAiPromoSettings({ ...aiPromoSettings, scope: e.target.value as 'all' | 'region' })}>
+                        <option value="region">Région du produit</option>
+                        <option value="all">Tous les tokens</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <button onClick={runAiPromoNow} disabled={aiPromoRunning} className="btn-primary" style={{ width:'100%', justifyContent:'center', opacity: aiPromoRunning ? 0.5 : 1, marginBottom:14 }}>
+                    {aiPromoRunning ? 'Analyse en cours…' : <><Sparkles size={14}/> Lancer maintenant (test manuel)</>}
+                  </button>
+
+                  {aiPromoHistory.length > 0 && (
+                    <div>
+                      <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Dernières promotions envoyées</label>
+                      <div style={{ display:'flex', flexDirection:'column', gap:6, maxHeight:220, overflowY:'auto' }}>
+                        {aiPromoHistory.map(h => (
+                          <div key={h.id} style={{ padding:8, borderRadius:8, background:'#1f2127', fontSize:11 }}>
+                            <div style={{ fontWeight:600 }}>{h.icon} {h.title}</div>
+                            <div style={{ color:'#6b7280', marginTop:2 }}>{h.productName} · {h.recipientCount} destinataire(s) · {h.pushSuccessCount} réussi(s)</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* ── ⚠️ Alerte stock bas / rupture — ÉVÉNEMENTIELLE, sans cron ── */}
+                <div className="glass-card" style={{ padding:20, marginTop:16 }}>
+                  <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:4 }}>
+                    <h3 style={{ fontSize:15, fontWeight:600 }}>⚠️ Alerte stock bas / rupture</h3>
+                    <label style={{ display:'flex', alignItems:'center', gap:6, cursor: lowStockLoading ? 'wait' : 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        disabled={lowStockLoading || lowStockSaving}
+                        checked={lowStockSettings.enabled}
+                        onChange={e => saveLowStockSettings({ ...lowStockSettings, enabled: e.target.checked })}
+                        style={{ width:'auto', cursor:'pointer' }}
+                      />
+                      <span style={{ fontSize:12, color: lowStockSettings.enabled ? '#10b981' : '#6b7280' }}>
+                        {lowStockSettings.enabled ? 'Activée' : 'Désactivée'}
+                      </span>
+                    </label>
+                  </div>
+                  <p style={{ fontSize:11, color:'#6b7280', marginBottom:16 }}>
+                    Prévient le vendeur dès qu'un de ses produits passe sous le seuil de stock. Pas de cron : se
+                    déclenche à l'instant précis d'une commande (voir checkout), donc pas d'attente entre deux vérifications.
+                  </p>
+                  <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginBottom:14 }}>
+                    <div>
+                      <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Seuil (stock ≤)</label>
+                      <input type="number" min={0} value={lowStockSettings.threshold}
+                        onChange={e => setLowStockSettings({ ...lowStockSettings, threshold: Number(e.target.value) || 0 })}
+                        onBlur={() => saveLowStockSettings(lowStockSettings)} />
+                    </div>
+                    <div>
+                      <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Anti-spam (heures entre 2 alertes)</label>
+                      <input type="number" min={1} value={lowStockSettings.cooldownHours}
+                        onChange={e => setLowStockSettings({ ...lowStockSettings, cooldownHours: Number(e.target.value) || 1 })}
+                        onBlur={() => saveLowStockSettings(lowStockSettings)} />
+                    </div>
+                  </div>
+                  {lowStockHistory.length > 0 && (
+                    <div>
+                      <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Historique récent</label>
+                      <div style={{ display:'flex', flexDirection:'column', gap:6, maxHeight:180, overflowY:'auto' }}>
+                        {lowStockHistory.map(h => (
+                          <div key={h.id} style={{ padding:8, borderRadius:8, background:'#1f2127', fontSize:11, color:'#6b7280' }}>
+                            {h.productsNotified} vendeur(s) alerté(s) · {h.pushSuccessCount} push réussi(s)
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* ── ⏳ Relances commandes en attente + 👋 Clients inactifs — sans cron ── */}
+                <div className="glass-card" style={{ padding:20, marginTop:16 }}>
+                  <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:4 }}>
+                    <h3 style={{ fontSize:15, fontWeight:600 }}>⏳ Relances automatiques</h3>
+                  </div>
+                  <p style={{ fontSize:11, color:'#6b7280', marginBottom:16 }}>
+                    Pas de cron ici non plus : ces deux règles dépendent du temps qui passe (pas d'événement
+                    d'écriture précis à écouter), donc elles se déclenchent au fil du trafic réel de l'app — chaque
+                    commande passée, et chaque ouverture de ce tableau de bord — avec un anti-doublon serveur pour
+                    ne jamais scanner deux fois de suite inutilement. Sur une période totalement calme (aucun achat,
+                    personne côté admin), rien ne se déclenche tant qu'aucun des deux ne se reproduit : c'est le
+                    compromis assumé pour éviter toute infrastructure de planification.
+                  </p>
+
+                  <div style={{ borderTop:'1px solid #1a1c22', paddingTop:14, marginBottom:14 }}>
+                    <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:10 }}>
+                      <h4 style={{ fontSize:13, fontWeight:600 }}>Commandes en attente non traitées</h4>
+                      <label style={{ display:'flex', alignItems:'center', gap:6, cursor: pendingOrdersLoading ? 'wait' : 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          disabled={pendingOrdersLoading || pendingOrdersSaving}
+                          checked={pendingOrdersSettings.enabled}
+                          onChange={e => savePendingOrdersSettings({ ...pendingOrdersSettings, enabled: e.target.checked })}
+                          style={{ width:'auto', cursor:'pointer' }}
+                        />
+                        <span style={{ fontSize:12, color: pendingOrdersSettings.enabled ? '#10b981' : '#6b7280' }}>
+                          {pendingOrdersSettings.enabled ? 'Activée' : 'Désactivée'}
+                        </span>
+                      </label>
+                    </div>
+                    <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:10 }}>
+                      <div>
+                        <label style={{ fontSize:11, color:'#6b7280', marginBottom:6, display:'block' }}>Relance après (h)</label>
+                        <input type="number" min={1} value={pendingOrdersSettings.thresholdHours}
+                          onChange={e => setPendingOrdersSettings({ ...pendingOrdersSettings, thresholdHours: Number(e.target.value) || 1 })}
+                          onBlur={() => savePendingOrdersSettings(pendingOrdersSettings)} />
+                      </div>
+                      <div>
+                        <label style={{ fontSize:11, color:'#6b7280', marginBottom:6, display:'block' }}>Anti-spam (h)</label>
+                        <input type="number" min={1} value={pendingOrdersSettings.cooldownHours}
+                          onChange={e => setPendingOrdersSettings({ ...pendingOrdersSettings, cooldownHours: Number(e.target.value) || 1 })}
+                          onBlur={() => savePendingOrdersSettings(pendingOrdersSettings)} />
+                      </div>
+                      <div>
+                        <label style={{ fontSize:11, color:'#6b7280', marginBottom:6, display:'block' }}>Escalade admin après (h)</label>
+                        <input type="number" min={1} value={pendingOrdersSettings.escalateAfterHours}
+                          onChange={e => setPendingOrdersSettings({ ...pendingOrdersSettings, escalateAfterHours: Number(e.target.value) || 1 })}
+                          onBlur={() => savePendingOrdersSettings(pendingOrdersSettings)} />
+                      </div>
+                    </div>
+                    {pendingOrdersHistory.length > 0 && (
+                      <div style={{ marginTop:10, display:'flex', flexDirection:'column', gap:6, maxHeight:140, overflowY:'auto' }}>
+                        {pendingOrdersHistory.map(h => (
+                          <div key={h.id} style={{ padding:8, borderRadius:8, background:'#1f2127', fontSize:11, color:'#6b7280' }}>
+                            {h.ordersNotified} commande(s) relancée(s){h.escalated > 0 ? ` · ${h.escalated} escaladée(s) aux admins` : ''}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ borderTop:'1px solid #1a1c22', paddingTop:14, marginBottom:14 }}>
+                    <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:10 }}>
+                      <h4 style={{ fontSize:13, fontWeight:600 }}>Clients inactifs</h4>
+                      <label style={{ display:'flex', alignItems:'center', gap:6, cursor: inactiveClientsLoading ? 'wait' : 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          disabled={inactiveClientsLoading || inactiveClientsSaving}
+                          checked={inactiveClientsSettings.enabled}
+                          onChange={e => saveInactiveClientsSettings({ ...inactiveClientsSettings, enabled: e.target.checked })}
+                          style={{ width:'auto', cursor:'pointer' }}
+                        />
+                        <span style={{ fontSize:12, color: inactiveClientsSettings.enabled ? '#10b981' : '#6b7280' }}>
+                          {inactiveClientsSettings.enabled ? 'Activée' : 'Désactivée'}
+                        </span>
+                      </label>
+                    </div>
+                    <p style={{ fontSize:10, color:'#6b7280', marginBottom:10 }}>
+                      "Inactif" = pas de commande depuis N jours (pas de suivi de dernière connexion dans l'app).
+                    </p>
+                    <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
+                      <div>
+                        <label style={{ fontSize:11, color:'#6b7280', marginBottom:6, display:'block' }}>Inactif après (jours)</label>
+                        <input type="number" min={1} value={inactiveClientsSettings.thresholdDays}
+                          onChange={e => setInactiveClientsSettings({ ...inactiveClientsSettings, thresholdDays: Number(e.target.value) || 1 })}
+                          onBlur={() => saveInactiveClientsSettings(inactiveClientsSettings)} />
+                      </div>
+                      <div>
+                        <label style={{ fontSize:11, color:'#6b7280', marginBottom:6, display:'block' }}>Anti-spam (jours)</label>
+                        <input type="number" min={1} value={inactiveClientsSettings.cooldownDays}
+                          onChange={e => setInactiveClientsSettings({ ...inactiveClientsSettings, cooldownDays: Number(e.target.value) || 1 })}
+                          onBlur={() => saveInactiveClientsSettings(inactiveClientsSettings)} />
+                      </div>
+                    </div>
+                    {inactiveClientsHistory.length > 0 && (
+                      <div style={{ marginTop:10, display:'flex', flexDirection:'column', gap:6, maxHeight:140, overflowY:'auto' }}>
+                        {inactiveClientsHistory.map(h => (
+                          <div key={h.id} style={{ padding:8, borderRadius:8, background:'#1f2127', fontSize:11, color:'#6b7280' }}>
+                            {h.clientsChecked} client(s) vérifié(s) · {h.clientsNotified} relancé(s)
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <button onClick={runPeriodicChecksNow} disabled={periodicChecksRunning} className="btn-primary" style={{ width:'100%', justifyContent:'center', opacity: periodicChecksRunning ? 0.5 : 1 }}>
+                    {periodicChecksRunning ? 'Scan en cours…' : <><Sparkles size={14}/> Forcer le scan maintenant (test manuel)</>}
+                  </button>
+                </div>
+
                 </div>
 
               </div>
@@ -3457,14 +3949,48 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
 
             {/* ═══ LIVRAISONS ═════════════════════════════════ */}
             {activeTab === 'delivery' && (
-              <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(320px,1fr))', gap:16 }} className="animate-fadeIn">
-                {deliveryPersons.map(d=>(
+              <div className="animate-fadeIn">
+                {/* Total plateforme : somme de tous les deliveryFee versés/dus
+                    aux livreurs, distincte de `platformRevenue` (la
+                    commission de la plateforme sur `amount`) — ce sont deux
+                    montants différents qui ne doivent jamais être confondus. */}
+                <div className="glass-card" style={{ padding:16, marginBottom:16, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                  <div>
+                    <div style={{ fontSize:12, color:'#6b7280' }}>Total frais de livraison — commandes livrées</div>
+                    <div style={{ fontSize:22, fontWeight:800, color:'#10b981' }}>{totalDelivererEarnings.toLocaleString()} FCFA</div>
+                  </div>
+                  <div style={{ fontSize:11, color:'#6b7280', textAlign:'right' }}>
+                    Gagné, pas versé — aucun statut de paiement<br/>n'existe encore dans l'app
+                  </div>
+                </div>
+
+                <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(320px,1fr))', gap:16 }}>
+                {deliveryPersons.map(d=>{
+                  const stats = delivererEarnings[d.id!] || { total:0, today:0, week:0, count:0 };
+                  return (
                   <div key={d.id} className="glass-card" style={{ padding:16 }}>
                     <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:12 }}>
                       <div style={{ width:44, height:44, borderRadius:12, background:'rgba(16,185,129,.1)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:20, flexShrink:0 }}>🚚</div>
                       <div><div style={{ fontWeight:600 }}>{d.displayName}</div><div style={{ fontSize:12, color:'#6b7280' }}>{d.phone||'—'}</div></div>
                     </div>
-                    {[['Véhicule',d.vehicle||'Non spécifié'],['Région',d.region||'—'],['Statut','✅ Disponible']].map(([k,v])=>(
+
+                    {/* Gains — même donnée que "Mes gains" côté livreur */}
+                    <div style={{ display:'flex', gap:8, marginBottom:12 }}>
+                      <div style={{ flex:1, background:'rgba(16,185,129,.08)', border:'1px solid rgba(16,185,129,.25)', borderRadius:10, padding:'8px 10px' }}>
+                        <div style={{ fontSize:10, color:'#6b7280' }}>Total</div>
+                        <div style={{ fontSize:14, fontWeight:700, color:'#10b981' }}>{stats.total.toLocaleString()} FCFA</div>
+                      </div>
+                      <div style={{ flex:1, background:'#15171c', borderRadius:10, padding:'8px 10px' }}>
+                        <div style={{ fontSize:10, color:'#6b7280' }}>Aujourd'hui</div>
+                        <div style={{ fontSize:14, fontWeight:700 }}>{stats.today.toLocaleString()} FCFA</div>
+                      </div>
+                      <div style={{ flex:1, background:'#15171c', borderRadius:10, padding:'8px 10px' }}>
+                        <div style={{ fontSize:10, color:'#6b7280' }}>7 jours</div>
+                        <div style={{ fontSize:14, fontWeight:700 }}>{stats.week.toLocaleString()} FCFA</div>
+                      </div>
+                    </div>
+
+                    {[['Véhicule',d.vehicle||'Non spécifié'],['Région',d.region||'—'],['Livraisons validées',String(stats.count)],['Statut','✅ Disponible']].map(([k,v])=>(
                       <div key={k} style={{ display:'flex', justifyContent:'space-between', fontSize:12, padding:'6px 0', borderBottom:'1px solid #1a1c22' }}>
                         <span style={{ color:'#6b7280' }}>{k}</span><span>{v}</span>
                       </div>
@@ -3473,10 +3999,12 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                       <Phone size={13}/> Contacter
                     </button>
                   </div>
-                ))}
+                  );
+                })}
                 {deliveryPersons.length===0 && (
                   <div className="glass-card" style={{ padding:40, textAlign:'center', gridColumn:'1/-1', color:'#6b7280' }}>Aucun livreur disponible</div>
                 )}
+                </div>
               </div>
             )}
 

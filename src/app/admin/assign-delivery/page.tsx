@@ -6,7 +6,7 @@ import { useEffect, useState } from 'react';
 import { useAuth } from '@/hooks/useAuth';
 import { useRouter } from 'next/navigation';
 import { db } from '@/lib/firebase/firebase';
-import { collection, query, where, getDocs, onSnapshot, doc, updateDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, onSnapshot, doc, updateDoc, getDoc, writeBatch, Timestamp } from 'firebase/firestore';
 import { Truck, User, MapPin, Phone, CheckCircle, XCircle, Search, Loader2 } from 'lucide-react';
 
 interface DeliveryPerson {
@@ -29,6 +29,7 @@ interface Order {
   delivererId?: string;
   delivererName?: string;
   delivererPhone?: string;
+  delivererVehicle?: string;
 }
 
 export default function AssignDeliveryPage() {
@@ -69,21 +70,36 @@ export default function AssignDeliveryPage() {
     loadDeliveryPersons();
   }, []);
 
+  // ⚠️ FIX cohérence inter-pages : cette fonction écrivait `deliveryPerson:
+  // {id,name,phone,vehicle}` — un champ que ni app/delivery/dashboard
+  // (where('delivererId','==',uid)) ni seller/orders ni admin/page.tsx ne
+  // lisent jamais. Les commandes assignées ici étaient donc invisibles côté
+  // livreur. On écrit maintenant le même schéma que admin/page.tsx::
+  // assignDelivery (delivererId/delivererName/delivererPhone) et on
+  // synchronise seller_orders (lu par account-page.tsx pour l'historique
+  // client), exactement comme le fait déjà admin/page.tsx.
   const assignDeliveryPerson = async (orderId: string, deliveryPerson: DeliveryPerson) => {
     setAssigning(orderId);
     try {
-      // ⚠️ FIX : on écrit désormais delivererId/delivererName/delivererPhone —
-      // ce sont ces champs (et pas un objet `deliveryPerson`) que lisent
-      // /admin/delivery (suivi live) et /delivery/dashboard (côté livreur).
-      // Avant, l'assignation ici n'était donc JAMAIS visible ailleurs.
-      await updateDoc(doc(db, 'orders', orderId), {
+      const now = Timestamp.now();
+      const payload = {
         delivererId: deliveryPerson.id,
         delivererName: deliveryPerson.displayName,
         delivererPhone: deliveryPerson.phone,
+        delivererVehicle: deliveryPerson.vehicle || 'Moto',
+        delivererAssignedAt: now,
+        updatedAt: now,
         'tracking.enabled': true,
         'tracking.currentLocation': null,
         'tracking.lastUpdate': null,
-      });
+      };
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'orders', orderId), payload, { merge: true });
+      const sellerOrderSnap = await getDoc(doc(db, 'seller_orders', orderId));
+      if (sellerOrderSnap.exists()) {
+        batch.set(doc(db, 'seller_orders', orderId), payload, { merge: true });
+      }
+      await batch.commit();
       alert(`✅ Livreur ${deliveryPerson.displayName} assigné à la commande`);
     } catch (error) {
       console.error(error);
@@ -97,12 +113,23 @@ export default function AssignDeliveryPage() {
     if (!confirm('Retirer le livreur de cette commande ?')) return;
     setAssigning(orderId);
     try {
-      await updateDoc(doc(db, 'orders', orderId), {
+      const now = Timestamp.now();
+      const payload = {
         delivererId: null,
         delivererName: null,
         delivererPhone: null,
+        delivererVehicle: null,
+        delivererAssignedAt: null,
+        updatedAt: now,
         'tracking.enabled': false,
-      });
+      };
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'orders', orderId), payload, { merge: true });
+      const sellerOrderSnap = await getDoc(doc(db, 'seller_orders', orderId));
+      if (sellerOrderSnap.exists()) {
+        batch.set(doc(db, 'seller_orders', orderId), payload, { merge: true });
+      }
+      await batch.commit();
       alert('✅ Livreur retiré');
     } catch (error) {
       console.error(error);

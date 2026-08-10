@@ -35,8 +35,39 @@ function isAdmin() {
     get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
 }
 
+function isDeliverer() {
+  return request.auth != null &&
+    get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'delivery';
+}
+
+// ⚠️ FIX cohérence : app/delivery/dashboard/page.tsx écrit en DIRECT sur
+// `orders` (claimOrder, markAsDelivered, tracking GPS, dates de suivi) —
+// ce ne sont pas des transitions passant par la Cloud Function
+// `updateOrderStatus` (celle-ci ne gère que confirm_delivery/cancel côté
+// ACHETEUR, cf. lib/orderActions.ts). Sans ces deux clauses, aucune de
+// ces écritures livreur n'était couverte : seuls isSellerOfOrder()/
+// isAdmin() étaient autorisés à update() → permission-denied garanti
+// pour tout compte role:'delivery'.
+//
+// isDelivererClaim() : une commande 'en_attente' pas encore prise peut
+// être réclamée par n'importe quel livreur (delivererId encore vide côté
+// resource.data — read avant write).
+function isDelivererClaim(orderData) {
+  return isDeliverer() &&
+    orderData.status == 'en_attente' &&
+    orderData.delivererId == null;
+}
+
+// isAssignedDeliverer() : une fois la commande prise (delivererId ==
+// uid), le même livreur peut mettre à jour statut/tracking/dates —
+// jamais un autre livreur.
+function isAssignedDeliverer(orderData) {
+  return isDeliverer() && request.auth.uid == orderData.delivererId;
+}
+
 match /orders/{orderId} {
-  allow read: if isOwner(resource.data) || isSellerOfOrder(resource.data) || isAdmin();
+  allow read: if isOwner(resource.data) || isSellerOfOrder(resource.data)
+    || isAdmin() || isDeliverer();
 
   // Création : inchangé, c'est le flux de checkout (l'acheteur crée sa
   // propre commande). À adapter si ta version actuelle valide déjà des
@@ -44,12 +75,15 @@ match /orders/{orderId} {
   allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
 
   // ⛔ Le client (acheteur) n'a PLUS le droit d'update() directement.
-  // Toute transition de statut passe par la Cloud Function
-  // `updateOrderStatus`, qui écrit avec les droits Admin SDK et n'est
-  // donc pas concernée par cette règle.
-  // Le vendeur et l'admin gardent leur update (précision selon ton
-  // implémentation actuelle — ownerId vendeur, ou rôle admin).
-  allow update: if isSellerOfOrder(resource.data) || isAdmin();
+  // Toute transition CLIENT (confirm_delivery/cancel) passe par la Cloud
+  // Function `updateOrderStatus`, qui écrit avec les droits Admin SDK et
+  // n'est donc pas concernée par cette règle.
+  // Le vendeur et l'admin gardent leur update complet. Le livreur ne peut
+  // écrire que pour réclamer une commande disponible ou faire avancer une
+  // commande qui lui est déjà assignée (voir isDelivererClaim /
+  // isAssignedDeliverer ci-dessus) — jamais changer sellerId/userId/total.
+  allow update: if isSellerOfOrder(resource.data) || isAdmin()
+    || isDelivererClaim(resource.data) || isAssignedDeliverer(resource.data);
 
   allow delete: if isAdmin();
 }

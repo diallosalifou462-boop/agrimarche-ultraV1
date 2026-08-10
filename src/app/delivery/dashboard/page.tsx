@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { ORDER_STATUS_CONFIG, statusTint, formatFCFA } from '@/lib/orderStatus';
+import { apiUrl } from '@/lib/api-config';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -778,7 +779,7 @@ export default function DeliveryDashboard() {
       // SMS de confirmation de livraison au client (best-effort, via
       // Infobip — voir /api/send-sms). Ne bloque jamais la validation.
       if (order?.userPhone) {
-        fetch('/api/send-sms', {
+        fetch(apiUrl('/api/send-sms'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

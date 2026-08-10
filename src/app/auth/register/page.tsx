@@ -14,6 +14,7 @@ import {
 import { auth } from '@/lib/firebase/firebase';
 import { Capacitor } from '@capacitor/core';
 import { detectCarrier } from '@/lib/carrier';
+import { apiUrl } from '@/lib/api-config';
 
 // ─── Attend que le pont natif Capacitor soit prêt ─────
 // Sur certains démarrages, window.Capacitor s'injecte avec
@@ -209,7 +210,7 @@ export default function RegisterPage() {
       const carrier = detectCarrier(formData.phone);
       if (carrier === 'free' || carrier === 'expresso') {
         useCustomOtpRef.current = true;
-        const res = await fetch('/api/otp/send', {
+        const res = await fetch(apiUrl('/api/otp/send'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ phone: phoneE164 }),
@@ -382,7 +383,7 @@ export default function RegisterPage() {
         // signUp() ici : le profil est déjà écrit, il ne reste qu'à
         // établir la session côté client.
         const phoneE164 = toE164(formData.phone);
-        const res = await fetch('/api/otp/verify', {
+        const res = await fetch(apiUrl('/api/otp/verify'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

@@ -13,6 +13,8 @@ interface Order {
   orderNumber?: string;
   status: string;
   userPhone?: string;
+  delivererName?: string;
+  delivererPhone?: string;
   customerLocation?: { address?: string; lat?: number; lng?: number };
   tracking?: {
     currentLocation?: Location;
@@ -752,9 +754,16 @@ function TrackingClientContent() {
         )}
 
         {/* ── Contacter le livreur ── */}
-        {order.userPhone && (
+        {/* ⚠️ FIX : ce bloc composait order.userPhone — le téléphone du
+            CLIENT lui-même (celui qui regarde cette page), jamais celui du
+            livreur. Le champ delivererPhone existe pourtant déjà sur le
+            document (écrit par admin/page.tsx::assignDelivery et par le
+            claim du livreur), il n'était simplement jamais lu ici. On
+            n'affiche désormais ce bloc que si un livreur est réellement
+            assigné. */}
+        {order.delivererPhone && (
           <a
-            href={`tel:${order.userPhone}`}
+            href={`tel:${order.delivererPhone}`}
             style={{
               display: 'flex', alignItems: 'center', gap: '14px',
               padding: '16px',
@@ -783,7 +792,7 @@ function TrackingClientContent() {
                 fontFamily: "'DM Mono', monospace", marginBottom: '3px',
               }}>Contacter le livreur</p>
               <p style={{ color: 'rgba(255,255,255,0.7)', fontSize: '13px', fontWeight: 500 }}>
-                {order.userPhone}
+                {order.delivererName ? `${order.delivererName} · ${order.delivererPhone}` : order.delivererPhone}
               </p>
             </div>
             <span style={{ color: 'rgba(255,255,255,0.18)', fontSize: '18px' }}>›</span>

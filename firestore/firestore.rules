@@ -1,4 +1,4 @@
-..rules_version = '2';
+rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -548,6 +548,47 @@ service cloud.firestore {
                     && request.resource.data.used == true
                     && request.resource.data.usedBy == request.auth.uid;
       allow delete: if isAdmin();
+    }
+
+    // =========================================================
+    // RÉGLAGES ADMIN (settings/*)
+    // Lus ET écrits directement depuis le client admin (toggles, seuils) :
+    // Promotion IA (aiPromotion), Alerte stock bas (lowStockAlerts),
+    // Relances commandes en attente (pendingOrdersAlerts), Relances
+    // clients inactifs (inactiveClientsAlerts), verrou anti-doublon
+    // (periodicChecksLock). Un seul match générique plutôt qu'un par clé :
+    // ⚠️ avant l'ajout de ce bloc, `settings/*` n'avait AUCUNE règle
+    // explicite (couvert seulement par le catch-all "interdit par
+    // défaut" en fin de fichier) — même la Promotion IA, pourtant déjà
+    // en place depuis avant, échouait donc en permission-denied dès
+    // qu'un admin essayait de lire/modifier ses réglages.
+    // =========================================================
+    match /settings/{settingId} {
+      allow read, write: if isAdmin();
+    }
+
+    // =========================================================
+    // HISTORIQUES DES NOTIFICATIONS AUTOMATIQUES
+    // Écrits UNIQUEMENT par les routes API correspondantes via le SDK
+    // Admin (hors de ces règles) : /api/cron/promote-stale-products,
+    // /api/products/check-stock, /api/system/periodic-checks. L'admin a
+    // seulement besoin de LIRE pour afficher l'historique dans l'UI.
+    // =========================================================
+    match /ai_promotions/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    match /low_stock_alerts/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    match /pending_order_alerts/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    match /inactive_client_alerts/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;
     }
 
     // =========================================================

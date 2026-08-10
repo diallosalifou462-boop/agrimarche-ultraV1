@@ -1,5 +1,17 @@
 'use client';
 
+// ⚠️ DÉPRÉCIÉ — ne pas réutiliser.
+// Ce composant écrit uniquement `deliveryStatus` (vocabulaire propre :
+// pending/preparing/shipped/out_for_delivery/delivered) et ne touche
+// jamais au champ canonique `status` défini dans src/lib/orderStatus.ts,
+// que lisent app/delivery/dashboard, app/admin/page.tsx et app/tracking.
+// Il était affiché en double avec le bon bouton "Marquer comme livrée"
+// dans seller/orders/page.tsx et pouvait désynchroniser une commande
+// indéfiniment. Utiliser updateStatus() (seller/orders/page.tsx) ou
+// assignDelivery()/updateOrderStatus() (admin/page.tsx) à la place.
+// Conservé uniquement pour compatibilité si un ancien écran l'importe
+// encore ; ne plus l'importer dans du nouveau code.
+
 import { useState } from 'react';
 import { doc, updateDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';

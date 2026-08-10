@@ -15,6 +15,7 @@ import {
 import { auth } from '@/lib/firebase/firebase';
 import { Capacitor } from '@capacitor/core';
 import { detectCarrier } from '@/lib/carrier';
+import { apiUrl } from '@/lib/api-config';
 
 // ─── Attend que le pont natif Capacitor soit prêt ─────
 async function waitForNativeBridge(timeoutMs = 1500): Promise<boolean> {
@@ -173,7 +174,7 @@ function LoginContent() {
       const carrier = detectCarrier(phone);
       if (carrier === 'free' || carrier === 'expresso') {
         useCustomOtpRef.current = true;
-        const res = await fetch('/api/otp/send', {
+        const res = await fetch(apiUrl('/api/otp/send'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ phone: phoneE164 }),
@@ -234,7 +235,7 @@ function LoginContent() {
       const carrier = detectCarrier(phone);
       if (carrier === 'free' || carrier === 'expresso') {
         useCustomOtpRef.current = true;
-        const res = await fetch('/api/otp/send', {
+        const res = await fetch(apiUrl('/api/otp/send'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ phone: phoneE164 }),
@@ -298,7 +299,7 @@ function LoginContent() {
     try {
       if (useCustomOtpRef.current) {
         const phoneE164 = toE164(phone);
-        const res = await fetch('/api/otp/verify', {
+        const res = await fetch(apiUrl('/api/otp/verify'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ phone: phoneE164, code }),

@@ -16,6 +16,8 @@
 // qui). La route API utilise Firebase Admin, qui contourne les règles
 // de sécurité côté serveur — c'est le seul endroit légitime pour ça.
 
+import { apiUrl } from '@/lib/api-config';
+
 export type NotificationType = string;
 
 export interface NotifyUserInput {
@@ -45,7 +47,7 @@ export async function notifyUser({
   channels = ['push'],
 }: NotifyUserInput): Promise<void> {
   try {
-    const res = await fetch('/api/notifications/send', {
+    const res = await fetch(apiUrl('/api/notifications/send'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId, title, body, link, channels, priority, urgent, type, icon }),
@@ -84,7 +86,7 @@ export async function notifyAllUsers({
   excludeUserId,
 }: NotifyAllUsersInput): Promise<void> {
   try {
-    const res = await fetch('/api/broadcast', {
+    const res = await fetch(apiUrl('/api/broadcast'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title, body, link, type, icon, priority, urgent, excludeUserId }),

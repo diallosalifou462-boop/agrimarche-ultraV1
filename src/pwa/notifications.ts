@@ -1,6 +1,7 @@
 // src/pwa/notifications.ts
 // getMessaging and onMessage are dynamically imported to avoid SSR crashes.
 import { auth } from '@/lib/firebase/firebase';
+import { apiUrl } from '@/lib/api-config';
 
 export interface NotificationPayload {
   title: string;
@@ -114,7 +115,7 @@ export class PushNotificationsManager {
     if (!user) return;
     try {
       const idToken = await user.getIdToken();
-      await fetch('/api/notifications/register-token', {
+      await fetch(apiUrl('/api/notifications/register-token'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
         body: JSON.stringify({ token: this.token, platform: 'web', userId: user.uid }),

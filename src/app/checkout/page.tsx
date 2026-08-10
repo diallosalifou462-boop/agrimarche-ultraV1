@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { initDeliveryTracking, getEstimatedDeliveryDate } from '@/lib/deliveryTracking';
 import { notifyUser } from '@/lib/notifications/notifyUser';
+import { apiUrl } from '@/lib/api-config';
 
 /* ─────────────────────────────────────────────
    Styles injectés globalement
@@ -662,14 +663,32 @@ export default function CheckoutPage() {
         }
 
         // Decrementer stock (uniquement les articles de CE vendeur)
+        // ✅ Alerte "stock bas" événementielle : dès que le stock d'un
+        // produit baisse, on demande au serveur de vérifier s'il est
+        // repassé sous le seuil et d'alerter le vendeur — instantané, pas
+        // besoin d'attendre un passage de cron. Fire-and-forget : ne doit
+        // jamais bloquer ni faire échouer le checkout si ça rate.
         for (const item of items) {
           if (item?.product?.id) {
             try { await updateDoc(doc(db, 'products', item.product.id), { stock: increment(-(item.quantity || 1)) }); } catch {}
+            fetch(apiUrl('/api/products/check-stock'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ productId: item.product.id }),
+            }).catch(() => {});
           }
         }
 
         createdOrders.push({ docRefId: docRef.id, orderNumber, deliveryFee: sellerDeliveryFee, remainingAmount: sellerRemainingAmount });
       }
+
+      // ✅ Relances "commandes en attente" + "clients inactifs" : pas de
+      // cron, on profite du trafic organique (chaque checkout) pour
+      // vérifier s'il est temps de relancer. Auto-throttlé côté serveur
+      // (voir /api/system/periodic-checks) : ne coûte quasi rien tant que
+      // le dernier scan est récent. Fire-and-forget, ne doit jamais
+      // ralentir ni faire échouer le checkout.
+      fetch(apiUrl('/api/system/periodic-checks'), { method: 'POST' }).catch(() => {});
 
       // Vider panier + succes
       clearCart();
@@ -684,7 +703,7 @@ export default function CheckoutPage() {
       if (profile?.phone) {
         const totalAmount = createdOrders.reduce((sum, o) => sum + o.deliveryFee + o.remainingAmount, 0);
         const label = isMultiVendor ? orderGroupId : createdOrders[0].orderNumber;
-        fetch('/api/send-sms', {
+        fetch(apiUrl('/api/send-sms'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

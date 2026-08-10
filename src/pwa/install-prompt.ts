@@ -1,4 +1,6 @@
 // src/pwa/install-prompt.ts
+import { apiUrl } from '@/lib/api-config';
+
 export interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
@@ -62,7 +64,7 @@ export class InstallPromptManager {
   }
 
   private trackInstallation(): void {
-    fetch('/api/analytics/event', {
+    fetch(apiUrl('/api/analytics/event'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ event: 'pwa_installed', timestamp: Date.now(), userAgent: navigator.userAgent })

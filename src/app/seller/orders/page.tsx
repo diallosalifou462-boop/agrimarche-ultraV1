@@ -12,7 +12,6 @@ import {
   collection, query, where, doc, updateDoc, onSnapshot, Timestamp, getDoc, writeBatch,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
-import DeliveryUpdateButton from '@/components/DeliveryUpdateButton';
 import {
   OrderStatus, ORDER_STATUS_CONFIG, STATUS_TO_DELIVERY,
   normalizeStatus, statusTint, formatFCFA,
@@ -416,10 +415,17 @@ export default function SellerOrdersPage() {
                         ouverte). Retiré : le vendeur ne doit voir que le nom. */}
 
                     {order.status === 'en_livraison' && (
-                      <DeliveryUpdateButton
-                        orderId={order.id}
-                        currentStep={order.deliveryStatus || 'pending'}
-                      />
+                      <>{/* ⚠️ FIX cohérence inter-pages : il y avait ici un second
+                          bouton <DeliveryUpdateButton/> qui écrivait
+                          deliveryStatus:'delivered' (vocabulaire séparé) SANS
+                          jamais toucher au champ canonique `status`. Le bouton
+                          "Marquer comme livrée" ci-dessus est la SEULE action
+                          valide : il met à jour status + deliveryStatus (via
+                          STATUS_TO_DELIVERY) + seller_orders en un seul batch.
+                          L'ancien bouton restait accessible en parallèle et
+                          bloquait silencieusement la commande à 'en_livraison'
+                          pour le livreur/l'admin/le client si le vendeur
+                          cliquait dessus par erreur. */}</>
                     )}
                   </div>
                 )}

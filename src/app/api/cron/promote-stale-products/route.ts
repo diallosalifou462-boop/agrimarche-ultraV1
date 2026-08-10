@@ -51,6 +51,18 @@ function extractToken(docSnap: FirebaseFirestore.QueryDocumentSnapshot): string 
   return null;
 }
 
+// ⚠️ Même filtre que /api/send-push : un vrai token FCM contient toujours
+// ':' et fait largement plus de 100 caractères. Un token APNs brut résiduel
+// (hex 64 caractères sans ':') passait le seuil `length > 50` d'extractToken
+// ci-dessus et se glissait dans le lot envoyé à sendEachForMulticast — qui
+// rejette alors TOUT le chunk (erreur globale, pas de responses[] partiel)
+// dès qu'un seul token du batch est mal formé. Résultat : pushSuccessCount
+// retombe à 0 pour tout le chunk sans qu'aucune erreur ne remonte à l'admin,
+// et aucun téléphone ne reçoit la notif. On filtre donc en amont ici aussi.
+function isLikelyValidFcmToken(t: string): boolean {
+  return typeof t === 'string' && t.includes(':') && t.length > 100;
+}
+
 interface AiPromotionSettings {
   enabled: boolean;
   thresholdHours: number;   // délai avant de considérer un produit "stagnant"
@@ -229,8 +241,18 @@ export async function GET(req: NextRequest) {
         tokens = Array.from(new Set(allTokensSnap.docs.map(extractToken).filter((t): t is string => !!t)));
       }
 
+      // Filtre les tokens mal formés AVANT l'envoi (cf. commentaire sur
+      // isLikelyValidFcmToken) — sinon un seul token invalide dans le chunk
+      // fait échouer tout le lot silencieusement.
+      const validTokenCount = tokens.length;
+      tokens = tokens.filter(isLikelyValidFcmToken);
+      if (validTokenCount !== tokens.length) {
+        console.warn(`[promote-stale-products] ${validTokenCount - tokens.length} token(s) mal formé(s) écarté(s) pour ${productId}.`);
+      }
+
       let pushSuccessCount = 0;
       let pushFailureCount = 0;
+      const invalidTokens: string[] = [];
       const deepLink = `/product/${productId}`;
 
       for (let i = 0; i < tokens.length; i += 500) {
@@ -241,7 +263,8 @@ export async function GET(req: NextRequest) {
             tokens: chunk,
             notification: { title: `${copy.icon} ${copy.title}`, body: copy.body },
             data: { deepLink, source: 'ai_promotion', productId, click_action: 'FLUTTER_NOTIFICATION_CLICK' },
-            android: { priority: 'normal', notification: { sound: 'default', channelId: 'agrimarche_default' } },
+            android: { priority: 'high', notification: { sound: 'default', channelId: 'agrimarche_default' } },
+            apns: { payload: { aps: { sound: 'default' } } },
             webpush: {
               notification: { icon: '/icons/icon-192x192.png', badge: '/icons/badge-72x72.png' },
               fcmOptions: { link: deepLink },
@@ -249,9 +272,31 @@ export async function GET(req: NextRequest) {
           });
           pushSuccessCount += multicast.successCount;
           pushFailureCount += multicast.failureCount;
+          multicast.responses.forEach((r, idx) => {
+            const code = r.error?.code;
+            if (!r.success && (code === 'messaging/invalid-registration-token' || code === 'messaging/registration-token-not-registered')) {
+              invalidTokens.push(chunk[idx]);
+            }
+          });
         } catch (e) {
           console.error(`[promote-stale-products] Erreur push produit ${productId}:`, e);
         }
+      }
+
+      // Nettoyage des tokens morts détectés pendant cet envoi, pour ne pas
+      // les repayer en frais/latence à chaque prochaine exécution.
+      if (invalidTokens.length > 0) {
+        const invalidSet = new Set(invalidTokens);
+        const tokenDocsSnap = await db.collectionGroup('tokens').get();
+        const batch = db.batch();
+        let removed = 0;
+        tokenDocsSnap.docs.forEach((d) => {
+          if (invalidSet.has(d.id) || invalidSet.has(d.data()?.token)) {
+            batch.delete(d.ref);
+            removed++;
+          }
+        });
+        if (removed > 0) await batch.commit().catch((e) => console.warn('[promote-stale-products] Erreur nettoyage tokens invalides:', e));
       }
 
       // ── 5. Marquage produit + log historique ─────────────
