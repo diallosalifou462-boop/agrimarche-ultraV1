@@ -215,7 +215,7 @@ jobs:
             <key>provisioningProfiles</key>
             <dict>
               <key>com.agrimarche.app</key>
-              <string>AgriMarche_AppStore_Profile</string>
+              <string>AgriMarche_AppStore_Profil</string>
               <key>com.agrimarche.app.NotificationServiceExtension</key>
               <string>AgriMarche_NotificationServiceExtension_AppStore</string>
             </dict>
