@@ -139,6 +139,20 @@ jobs:
             echo ""
           done
 
+      - name: Prepare Apple API key for code signing
+        env:
+          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/private_keys"
+          echo "$API_KEY_BASE64" | base64 -D -o "$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8"
+          if ! head -1 "$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8" | grep -q "BEGIN PRIVATE KEY"; then
+            echo "❌ Clé API Apple invalide."
+            exit 1
+          fi
+
       - name: Debug - Vérifier la signature de NotificationServiceExtension
         run: |
           set -e
@@ -157,14 +171,16 @@ jobs:
           echo "=========================================="
 
       - name: Archive
+        env:
+          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
           set -e
           BUILD_NUMBER=$(date -u +%y%m%d%H%M)
 
           echo "Build number : $BUILD_NUMBER"
           echo "Marketing version (depuis package.json) : $APP_VERSION"
-
-          echo "🔐 Signature manuelle de l'app ET de l'extension"
+          echo "🔐 Automatic signing pour éviter d'imposer le provisioning profile aux Swift Packages"
 
           xcodebuild archive \
             -project "$XCODE_PROJECT" \
@@ -172,16 +188,14 @@ jobs:
             -configuration Release \
             -archivePath "$RUNNER_TEMP/App.xcarchive" \
             -destination "generic/platform=iOS" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8" \
+            -authenticationKeyID "$API_KEY_ID" \
+            -authenticationKeyIssuerID "$API_ISSUER_ID" \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
             MARKETING_VERSION="$APP_VERSION" \
-            CODE_SIGN_STYLE=Manual \
             DEVELOPMENT_TEAM=KAMMWG3VQH \
-            CODE_SIGN_IDENTITY="Apple Distribution" \
-            PROVISIONING_PROFILE_SPECIFIER="AgriMarche_AppStore_Profile" \
-            "NotificationServiceExtension:CODE_SIGN_STYLE=Manual" \
-            "NotificationServiceExtension:DEVELOPMENT_TEAM=KAMMWG3VQH" \
-            "NotificationServiceExtension:CODE_SIGN_IDENTITY=Apple Distribution" \
-            "NotificationServiceExtension:PROVISIONING_PROFILE_SPECIFIER=AgriMarche_NotificationServiceExtension_AppStore"
+            CODE_SIGN_STYLE=Automatic
 
       - name: Export IPA
         run: |
