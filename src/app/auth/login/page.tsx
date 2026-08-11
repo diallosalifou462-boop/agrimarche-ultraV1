@@ -16,6 +16,7 @@ import { auth } from '@/lib/firebase/firebase';
 import { Capacitor } from '@capacitor/core';
 import { detectCarrier } from '@/lib/carrier';
 import { apiUrl } from '@/lib/api-config';
+import { logOtpAttempt } from '@/lib/otpDiagnostics';
 
 // ─── Attend que le pont natif Capacitor soit prêt ─────
 async function waitForNativeBridge(timeoutMs = 1500): Promise<boolean> {
@@ -174,17 +175,46 @@ function LoginContent() {
       const carrier = detectCarrier(phone);
       if (carrier === 'free' || carrier === 'expresso') {
         useCustomOtpRef.current = true;
-        const res = await fetch(apiUrl('/api/otp/send'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phone: phoneE164 }),
-        });
-        const json = await res.json();
-        if (!res.ok) {
-          setError(json.error || "Erreur lors de l'envoi du code");
+        // Fetch isolé + log automatique (Firestore) : une erreur réseau
+        // (CORS/ATS/DNS/timeout côté iOS) ne doit pas être confondue avec
+        // un vrai rejet du code par le serveur/Infobip — voir même fix sur
+        // auth/register/page.tsx, et otpDiagnostics.ts pour le détail.
+        const fetchStartedAt = Date.now();
+        logOtpAttempt({ flow: 'login', step: 'fetch_start', phoneE164, carrier });
+        let res: Response;
+        try {
+          res = await fetch(apiUrl('/api/otp/send'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phone: phoneE164 }),
+          });
+        } catch (networkErr: any) {
+          const msg = String(networkErr?.message || networkErr);
+          console.error('[DEBUG] /api/otp/send — échec RÉSEAU:', networkErr);
+          logOtpAttempt({
+            flow: 'login', step: 'fetch_network_error', phoneE164, carrier,
+            errorMessage: msg, durationMs: Date.now() - fetchStartedAt,
+          });
+          setError(`Connexion au serveur impossible (réseau). Détail: ${msg}`);
           setLoading(false);
           return;
         }
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+          console.error('[DEBUG] /api/otp/send — erreur API:', res.status, json);
+          logOtpAttempt({
+            flow: 'login', step: 'fetch_api_error', phoneE164, carrier,
+            httpStatus: res.status, errorMessage: json?.error,
+            durationMs: Date.now() - fetchStartedAt,
+          });
+          setError(json?.error || `Erreur lors de l'envoi du code (HTTP ${res.status})`);
+          setLoading(false);
+          return;
+        }
+        logOtpAttempt({
+          flow: 'login', step: 'fetch_success', phoneE164, carrier,
+          httpStatus: res.status, durationMs: Date.now() - fetchStartedAt,
+        });
         setStep('otp');
         setResendCooldown(60);
         setLoading(false);
@@ -235,17 +265,42 @@ function LoginContent() {
       const carrier = detectCarrier(phone);
       if (carrier === 'free' || carrier === 'expresso') {
         useCustomOtpRef.current = true;
-        const res = await fetch(apiUrl('/api/otp/send'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phone: phoneE164 }),
-        });
-        const json = await res.json();
-        if (!res.ok) {
-          setError(json.error || "Erreur lors de l'envoi du code");
+        const fetchStartedAt = Date.now();
+        logOtpAttempt({ flow: 'resend', step: 'fetch_start', phoneE164, carrier });
+        let res: Response;
+        try {
+          res = await fetch(apiUrl('/api/otp/send'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phone: phoneE164 }),
+          });
+        } catch (networkErr: any) {
+          const msg = String(networkErr?.message || networkErr);
+          console.error('[DEBUG] /api/otp/send (resend) — échec RÉSEAU:', networkErr);
+          logOtpAttempt({
+            flow: 'resend', step: 'fetch_network_error', phoneE164, carrier,
+            errorMessage: msg, durationMs: Date.now() - fetchStartedAt,
+          });
+          setError(`Connexion au serveur impossible (réseau). Détail: ${msg}`);
           setLoading(false);
           return;
         }
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+          console.error('[DEBUG] /api/otp/send (resend) — erreur API:', res.status, json);
+          logOtpAttempt({
+            flow: 'resend', step: 'fetch_api_error', phoneE164, carrier,
+            httpStatus: res.status, errorMessage: json?.error,
+            durationMs: Date.now() - fetchStartedAt,
+          });
+          setError(json?.error || `Erreur lors de l'envoi du code (HTTP ${res.status})`);
+          setLoading(false);
+          return;
+        }
+        logOtpAttempt({
+          flow: 'resend', step: 'fetch_success', phoneE164, carrier,
+          httpStatus: res.status, durationMs: Date.now() - fetchStartedAt,
+        });
         setResendCooldown(60);
         setLoading(false);
         return;

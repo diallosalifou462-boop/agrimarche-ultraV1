@@ -15,6 +15,7 @@ import { auth } from '@/lib/firebase/firebase';
 import { Capacitor } from '@capacitor/core';
 import { detectCarrier } from '@/lib/carrier';
 import { apiUrl } from '@/lib/api-config';
+import { logOtpAttempt } from '@/lib/otpDiagnostics';
 
 // ─── Attend que le pont natif Capacitor soit prêt ─────
 // Sur certains démarrages, window.Capacitor s'injecte avec
@@ -210,17 +211,66 @@ export default function RegisterPage() {
       const carrier = detectCarrier(formData.phone);
       if (carrier === 'free' || carrier === 'expresso') {
         useCustomOtpRef.current = true;
-        const res = await fetch(apiUrl('/api/otp/send'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phone: phoneE164 }),
-        });
-        const json = await res.json();
-        if (!res.ok) {
-          setError(json.error || "Erreur lors de l'envoi du code");
+
+        // ⚠️ DIAGNOSTIC AUTOMATIQUE : chaque tentative est loguée dans
+        // Firestore (otp_debug_logs) via logOtpAttempt, SANS dépendre d'un
+        // accès physique au téléphone. Le fetch() est isolé dans son
+        // propre try/catch : avant ce fix, une erreur RÉSEAU ici (avant
+        // même d'atteindre notre backend/Infobip — ex. CORS, ATS, DNS,
+        // timeout WKWebView) tombait dans le catch général de sendOTP() et
+        // affichait le même message générique que les vraies erreurs
+        // Firebase, donnant l'illusion à tort d'un rejet Infobip alors que
+        // la requête n'était en fait jamais partie du téléphone. En
+        // comparant otp_debug_logs (client) et otp_debug_logs_server
+        // (serveur, voir /api/otp/send) pour un même essai, on voit
+        // immédiatement si la requête a atteint Vercel ou non.
+        const fetchStartedAt = Date.now();
+        logOtpAttempt({ flow: 'register', step: 'fetch_start', phoneE164, carrier });
+
+        let res: Response;
+        try {
+          res = await fetch(apiUrl('/api/otp/send'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phone: phoneE164 }),
+          });
+        } catch (networkErr: any) {
+          const msg = String(networkErr?.message || networkErr);
+          console.error('[DEBUG] /api/otp/send — échec RÉSEAU (avant réponse serveur):', networkErr);
+          logOtpAttempt({
+            flow: 'register', step: 'fetch_network_error', phoneE164, carrier,
+            errorMessage: msg, durationMs: Date.now() - fetchStartedAt,
+          });
+          setError(`Connexion au serveur impossible (réseau). Détail: ${msg}`);
           setLoading(false);
           return;
         }
+
+        const json = await res.json().catch((parseErr) => {
+          console.error('[DEBUG] /api/otp/send — réponse non-JSON:', parseErr);
+          logOtpAttempt({
+            flow: 'register', step: 'fetch_bad_json', phoneE164, carrier,
+            httpStatus: res.status, errorMessage: String(parseErr?.message || parseErr),
+            durationMs: Date.now() - fetchStartedAt,
+          });
+          return null;
+        });
+
+        if (!res.ok) {
+          console.error('[DEBUG] /api/otp/send — erreur API:', res.status, json);
+          logOtpAttempt({
+            flow: 'register', step: 'fetch_api_error', phoneE164, carrier,
+            httpStatus: res.status, errorMessage: json?.error,
+            durationMs: Date.now() - fetchStartedAt,
+          });
+          setError(json?.error || `Erreur lors de l'envoi du code (HTTP ${res.status})`);
+          setLoading(false);
+          return;
+        }
+        logOtpAttempt({
+          flow: 'register', step: 'fetch_success', phoneE164, carrier,
+          httpStatus: res.status, durationMs: Date.now() - fetchStartedAt,
+        });
         setStep('otp');
         setResendCooldown(60);
         setLoading(false);

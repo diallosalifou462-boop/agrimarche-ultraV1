@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
+import { logOtpServerAttempt } from '@/lib/otpServerDebugLog';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -114,18 +115,34 @@ const MAX_SENDS_PER_WINDOW = 5;
 const SEND_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 
 export async function POST(req: NextRequest) {
+  const startedAt = Date.now();
+  // Défini tôt pour rester accessible dans le catch général (numéro
+  // potentiellement invalide/non parsé à ce stade-là).
+  let phoneE164ForLog = '';
+  let dbForLog: FirebaseFirestore.Firestore | null = null;
+
   try {
     const { phone } = await req.json();
     const phoneE164 = toE164Senegal(String(phone || ''));
+    phoneE164ForLog = phoneE164 || String(phone || '');
+
+    const app = getAdminApp();
+    const db = getFirestore(app);
+    dbForLog = db;
+
     if (!phoneE164) {
+      await logOtpServerAttempt(db, {
+        step: 'invalid_phone',
+        phoneE164: phoneE164ForLog,
+        httpStatusToClient: 400,
+        durationMs: Date.now() - startedAt,
+      });
       return NextResponse.json(
         { error: 'Numéro invalide' },
         { status: 400, headers: CORS_HEADERS }
       );
     }
 
-    const app = getAdminApp();
-    const db = getFirestore(app);
     const docRef = db.collection('otp_codes').doc(phoneE164);
 
     const existing = await docRef.get();
@@ -135,6 +152,12 @@ export async function POST(req: NextRequest) {
       const windowStart = data.windowStart ?? 0;
       const sendsInWindow = data.sendsInWindow ?? 0;
       if (now - windowStart < SEND_WINDOW_MS && sendsInWindow >= MAX_SENDS_PER_WINDOW) {
+        await logOtpServerAttempt(db, {
+          step: 'rate_limited',
+          phoneE164,
+          httpStatusToClient: 429,
+          durationMs: Date.now() - startedAt,
+        });
         return NextResponse.json(
           { error: 'Trop de tentatives. Réessayez dans quelques minutes.' },
           { status: 429, headers: CORS_HEADERS }
@@ -159,15 +182,51 @@ export async function POST(req: NextRequest) {
       sendsInWindow,
     });
 
-    const result = await sendInfobipSms(
-      phoneE164,
-      `Votre code AgriMarché : ${code} (valable 5 minutes)`
-    );
+    let result: any;
+    try {
+      result = await sendInfobipSms(
+        phoneE164,
+        `Votre code AgriMarché : ${code} (valable 5 minutes)`
+      );
+    } catch (infobipErr: any) {
+      // Distingue un vrai rejet Infobip (REJECTED) d'une erreur HTTP/réseau
+      // vers Infobip lui-même, pour ne pas tout étiqueter pareil dans les logs.
+      const msg = String(infobipErr?.message || infobipErr);
+      const isRejection = /rejeté/i.test(msg);
+      await logOtpServerAttempt(db, {
+        step: isRejection ? 'infobip_rejected' : 'infobip_http_error',
+        phoneE164,
+        httpStatusToClient: 500,
+        errorMessage: msg,
+        durationMs: Date.now() - startedAt,
+      });
+      throw infobipErr; // laisse le catch général répondre au client normalement
+    }
+
     console.log('[otp/send] SMS envoyé via Infobip:', JSON.stringify(result));
+    await logOtpServerAttempt(db, {
+      step: 'infobip_success',
+      phoneE164,
+      httpStatusToClient: 200,
+      infobipStatus: result?.messages?.[0]?.status?.name ?? null,
+      durationMs: Date.now() - startedAt,
+    });
 
     return NextResponse.json({ success: true }, { headers: CORS_HEADERS });
   } catch (error: any) {
     console.error('[otp/send] Erreur:', error);
+    // Best-effort : si on a déjà `db`, on logge aussi les erreurs
+    // inattendues qui ne sont pas passées par un des cas ci-dessus
+    // (ex: JSON.parse du body qui échoue, Firebase Admin mal configuré).
+    if (dbForLog) {
+      await logOtpServerAttempt(dbForLog, {
+        step: 'unexpected_error',
+        phoneE164: phoneE164ForLog,
+        httpStatusToClient: 500,
+        errorMessage: error?.message || String(error),
+        durationMs: Date.now() - startedAt,
+      });
+    }
     return NextResponse.json(
       { error: error?.message || 'Erreur serveur' },
       { status: 500, headers: CORS_HEADERS }
