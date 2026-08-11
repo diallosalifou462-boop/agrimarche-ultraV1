@@ -18,7 +18,7 @@ import {
   CreditCard, Wallet, Target, AlertTriangle, CheckCircle, XCircle,
   HelpCircle, Menu, Moon, Sun, Monitor, Database, Cloud, Server, Megaphone,
   ShieldCheck, Fingerprint, Key, Lock, Unlock, Gift, Heart, ThumbsUp,
-  Send, Globe, Pencil, Trash2
+  Send, Globe, Pencil, Trash2, Loader2, ImagePlus, RadioTower
 } from "lucide-react";
 import { db, auth } from "@/lib/firebase/firebase";
 import {
@@ -450,6 +450,19 @@ const styles = `
   @keyframes fadeIn { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
   @keyframes pulse  { 0%,100%{opacity:1} 50%{opacity:0.5} }
   @keyframes spin   { to{transform:rotate(360deg)} }
+  @keyframes broadcastRing {
+    0%   { transform:scale(1);   opacity:.6; }
+    100% { transform:scale(2.4); opacity:0;  }
+  }
+  @keyframes towerGlow {
+    0%,100% { filter:drop-shadow(0 0 4px rgba(245,158,11,.35)); }
+    50%     { filter:drop-shadow(0 0 14px rgba(245,158,11,.85)); }
+  }
+  @keyframes phoneRise {
+    from { opacity:0; transform:translateY(16px) scale(.96); }
+    to   { opacity:1; transform:translateY(0) scale(1); }
+  }
+  @keyframes notchBlink { 0%,100%{opacity:1} 50%{opacity:.3} }
   .animate-fadeIn { animation:fadeIn .3s ease-out; }
   .animate-pulse  { animation:pulse 2s ease-in-out infinite; }
   .animate-spin   { animation:spin 1s linear infinite; }
@@ -596,6 +609,86 @@ function compressImage(file: File, maxDim = 1200, quality = 0.82): Promise<Blob>
 }
 
 // ============================================================
+// PUSH FCM — moteur d'envoi robuste
+// Concurrence limitée + retry automatique + purge des tokens morts,
+// pour garder les envois rapides et la base de tokens propre au fil du temps.
+// ============================================================
+
+type PushTarget = { token: string; ref: ReturnType<typeof doc> };
+
+async function sendPushBatched(
+  targets: PushTarget[],
+  payload: { title: string; body: string; deepLink: string; urgent: boolean; imageUrl?: string },
+  apiUrlFn: (path: string) => string,
+  opts: { concurrency?: number; maxRetries?: number } = {}
+): Promise<{ successCount: number; failureCount: number; deadRefs: ReturnType<typeof doc>[] }> {
+  const CHUNK_SIZE = 500; // limite FCM multicast
+  const concurrency = opts.concurrency ?? 8;
+  const maxRetries = opts.maxRetries ?? 2;
+
+  const chunks: PushTarget[][] = [];
+  for (let i = 0; i < targets.length; i += CHUNK_SIZE) chunks.push(targets.slice(i, i + CHUNK_SIZE));
+
+  let successCount = 0;
+  let failureCount = 0;
+  const deadRefs: ReturnType<typeof doc>[] = [];
+
+  const sendChunk = async (chunk: PushTarget[], attempt = 0): Promise<void> => {
+    try {
+      const res = await fetch(apiUrlFn('/api/send-push'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tokens: chunk.map(c => c.token), ...payload }),
+      });
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        successCount += data?.successCount ?? chunk.length;
+        failureCount += data?.failureCount ?? 0;
+        // Tokens explicitement invalides/désinscrits renvoyés par l'API (si le
+        // backend les fournit) → on les marque pour suppression Firestore.
+        const dead: string[] = data?.invalidTokens ?? data?.deadTokens ?? [];
+        if (Array.isArray(dead) && dead.length) {
+          const deadSet = new Set(dead);
+          chunk.forEach(c => { if (deadSet.has(c.token)) deadRefs.push(c.ref); });
+        }
+        return;
+      }
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 600 * Math.pow(2, attempt))); // backoff exponentiel
+        return sendChunk(chunk, attempt + 1);
+      }
+      failureCount += chunk.length;
+    } catch {
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 600 * Math.pow(2, attempt)));
+        return sendChunk(chunk, attempt + 1);
+      }
+      failureCount += chunk.length;
+    }
+  };
+
+  // Pool à concurrence limitée : N chunks en vol simultanément max,
+  // pour paralléliser sans saturer l'API/le réseau.
+  let idx = 0;
+  const workers = Array.from({ length: Math.min(concurrency, chunks.length) || 1 }, async () => {
+    while (idx < chunks.length) {
+      const my = idx++;
+      await sendChunk(chunks[my]);
+    }
+  });
+  await Promise.all(workers);
+
+  return { successCount, failureCount, deadRefs };
+}
+
+// Supprime les tokens FCM morts (désinstallés/invalides) — best effort, non
+// bloquant : ne doit jamais faire échouer l'envoi si la purge rate.
+function pruneDeadTokens(deadRefs: ReturnType<typeof doc>[]) {
+  if (deadRefs.length === 0) return;
+  Promise.all(deadRefs.map(ref => deleteDoc(ref).catch(() => {}))).catch(() => {});
+}
+
+// ============================================================
 // COMPOSANT PRINCIPAL
 // ============================================================
 
@@ -701,8 +794,12 @@ export default function AdminDashboard() {
   const [dmSending, setDmSending]           = useState(false);
 
   // ── PUSH À TOUS LES TOKENS ─────────────────────────────────
-  const [pushAllForm, setPushAllForm]       = useState({ title:'', body:'', icon:'📢', deepLink:'', urgent:false });
+  const [pushAllForm, setPushAllForm]       = useState({ title:'', body:'', icon:'📢', deepLink:'', urgent:false, imageUrl:'' });
   const [pushAllSending, setPushAllSending] = useState(false);
+  const [pushAllImageUploading, setPushAllImageUploading] = useState(false);
+  const [pushTokenCount, setPushTokenCount] = useState<number | null>(null);
+  const [pushAllResult, setPushAllResult]   = useState<{ count: number; fail: number } | null>(null);
+  const [pushAllDisplayCount, setPushAllDisplayCount] = useState(0);
 
   // ── 🤖 PROMOTION IA AUTOMATIQUE (produits sans commande) ────
   const [aiPromoSettings, setAiPromoSettings] = useState({
@@ -1455,49 +1552,57 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
       }
 
       // Push notifications — envoi via FCM (Firebase Cloud Messaging)
-      // Les tokens sont stockés dans users/{uid}/tokens/{token} (cf. useFCMToken),
-      // pas dans un champ fcmTokens sur le doc utilisateur — d'où la requête collectionGroup.
+      // Les tokens sont stockés dans users/{uid}/tokens/{token} (cf. useFCMToken).
       let pushCount = 0;
+      let pushFailCount = 0;
+      let pushPrunedCount = 0;
       if (broadcastForm.channels.push) {
-        const targetUids = new Set(targetUsers.map(u => u.uid ?? u.id ?? ''));
-        const allTokens: string[] = [];
+        const targetUids = Array.from(new Set(targetUsers.map(u => u.uid ?? u.id ?? '').filter(Boolean)));
+        const targets: PushTarget[] = [];
+        const isFullBroadcast = broadcastMode === 'filter' && broadcastForm.targetRole === 'all' && broadcastForm.targetRegion === 'all';
         try {
-          const tokensSnap = await getDocs(collectionGroup(db, 'tokens'));
-          tokensSnap.forEach(d => {
-            const ownerUid = d.ref.parent.parent?.id;
-            const t = d.data()?.token;
-            if (ownerUid && targetUids.has(ownerUid) && t) allTokens.push(t);
-          });
-        } catch (tokensErr) {
-          console.error('Erreur lecture tokens FCM:', tokensErr);
-          toast.warning('Push : impossible de lire les tokens (vérifie les règles Firestore pour la collection group "tokens")');
-        }
-        const uniqueTokens = Array.from(new Set(allTokens));
-        if (uniqueTokens.length > 0) {
-          // FCM multicast limite à 500 tokens par requête
-          for (let i = 0; i < uniqueTokens.length; i += 500) {
-            const chunk = uniqueTokens.slice(i, i + 500);
-            try {
-              const res = await fetch(apiUrl('/api/send-push'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  tokens: chunk,
-                  title: `${broadcastForm.icon} ${broadcastForm.title}`,
-                  body: broadcastForm.body,
-                  deepLink: broadcastForm.deepLink || '/',
-                  urgent: broadcastForm.urgent,
-                }),
-              });
-              if (res.ok) {
-                const data = await res.json().catch(() => ({}));
-                pushCount += data?.successCount ?? chunk.length;
-              } else {
-                const err = await res.json().catch(() => ({}));
-              }
-            } catch (fetchErr: any) {
+          if (isFullBroadcast) {
+            // Cible = tous les utilisateurs → un seul scan groupé reste le plus efficace.
+            const tokensSnap = await getDocs(collectionGroup(db, 'tokens'));
+            tokensSnap.forEach(d => { const t = d.data()?.token; if (t) targets.push({ token: t, ref: d.ref }); });
+          } else {
+            // Cible = sous-ensemble → on lit UNIQUEMENT les tokens des utilisateurs
+            // ciblés (users/{uid}/tokens), par lots parallèles, au lieu de scanner
+            // toute la collection 'tokens' de la base puis filtrer côté client.
+            const BATCH_SIZE = 200;
+            for (let i = 0; i < targetUids.length; i += BATCH_SIZE) {
+              const batch = targetUids.slice(i, i + BATCH_SIZE);
+              const snaps = await Promise.all(
+                batch.map(uid => getDocs(collection(db, 'users', uid, 'tokens')))
+              );
+              snaps.forEach(snap => snap.forEach(d => { const t = d.data()?.token; if (t) targets.push({ token: t, ref: d.ref }); }));
             }
           }
+        } catch (tokensErr) {
+          console.error('Erreur lecture tokens FCM:', tokensErr);
+          toast.warning('Push : impossible de lire les tokens (vérifie les règles Firestore pour la sous-collection "tokens")');
+        }
+        // Dédoublonnage par token
+        const seen = new Set<string>();
+        const uniqueTargets = targets.filter(t => (seen.has(t.token) ? false : (seen.add(t.token), true)));
+
+        if (uniqueTargets.length > 0) {
+          // Moteur d'envoi : concurrence limitée (8 lots FCM en vol simultanément),
+          // retry automatique avec backoff sur échec, purge des tokens morts.
+          const { successCount, failureCount, deadRefs } = await sendPushBatched(
+            uniqueTargets,
+            {
+              title: `${broadcastForm.icon} ${broadcastForm.title}`,
+              body: broadcastForm.body,
+              deepLink: broadcastForm.deepLink || '/',
+              urgent: broadcastForm.urgent,
+            },
+            apiUrl,
+          );
+          pushCount = successCount;
+          pushFailCount = failureCount;
+          pushPrunedCount = deadRefs.length;
+          pruneDeadTokens(deadRefs); // best effort, en arrière-plan
         }
       }
 
@@ -1511,9 +1616,15 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
         emailCount: broadcastForm.channels.email ? emailCount : 0,
         smsCount: broadcastForm.channels.sms ? smsCount : 0,
         pushCount,
+        pushFailCount,
+        pushPrunedCount,
       });
 
-      toast.success(`Envoyé à ${targetUsers.length} utilisateur(s)`);
+      toast.success(
+        pushFailCount > 0
+          ? `Envoyé à ${targetUsers.length} utilisateur(s) — ${pushFailCount} push en échec`
+          : `Envoyé à ${targetUsers.length} utilisateur(s)`
+      );
       setBroadcastForm(defaultBroadcast);
       setSelectedUserIds(new Set());
       setUserPickerSearch('');
@@ -1553,63 +1664,59 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
   const sendPushToAllTokens = async () => {
     if (!pushAllForm.title || !pushAllForm.body) { toast.error('Titre et message requis'); return; }
     setPushAllSending(true);
+    setPushAllResult(null);
     try {
       const tokensSnap = await getDocs(collectionGroup(db, 'tokens'));
-      const allTokens: string[] = [];
+      const targets: PushTarget[] = [];
       tokensSnap.forEach(d => {
         const t = d.data()?.token;
-        if (t) allTokens.push(t);
+        if (t) targets.push({ token: t, ref: d.ref });
       });
-      const uniqueTokens = Array.from(new Set(allTokens));
-      if (uniqueTokens.length === 0) {
+      const seen = new Set<string>();
+      const uniqueTargets = targets.filter(t => (seen.has(t.token) ? false : (seen.add(t.token), true)));
+      if (uniqueTargets.length === 0) {
         toast.error('Aucun token FCM enregistré (vérifie les règles Firestore pour la collection group "tokens")');
         return;
       }
-      let pushCount = 0;
-      let failCount = 0;
-      for (let i = 0; i < uniqueTokens.length; i += 500) {
-        const chunk = uniqueTokens.slice(i, i + 500);
-        try {
-          const res = await fetch(apiUrl('/api/send-push'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              tokens: chunk,
-              title: `${pushAllForm.icon} ${pushAllForm.title}`,
-              body: pushAllForm.body,
-              deepLink: pushAllForm.deepLink || '/',
-              urgent: pushAllForm.urgent,
-            }),
-          });
-          if (res.ok) {
-            const data = await res.json().catch(() => ({}));
-            pushCount += data?.successCount ?? chunk.length;
-          } else {
-            failCount += chunk.length;
-          }
-        } catch {
-          failCount += chunk.length;
-        }
-      }
+      // Moteur d'envoi : concurrence limitée, retry automatique avec backoff,
+      // purge des tokens morts après envoi.
+      const { successCount, failureCount, deadRefs } = await sendPushBatched(
+        uniqueTargets,
+        {
+          title: `${pushAllForm.icon} ${pushAllForm.title}`,
+          body: pushAllForm.body,
+          deepLink: pushAllForm.deepLink || '/',
+          urgent: pushAllForm.urgent,
+          ...(pushAllForm.imageUrl ? { imageUrl: pushAllForm.imageUrl } : {}),
+        },
+        apiUrl,
+      );
+      const pushCount = successCount;
+      const failCount = failureCount;
+      pruneDeadTokens(deadRefs); // best effort, en arrière-plan
       await addDoc(collection(db, 'broadcasts'), {
         title: pushAllForm.title,
         body: pushAllForm.body,
         icon: pushAllForm.icon,
         deepLink: pushAllForm.deepLink || '/',
         urgent: pushAllForm.urgent,
+        ...(pushAllForm.imageUrl ? { imageUrl: pushAllForm.imageUrl } : {}),
         channels: { push: true, inApp: false, email: false, sms: false },
         targetRole: 'all_tokens',
         sentBy: authUser?.uid,
         sentAt: Timestamp.now(),
-        recipientCount: uniqueTokens.length,
+        recipientCount: uniqueTargets.length,
         pushCount,
+        pushFailCount: failCount,
+        pushPrunedCount: deadRefs.length,
       });
       if (failCount > 0) {
         toast.warning(`Push envoyé à ${pushCount} appareil(s), ${failCount} échec(s)`);
       } else {
         toast.success(`Push envoyé à ${pushCount} appareil(s)`);
       }
-      setPushAllForm({ title:'', body:'', icon:'📢', deepLink:'', urgent:false });
+      setPushAllResult({ count: pushCount, fail: failCount });
+      setPushAllForm({ title:'', body:'', icon:'📢', deepLink:'', urgent:false, imageUrl:'' });
     } catch (e) {
       console.error(e);
       toast.error('Erreur lors de l\'envoi du push');
@@ -1617,6 +1724,57 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
       setPushAllSending(false);
     }
   };
+
+  // Upload de la photo jointe au push (Cloudinary, réutilise le helper des
+  // publicités — compression avant envoi pour un upload rapide).
+  const handlePushAllImageSelect = async (file: File | null) => {
+    if (!file) return;
+    if (!file.type.startsWith('image/')) { toast.error("Le fichier n'est pas une image"); return; }
+    setPushAllImageUploading(true);
+    try {
+      const blob = await compressImage(file, 1200, 0.82);
+      const { url } = await uploadToCloudinary(blob, `push_${Date.now()}`);
+      setPushAllForm(f => ({ ...f, imageUrl: url }));
+      toast.success('Photo ajoutée');
+    } catch (e: any) {
+      console.error(e);
+      toast.error(e?.message || "Erreur lors de l'upload de la photo");
+    } finally {
+      setPushAllImageUploading(false);
+    }
+  };
+
+  // Nombre d'appareils actuellement joignables — lecture légère, une seule
+  // fois au montage, juste pour donner une idée de portée avant l'envoi.
+  useEffect(() => {
+    (async () => {
+      try {
+        const snap = await getDocs(collectionGroup(db, 'tokens'));
+        const unique = new Set(snap.docs.map(d => d.data()?.token).filter(Boolean));
+        setPushTokenCount(unique.size);
+      } catch {
+        setPushTokenCount(null);
+      }
+    })();
+  }, []);
+
+  // Décompte animé (ease-out cubique) du nombre d'appareils atteints,
+  // affiché juste après l'envoi.
+  useEffect(() => {
+    if (!pushAllResult) { setPushAllDisplayCount(0); return; }
+    let raf = 0;
+    const start = performance.now();
+    const duration = 900;
+    const target = pushAllResult.count;
+    const step = (now: number) => {
+      const p = Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - p, 3);
+      setPushAllDisplayCount(Math.round(eased * target));
+      if (p < 1) raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [pushAllResult]);
 
   // ── 🤖 PROMOTION IA AUTOMATIQUE : chargement des réglages + historique ──
   useEffect(() => {
@@ -3680,37 +3838,188 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                   </button>
                 </div>
 
-                {/* ── Push à tous les tokens ── */}
-                <div className="glass-card" style={{ padding:20 }}>
-                  <h3 style={{ fontSize:15, fontWeight:600, marginBottom:4 }}>📣 Push à tous les tokens</h3>
-                  <p style={{ fontSize:11, color:'#6b7280', marginBottom:16 }}>Envoie un push FCM à tout appareil ayant un token enregistré, quel que soit le rôle ou la région.</p>
+                {/* ── Push à tous les tokens — "Radio Village" ──────────────
+                    Signature : la tour de diffusion pulse au rythme de l'état
+                    du formulaire (allumée dès que titre+message sont prêts),
+                    et l'aperçu téléphone montre exactement ce que chaque
+                    appareil affichera, mis à jour à chaque frappe. */}
+                <div className="glass-card" style={{ padding:20, position:'relative', overflow:'hidden' }}>
+
+                  {/* Halo ambiant discret derrière la tour */}
+                  <div style={{
+                    position:'absolute', top:-60, right:-60, width:180, height:180, borderRadius:'50%',
+                    background:'radial-gradient(circle, rgba(245,158,11,.10), transparent 70%)',
+                    pointerEvents:'none',
+                  }} />
+
+                  <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:4, position:'relative' }}>
+                    {/* Tour de diffusion + anneaux de portée */}
+                    <div style={{ position:'relative', width:38, height:38, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+                      {(pushAllForm.title && pushAllForm.body) && [0,1,2].map(i => (
+                        <span key={i} style={{
+                          position:'absolute', inset:0, borderRadius:'50%',
+                          border:'1.5px solid rgba(245,158,11,.55)',
+                          animation:`broadcastRing ${pushAllSending ? 1.1 : 2.4}s ease-out ${i * (pushAllSending ? 0.35 : 0.75)}s infinite`,
+                        }} />
+                      ))}
+                      <RadioTower
+                        size={20}
+                        color={(pushAllForm.title && pushAllForm.body) ? '#f59e0b' : '#4b5563'}
+                        style={{
+                          position:'relative', zIndex:1,
+                          animation: (pushAllForm.title && pushAllForm.body) ? 'towerGlow 1.8s ease-in-out infinite' : 'none',
+                          transition:'color .3s',
+                        }}
+                      />
+                    </div>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <h3 style={{ fontSize:15, fontWeight:600, marginBottom:1 }}>Push à tous les tokens</h3>
+                      <p style={{ fontSize:11, color:'#6b7280' }}>
+                        Atteint chaque appareil enregistré, quel que soit le rôle ou la région
+                      </p>
+                    </div>
+                  </div>
+
+                  <div style={{ fontSize:11, color:'#6b7280', marginBottom:16, paddingBottom:14, borderBottom:'1px solid rgba(255,255,255,.06)' }}>
+                    {pushTokenCount === null ? 'Portée en cours de calcul…' : (
+                      <>Portée actuelle : <b style={{ color:'#e5e7eb' }}>{pushTokenCount.toLocaleString('fr-FR')}</b> appareil{pushTokenCount > 1 ? 's' : ''} joignable{pushTokenCount > 1 ? 's' : ''}</>
+                    )}
+                  </div>
 
                   <div style={{ marginBottom:12 }}>
                     <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Icône</label>
                     <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
                       {['🔥','⭐','🎯','💥','🚀','💎','🏆','⚡','🎁','📣','✨','🚨'].map(e=>(
-                        <button key={e} onClick={()=>setPushAllForm({...pushAllForm,icon:e})} style={{ width:34, height:34, borderRadius:8, border:`2px solid ${pushAllForm.icon===e?'#10b981':'transparent'}`, background:pushAllForm.icon===e?'rgba(16,185,129,.1)':'#1f2127', fontSize:16, cursor:'pointer' }}>{e}</button>
+                        <button
+                          key={e}
+                          onClick={()=>setPushAllForm({...pushAllForm,icon:e})}
+                          style={{
+                            width:34, height:34, borderRadius:8,
+                            border:`2px solid ${pushAllForm.icon===e?'#10b981':'transparent'}`,
+                            background:pushAllForm.icon===e?'rgba(16,185,129,.12)':'#1f2127',
+                            fontSize:16, cursor:'pointer',
+                            transform: pushAllForm.icon===e ? 'scale(1.12)' : 'scale(1)',
+                            boxShadow: pushAllForm.icon===e ? '0 0 0 1px rgba(16,185,129,.25)' : 'none',
+                            transition:'transform .15s ease, border-color .15s ease, background .15s ease',
+                          }}
+                        >{e}</button>
                       ))}
                     </div>
                   </div>
 
                   <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Titre *</label>
-                  <input type="text" placeholder="Objet du push" value={pushAllForm.title} onChange={e=>setPushAllForm({...pushAllForm,title:e.target.value})} style={{ marginBottom:10 }}/>
+                  <input type="text" placeholder="Ce que les gens verront en premier" value={pushAllForm.title} onChange={e=>setPushAllForm({...pushAllForm,title:e.target.value})} maxLength={65} style={{ marginBottom:10 }}/>
 
                   <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Message *</label>
-                  <textarea placeholder="Votre message…" value={pushAllForm.body} onChange={e=>setPushAllForm({...pushAllForm,body:e.target.value})} rows={3} style={{ resize:'vertical', marginBottom:10 }}/>
+                  <textarea placeholder="Votre message…" value={pushAllForm.body} onChange={e=>setPushAllForm({...pushAllForm,body:e.target.value})} rows={3} maxLength={180} style={{ resize:'vertical', marginBottom:10 }}/>
 
                   <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Lien (optionnel)</label>
                   <input type="text" placeholder="/main/products" value={pushAllForm.deepLink} onChange={e=>setPushAllForm({...pushAllForm,deepLink:e.target.value})} style={{ marginBottom:12 }}/>
 
-                  <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:16 }}>
+                  <label style={{ fontSize:12, color:'#6b7280', marginBottom:6, display:'block' }}>Photo (optionnelle)</label>
+                  {pushAllForm.imageUrl ? (
+                    <div style={{ position:'relative', width:'100%', marginBottom:12, animation:'phoneRise .3s ease-out' }}>
+                      <img src={pushAllForm.imageUrl} alt="Aperçu push" style={{ width:'100%', maxHeight:150, objectFit:'cover', borderRadius:10, display:'block' }} />
+                      <button
+                        type="button"
+                        onClick={()=>setPushAllForm({...pushAllForm, imageUrl:''})}
+                        style={{ position:'absolute', top:6, right:6, width:26, height:26, borderRadius:'50%', background:'rgba(0,0,0,.65)', color:'#fff', border:'none', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center' }}
+                      >
+                        <X size={14}/>
+                      </button>
+                    </div>
+                  ) : (
+                    <label style={{
+                      display:'flex', alignItems:'center', justifyContent:'center', gap:8,
+                      border:'2px dashed rgba(245,158,11,.25)', borderRadius:10, padding:'14px', marginBottom:12,
+                      cursor: pushAllImageUploading ? 'wait' : 'pointer', fontSize:12, color:'#6b7280',
+                      transition:'border-color .15s ease, background .15s ease',
+                    }}
+                      onMouseEnter={e=>{ (e.currentTarget as HTMLLabelElement).style.borderColor='rgba(245,158,11,.6)'; (e.currentTarget as HTMLLabelElement).style.background='rgba(245,158,11,.04)'; }}
+                      onMouseLeave={e=>{ (e.currentTarget as HTMLLabelElement).style.borderColor='rgba(245,158,11,.25)'; (e.currentTarget as HTMLLabelElement).style.background='transparent'; }}
+                    >
+                      <input
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        disabled={pushAllImageUploading}
+                        onChange={e=>{ handlePushAllImageSelect(e.target.files?.[0] || null); e.target.value=''; }}
+                        style={{ display:'none' }}
+                      />
+                      {pushAllImageUploading ? <Loader2 size={16} className="animate-spin" /> : <ImagePlus size={16} color="#f59e0b" />}
+                      {pushAllImageUploading ? 'Upload…' : 'Ajouter une photo (facultatif)'}
+                    </label>
+                  )}
+
+                  <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:18 }}>
                     <input type="checkbox" id="pushall-urgent" checked={pushAllForm.urgent} onChange={e=>setPushAllForm({...pushAllForm,urgent:e.target.checked})} style={{ width:'auto', cursor:'pointer' }}/>
                     <label htmlFor="pushall-urgent" style={{ fontSize:13, cursor:'pointer' }}>⚡ Urgent</label>
                   </div>
 
-                  <button onClick={sendPushToAllTokens} disabled={pushAllSending||!pushAllForm.title||!pushAllForm.body} className="btn-primary" style={{ width:'100%', justifyContent:'center', opacity:(pushAllSending||!pushAllForm.title||!pushAllForm.body)?0.5:1 }}>
-                    {pushAllSending ? 'Envoi…' : <><Send size={14}/> Envoyer à tous les tokens</>}
+                  {/* ── Aperçu en direct — verrouillage d'écran ── */}
+                  {(pushAllForm.title || pushAllForm.body) && (
+                    <div style={{ marginBottom:18, animation:'phoneRise .35s ease-out' }}>
+                      <label style={{ fontSize:11, color:'#4b5563', marginBottom:6, display:'flex', alignItems:'center', gap:5, letterSpacing:.3, textTransform:'uppercase' }}>
+                        <span style={{ width:6, height:6, borderRadius:'50%', background:'#10b981', animation:'notchBlink 1.6s ease-in-out infinite' }} />
+                        Aperçu — écran verrouillé
+                      </label>
+                      <div style={{
+                        borderRadius:20, padding:'14px 14px',
+                        background:'linear-gradient(160deg, #1c1e24, #101216)',
+                        border:'1px solid rgba(255,255,255,.08)',
+                        boxShadow:'inset 0 1px 0 rgba(255,255,255,.04), 0 8px 24px rgba(0,0,0,.35)',
+                      }}>
+                        <div style={{ display:'flex', gap:10, alignItems:'flex-start' }}>
+                          <div style={{
+                            width:34, height:34, borderRadius:9, flexShrink:0,
+                            background:'linear-gradient(135deg,#10b981,#059669)',
+                            display:'flex', alignItems:'center', justifyContent:'center', fontSize:16,
+                          }}>🌾</div>
+                          <div style={{ flex:1, minWidth:0 }}>
+                            <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:2 }}>
+                              <span style={{ fontSize:11, fontWeight:700, color:'#9ca3af' }}>AgriMarché</span>
+                              <span style={{ fontSize:10, color:'#4b5563' }}>· à l'instant</span>
+                              {pushAllForm.urgent && <span style={{ fontSize:9, fontWeight:700, color:'#ef4444', background:'rgba(239,68,68,.12)', padding:'1px 6px', borderRadius:8 }}>URGENT</span>}
+                            </div>
+                            <div style={{ fontSize:13, fontWeight:700, color:'#fff', marginBottom:1, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                              {pushAllForm.icon} {pushAllForm.title || 'Titre du push'}
+                            </div>
+                            <div style={{ fontSize:12, color:'#d1d5db', lineHeight:1.4, display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' }}>
+                              {pushAllForm.body || 'Votre message apparaîtra ici au fil de la frappe.'}
+                            </div>
+                          </div>
+                          {pushAllForm.imageUrl && (
+                            <img src={pushAllForm.imageUrl} alt="" style={{ width:44, height:44, borderRadius:8, objectFit:'cover', flexShrink:0 }} />
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  <button onClick={sendPushToAllTokens} disabled={pushAllSending||pushAllImageUploading||!pushAllForm.title||!pushAllForm.body} className="btn-primary" style={{ width:'100%', justifyContent:'center', opacity:(pushAllSending||pushAllImageUploading||!pushAllForm.title||!pushAllForm.body)?0.5:1 }}>
+                    {pushAllSending ? 'Diffusion en cours…' : <><Send size={14}/> Envoyer à tous les tokens</>}
                   </button>
+
+                  {/* ── Résultat animé ── */}
+                  {pushAllResult && (
+                    <div style={{
+                      marginTop:14, padding:'14px 16px', borderRadius:12,
+                      background: pushAllResult.fail > 0 ? 'rgba(245,158,11,.06)' : 'rgba(16,185,129,.06)',
+                      border: `1px solid ${pushAllResult.fail > 0 ? 'rgba(245,158,11,.25)' : 'rgba(16,185,129,.25)'}`,
+                      display:'flex', alignItems:'center', justifyContent:'space-between',
+                      animation:'phoneRise .3s ease-out',
+                    }}>
+                      <div>
+                        <div style={{ fontSize:11, color:'#6b7280', marginBottom:2 }}>Message diffusé</div>
+                        <div style={{ fontSize:22, fontWeight:800, color:'#fff', fontVariantNumeric:'tabular-nums' }}>
+                          {pushAllDisplayCount.toLocaleString('fr-FR')}
+                          <span style={{ fontSize:12, fontWeight:500, color:'#6b7280', marginLeft:5 }}>appareil{pushAllDisplayCount > 1 ? 's' : ''} atteint{pushAllDisplayCount > 1 ? 's' : ''}</span>
+                        </div>
+                      </div>
+                      {pushAllResult.fail > 0 && (
+                        <span style={{ fontSize:11, color:'#f59e0b', fontWeight:600 }}>{pushAllResult.fail} échec{pushAllResult.fail > 1 ? 's' : ''}</span>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* ── 🤖 Promotion IA automatique (produits sans commande) ── */}

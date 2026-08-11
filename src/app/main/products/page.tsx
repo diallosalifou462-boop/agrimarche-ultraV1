@@ -630,7 +630,11 @@ export default function AgriMarket() {
         whatsappClicks: increment(1),
       }).catch(err => console.error('Erreur increment whatsappClicks:', err));
     }
-    window.open(`https://wa.me/${phone?.replace(/\D/g,'') || WA_NUMBER}?text=${encodeURIComponent(`Bonjour, je suis intéressé par "${name}".`)}`, '_blank');
+    // ⚠️ Le numéro du vendeur n'est plus utilisé ici : tout contact WhatsApp
+    // depuis les fiches produits passe par le numéro officiel AgriMarché
+    // (WA_NUMBER), afin d'éviter que les acheteurs contournent la plateforme
+    // en contactant directement le vendeur.
+    window.open(`https://wa.me/${WA_NUMBER}?text=${encodeURIComponent(`Bonjour, je suis intéressé par "${name}".`)}`, '_blank');
   };
 
   if (!mounted) return null;
