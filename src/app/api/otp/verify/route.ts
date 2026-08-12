@@ -116,15 +116,53 @@ export async function POST(req: NextRequest) {
     // L'Admin SDK contourne entièrement les règles de sécurité, donc ce
     // problème ne peut plus se poser, quelles que soient les règles.
     const adminAuth = getAuth(app);
-    let uid: string;
+    let uid: string | null = null;
     let userExisted = false;
     try {
       const existingUser = await adminAuth.getUserByPhoneNumber(phoneE164);
       uid = existingUser.uid;
       userExisted = true;
     } catch {
+      userExisted = false;
+    }
+
+    // ⚠️ GARDE-FOU : `registration` présent = flow d'inscription, absent =
+    // flow "mot de passe oublié". On ne se contente plus de brancher sur
+    // ces deux cas, on les VALIDE d'abord (filet de sécurité serveur, même
+    // si /api/otp/send a normalement déjà bloqué ces cas en amont avec
+    // `purpose`) :
+    //   - inscription sur un numéro déjà connu → refusé (pas de double
+    //     compte, pas d'écrasement silencieux du compte existant) ;
+    //   - réinitialisation sur un numéro inconnu → refusé (on ne crée plus
+    //     de compte "fantôme" vide juste parce que quelqu'un a reçu et
+    //     saisi un code SMS pour un numéro jamais inscrit).
+    if (registration && userExisted) {
+      return NextResponse.json(
+        { error: 'Ce numéro est déjà inscrit. Connectez-vous ou utilisez « mot de passe oublié ».' },
+        { status: 409, headers: CORS_HEADERS }
+      );
+    }
+    if (!registration && !userExisted) {
+      return NextResponse.json(
+        { error: "Aucun compte n'est associé à ce numéro." },
+        { status: 404, headers: CORS_HEADERS }
+      );
+    }
+
+    if (registration && !userExisted) {
       const newUser = await adminAuth.createUser({ phoneNumber: phoneE164 });
       uid = newUser.uid;
+    }
+
+    // Filet de sécurité : après les gardes ci-dessus, `uid` est toujours
+    // assigné (compte existant retrouvé, ou nouveau compte créé pour une
+    // inscription). Ce cas ne devrait jamais se produire, mais on évite
+    // ainsi tout crash silencieux si la logique évolue plus tard.
+    if (!uid) {
+      return NextResponse.json(
+        { error: 'Erreur serveur' },
+        { status: 500, headers: CORS_HEADERS }
+      );
     }
 
     // Si des données d'inscription sont fournies (premier passage), on

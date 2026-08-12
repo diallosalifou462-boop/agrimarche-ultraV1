@@ -30,7 +30,9 @@ export type OtpServerStep =
   | 'infobip_success'
   | 'infobip_rejected'
   | 'infobip_http_error'
-  | 'unexpected_error';
+  | 'unexpected_error'
+  | 'already_registered'
+  | 'no_account_for_reset';
 
 function maskPhone(phone: string): string {
   if (!phone) return '(vide)';

@@ -232,7 +232,7 @@ export default function RegisterPage() {
           res = await fetch(apiUrl('/api/otp/send'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phone: phoneE164 }),
+            body: JSON.stringify({ phone: phoneE164, purpose: 'register' }),
           });
         } catch (networkErr: any) {
           const msg = String(networkErr?.message || networkErr);
@@ -277,6 +277,23 @@ export default function RegisterPage() {
         return;
       }
       useCustomOtpRef.current = false;
+
+      // ─── Vérif préalable (Orange) ────────────────────────────────
+      // Aucun envoi de SMS, aucun coût : bloque une réinscription sur un
+      // numéro déjà connu AVANT de lancer Firebase Phone Auth, au lieu de
+      // laisser passer le SMS et d'échouer plus tard sur
+      // "provider-already-linked" au moment de finaliser le compte.
+      const checkRes = await fetch(apiUrl('/api/auth/check-phone'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: phoneE164, purpose: 'register' }),
+      });
+      const checkJson = await checkRes.json().catch(() => null);
+      if (!checkRes.ok) {
+        setError(checkJson?.error || 'Ce numéro est déjà inscrit.');
+        setLoading(false);
+        return;
+      }
 
       // ─── Fix : on ne devine plus via un timeout (source du bug
       // "internal error" intermittent sur iOS). On essaie D'ABORD le
@@ -480,6 +497,13 @@ export default function RegisterPage() {
         setError('Code incorrect, vérifiez le SMS');
       } else if (err?.code === 'auth/code-expired') {
         setError('Code expiré, renvoyez un nouveau SMS');
+      } else if (err?.code === 'auth/provider-already-linked' || err?.code === 'auth/email-already-in-use') {
+        // Flow Orange (Firebase Phone Auth) : ce numéro correspond déjà à
+        // un compte existant — même numéro = même utilisateur Firebase —
+        // et signUp() tente alors de relier un provider email/mot de passe
+        // déjà présent. On remplace l'erreur Firebase brute par un message
+        // clair, cohérent avec le blocage déjà en place pour Free/Expresso.
+        setError('Ce numéro est déjà inscrit. Connectez-vous ou utilisez « mot de passe oublié ».');
       } else {
         setError("Erreur lors de la vérification");
       }

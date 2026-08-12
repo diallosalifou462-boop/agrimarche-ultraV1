@@ -6,11 +6,14 @@ import { useAuth } from '@/hooks/useAuth';
 import {
   RecaptchaVerifier,
   signInWithPhoneNumber,
+  signInWithCustomToken,
   ConfirmationResult,
   updatePassword,
 } from 'firebase/auth';
 import { auth } from '@/lib/firebase/firebase';
 import { Capacitor } from '@capacitor/core';
+import { detectCarrier } from '@/lib/carrier';
+import { apiUrl } from '@/lib/api-config';
 
 // ─── Attend que le pont natif Capacitor soit prêt ─────
 async function waitForNativeBridge(timeoutMs = 1500): Promise<boolean> {
@@ -103,6 +106,10 @@ export default function ForgotPasswordPage() {
   }, []);
 
   const isNativeRef = useRef(false);
+  // true si on utilise le système OTP maison (backend + Infobip) au lieu
+  // de Firebase Phone Auth — cas des numéros Free/Yas et Expresso, voir
+  // lib/carrier.ts et le même flow dans auth/register/page.tsx.
+  const useCustomOtpRef = useRef(false);
 
   const setupRecaptcha = () => {
     if (recaptchaRef.current) { recaptchaRef.current.clear(); recaptchaRef.current = null; }
@@ -114,6 +121,56 @@ export default function ForgotPasswordPage() {
     setError(''); setLoading(true);
     try {
       const phoneE164 = toE164(phone);
+
+      // ─── Routage par opérateur (identique à auth/register) ──────
+      // Firebase Phone Auth échoue souvent sur Free/Yas et Expresso au
+      // Sénégal : on passe ces numéros par notre backend OTP (Infobip).
+      const carrier = detectCarrier(phone);
+      if (carrier === 'free' || carrier === 'expresso') {
+        useCustomOtpRef.current = true;
+        try {
+          const res = await fetch(apiUrl('/api/otp/send'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phone: phoneE164, purpose: 'reset' }),
+          });
+          const json = await res.json().catch(() => null);
+          if (!res.ok) {
+            setError(json?.error || `Erreur lors de l'envoi du code (HTTP ${res.status})`);
+            setLoading(false);
+            return;
+          }
+        } catch (networkErr: any) {
+          setError(`Connexion au serveur impossible (réseau). Détail: ${String(networkErr?.message || networkErr)}`);
+          setLoading(false);
+          return;
+        }
+        setStep('otp');
+        setResendCooldown(60);
+        setLoading(false);
+        const t = setInterval(() => setResendCooldown(v => { if (v <= 1) clearInterval(t); return v - 1; }), 1000);
+        return;
+      }
+      useCustomOtpRef.current = false;
+
+      // ─── Orange (flow Firebase natif/web) ───────────────────────
+      // Firebase Phone Auth ne vérifie pas qu'un compte existe déjà avant
+      // d'envoyer le SMS — il en crée un à la volée à la confirmation du
+      // code si besoin. Sans ce contrôle préalable (aucun envoi de SMS,
+      // aucun coût), un numéro jamais inscrit pourrait "réinitialiser" un
+      // mot de passe et se retrouver avec un compte fantôme vide.
+      const checkRes = await fetch(apiUrl('/api/auth/check-phone'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: phoneE164, purpose: 'reset' }),
+      });
+      const checkJson = await checkRes.json().catch(() => null);
+      if (!checkRes.ok) {
+        setError(checkJson?.error || "Aucun compte n'est associé à ce numéro.");
+        setLoading(false);
+        return;
+      }
+
       const isNative = await waitForNativeBridge();
       isNativeRef.current = isNative;
       if (isNative) {
@@ -154,6 +211,29 @@ export default function ForgotPasswordPage() {
     if (code.length < 6) { setError('Code à 6 chiffres requis'); return; }
     setLoading(true); setError('');
     try {
+      if (useCustomOtpRef.current) {
+        // Free/Yas et Expresso : vérification côté serveur (Admin SDK),
+        // pas de `registration` ici (compte déjà existant) — voir
+        // /api/otp/verify. On récupère un customToken pour établir la
+        // session Firebase et pouvoir ensuite appeler updatePassword().
+        const phoneE164 = toE164(phone);
+        const res = await fetch(apiUrl('/api/otp/verify'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone: phoneE164, code }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+          setError(json?.error || 'Code incorrect');
+          setLoading(false);
+          return;
+        }
+        await signInWithCustomToken(auth, json.customToken);
+        setStep('newpwd');
+        setLoading(false);
+        return;
+      }
+
       if (isNativeRef.current) {
         if (!verificationId) { setError('Session expirée'); setLoading(false); return; }
         await FirebaseAuthentication.confirmVerificationCode({ verificationId, verificationCode: code });
