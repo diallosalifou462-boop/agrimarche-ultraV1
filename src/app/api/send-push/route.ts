@@ -106,16 +106,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Corps de requête invalide" }, { status: 400, headers: CORS_HEADERS });
     }
 
-    const { tokens, title, body, deepLink, urgent, icon } = payload as {
+    const { tokens, title, body, deepLink, urgent, icon, imageUrl } = payload as {
       tokens?: string[];
       title?: string;
       body?: string;
       deepLink?: string;
       urgent?: boolean;
       icon?: string;
+      imageUrl?: string;
     };
 
-    console.log(`[send-push] Requête reçue — ${tokens?.length ?? 0} token(s), titre="${title}", urgent=${!!urgent}`);
+    console.log(`[send-push] Requête reçue — ${tokens?.length ?? 0} token(s), titre="${title}", urgent=${!!urgent}, imageUrl=${imageUrl ? `"${String(imageUrl).slice(0, 60)}…"` : '(aucune)'}`);
 
     if (!Array.isArray(tokens) || tokens.length === 0) {
       console.warn("[send-push] Aucun token fourni — abandon.");
@@ -178,24 +179,38 @@ export async function POST(req: NextRequest) {
       refByToken.set(d.id, d.ref);
     });
 
+    // ⚠️ FCM est strict sur imageUrl : une URL invalide (pas https, ou vide)
+    // fait échouer TOUT le multicast (erreur 400 globale), pas juste l'image.
+    // On ne l'inclut donc que si elle ressemble vraiment à une URL https valide.
+    const safeImageUrl =
+      typeof imageUrl === "string" && /^https:\/\/.+/i.test(imageUrl.trim())
+        ? imageUrl.trim()
+        : undefined;
+
     // ── Construction du message multicast ──────────────────
     const message = {
       tokens: validTokens,
       notification: {
         title,
         body,
-        ...(icon ? { imageUrl: undefined } : {}), // imageUrl optionnel, désactivé par défaut
+        // Image "générique" : sert de fallback pour toute plateforme qui ne
+        // reçoit pas de valeur spécifique via android/webpush ci-dessous.
+        ...(safeImageUrl ? { imageUrl: safeImageUrl } : {}),
       },
       data: {
         deepLink: deepLink || "/",
         urgent: urgent ? "true" : "false",
         click_action: "FLUTTER_NOTIFICATION_CLICK", // compat Android/WebView
+        ...(safeImageUrl ? { imageUrl: safeImageUrl } : {}), // dispo aussi côté data, pour un affichage custom en foreground
       },
       android: {
         priority: (urgent ? "high" : "normal") as "high" | "normal",
         notification: {
           sound: "default",
           channelId: urgent ? "agrimarche_urgent" : "agrimarche_default",
+          // "Big picture" Android — affiché automatiquement par le système,
+          // aucune config native supplémentaire requise.
+          ...(safeImageUrl ? { imageUrl: safeImageUrl } : {}),
         },
       },
       apns: {
@@ -203,7 +218,17 @@ export async function POST(req: NextRequest) {
           aps: {
             sound: "default",
             ...(urgent ? { "interruption-level": "time-sensitive" } : {}),
+            // ⚠️ Requis pour qu'iOS tente de récupérer l'image jointe.
+            ...(safeImageUrl ? { "mutable-content": 1 } : {}),
           },
+        },
+        fcmOptions: {
+          // ⚠️ IMPORTANT : sur iOS, cette URL ne s'affiche QUE si l'app native
+          // embarque une Notification Service Extension (cible Xcode séparée
+          // qui télécharge et attache l'image — code natif, pas vérifiable
+          // depuis ce repo web/Capacitor). Sans cette extension, l'image est
+          // silencieusement ignorée sur iOS mais le texte s'affiche normalement.
+          ...(safeImageUrl ? { imageUrl: safeImageUrl } : {}),
         },
       },
       webpush: {
@@ -211,6 +236,9 @@ export async function POST(req: NextRequest) {
           icon: "/icons/icon-192x192.png",
           badge: "/icons/badge-72x72.png",
           requireInteraction: !!urgent,
+          // Grande image affichée sous le texte (Chrome/Edge/Firefox desktop
+          // et Android ; non supporté sur Safari, qui l'ignore sans erreur).
+          ...(safeImageUrl ? { image: safeImageUrl } : {}),
         },
         fcmOptions: {
           link: deepLink || "/",
