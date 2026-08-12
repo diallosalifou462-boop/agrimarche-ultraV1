@@ -435,7 +435,7 @@
 					CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
 				CODE_SIGN_STYLE = Manual;
 				CODE_SIGN_IDENTITY = "Apple Distribution";
-				PROVISIONING_PROFILE_SPECIFIER = "AgriMarche_AppStore_Profile";
+				PROVISIONING_PROFILE_SPECIFIER = "AgriMarche_AppStore_Profil";
 				DEVELOPMENT_TEAM = KAMMWG3VQH;
 				CURRENT_PROJECT_VERSION = 2;
 				INFOPLIST_FILE = App/Info.plist;
@@ -457,7 +457,9 @@
 		9A2100000000000000000014 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
+				PROVISIONING_PROFILE_SPECIFIER = "AgriMarche_NotificationServiceExtension_AppStore";
+				CODE_SIGN_IDENTITY = "Apple Distribution";
+				CODE_SIGN_STYLE = Manual;
 				DEVELOPMENT_TEAM = KAMMWG3VQH;
 				CURRENT_PROJECT_VERSION = 2;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -481,7 +483,9 @@
 		9A2100000000000000000015 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
+				PROVISIONING_PROFILE_SPECIFIER = "AgriMarche_NotificationServiceExtension_AppStore";
+				CODE_SIGN_IDENTITY = "Apple Distribution";
+				CODE_SIGN_STYLE = Manual;
 				DEVELOPMENT_TEAM = KAMMWG3VQH;
 				CURRENT_PROJECT_VERSION = 2;
 				GENERATE_INFOPLIST_FILE = NO;
