@@ -156,13 +156,56 @@ jobs:
       - name: Configure Xcode signing profiles
         run: |
           set -e
-          python3 <<'PY'
+
+          APP_PROFILE="$RUNNER_TEMP/profile.mobileprovision"
+          EXT_PROFILE="$RUNNER_TEMP/profile_extension.mobileprovision"
+          PROJECT="ios/App/App.xcodeproj/project.pbxproj"
+
+          # Read the REAL profile names and UUIDs from the profiles installed above.
+          security cms -D -i "$APP_PROFILE" > "$RUNNER_TEMP/app_profile.plist"
+          security cms -D -i "$EXT_PROFILE" > "$RUNNER_TEMP/ext_profile.plist"
+
+          APP_PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" "$RUNNER_TEMP/app_profile.plist")
+          APP_PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" "$RUNNER_TEMP/app_profile.plist")
+          APP_APP_ID=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" "$RUNNER_TEMP/app_profile.plist")
+
+          EXT_PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" "$RUNNER_TEMP/ext_profile.plist")
+          EXT_PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" "$RUNNER_TEMP/ext_profile.plist")
+          EXT_APP_ID=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" "$RUNNER_TEMP/ext_profile.plist")
+
+          echo "===== REAL APP PROFILE ====="
+          echo "Name : $APP_PROFILE_NAME"
+          echo "UUID : $APP_PROFILE_UUID"
+          echo "App ID : $APP_APP_ID"
+
+          echo "===== REAL EXTENSION PROFILE ====="
+          echo "Name : $EXT_PROFILE_NAME"
+          echo "UUID : $EXT_PROFILE_UUID"
+          echo "App ID : $EXT_APP_ID"
+
+          case "$APP_APP_ID" in
+            KAMMWG3VQH.com.agrimarche.app) ;;
+            *) echo "❌ Le profil APP ne correspond pas à com.agrimarche.app"; exit 1 ;;
+          esac
+
+          case "$EXT_APP_ID" in
+            KAMMWG3VQH.com.agrimarche.app.NotificationServiceExtension) ;;
+            *) echo "❌ Le profil EXTENSION ne correspond pas à com.agrimarche.app.NotificationServiceExtension"; exit 1 ;;
+          esac
+
+          python3 - "$PROJECT" "$APP_PROFILE_UUID" "$EXT_PROFILE_UUID" <<'PY'
           from pathlib import Path
           import re
+          import sys
 
-          project = Path("ios/App/App.xcodeproj/project.pbxproj")
+          project = Path(sys.argv[1])
+          app_uuid = sys.argv[2]
+          ext_uuid = sys.argv[3]
           s = project.read_text()
-          s = s.replace("AgriMarche_AppStore_Profile", "AgriMarche_AppStore_Profil")
+
+          # Remove stale profile names that have caused the previous conflicts.
+          s = s.replace("AgriMarche_AppStore_Profile", "")
+          s = s.replace("AgriMarche_AppStore_Profil", "")
 
           def patch(config_id, values):
               global s
@@ -170,6 +213,7 @@ jobs:
               if not m:
                   raise RuntimeError(f"Configuration {config_id} not found")
               block = m.group(0)
+
               for key, value in values.items():
                   pat = re.compile(r'(?m)^(\s*)' + re.escape(key) + r'\s*=\s*[^;]+;')
                   repl = r'\1' + key + " = " + value + ";"
@@ -177,30 +221,45 @@ jobs:
                       block = pat.sub(repl, block, count=1)
                   else:
                       idx = block.find("buildSettings = {")
+                      if idx < 0:
+                          raise RuntimeError(f"buildSettings not found in {config_id}")
                       ins = idx + len("buildSettings = {")
                       block = block[:ins] + "\n\t\t\t\t" + key + " = " + value + ";" + block[ins:]
+
               s = s[:m.start()] + block + s[m.end():]
 
+          # App Release: use the actual installed APP profile UUID.
           patch("504EC3181FED79650016851F", {
               "CODE_SIGN_STYLE": "Manual",
               "DEVELOPMENT_TEAM": "KAMMWG3VQH",
               "CODE_SIGN_IDENTITY": '"Apple Distribution"',
-              "PROVISIONING_PROFILE_SPECIFIER": '"AgriMarche_AppStore_Profil"',
+              "PROVISIONING_PROFILE_SPECIFIER": f'"{app_uuid}"',
           })
+
+          # Extension configurations: use the actual installed extension profile UUID.
           for cid in ("9A2100000000000000000014", "9A2100000000000000000015"):
               patch(cid, {
                   "CODE_SIGN_STYLE": "Manual",
                   "DEVELOPMENT_TEAM": "KAMMWG3VQH",
                   "CODE_SIGN_IDENTITY": '"Apple Distribution"',
-                  "PROVISIONING_PROFILE_SPECIFIER": '"AgriMarche_NotificationServiceExtension_AppStore"',
+                  "PROVISIONING_PROFILE_SPECIFIER": f'"{ext_uuid}"',
               })
+
           project.write_text(s)
           PY
 
-          echo "===== App Release signing ====="
-          grep -n -A22 '504EC3181FED79650016851F /\* Release \*/' ios/App/App.xcodeproj/project.pbxproj
-          echo "===== Extension Release signing ====="
-          grep -n -A22 '9A2100000000000000000015 /\* Release \*/' ios/App/App.xcodeproj/project.pbxproj
+          echo "===== VERIFY PROJECT SIGNING SETTINGS ====="
+          grep -n -A22 '504EC3181FED79650016851F /\* Release \*/' "$PROJECT"
+          echo "===== VERIFY EXTENSION RELEASE SIGNING ====="
+          grep -n -A22 '9A2100000000000000000015 /\* Release \*/' "$PROJECT"
+
+          echo "===== VERIFY NO OLD PROFILE NAME REMAINS ====="
+          if grep -n "AgriMarche_AppStore_Profile\|AgriMarche_AppStore_Profil" "$PROJECT"; then
+            echo "❌ Ancien nom de profil encore présent dans project.pbxproj"
+            exit 1
+          fi
+
+          echo "✅ Xcode configuré avec les UUID réels des profils installés."
 
       - name: Archive
         run: |
@@ -237,13 +296,33 @@ jobs:
             <key>provisioningProfiles</key>
             <dict>
               <key>com.agrimarche.app</key>
-              <string>AgriMarche_AppStore_Profil</string>
+              <string>__APP_PROFILE_NAME__</string>
               <key>com.agrimarche.app.NotificationServiceExtension</key>
-              <string>AgriMarche_NotificationServiceExtension_AppStore</string>
+              <string>__EXT_PROFILE_NAME__</string>
             </dict>
           </dict>
           </plist>
           EOF
+
+          # Use the actual names read from the installed provisioning profiles.
+          /usr/bin/python3 - "$RUNNER_TEMP/export_options.plist" "$RUNNER_TEMP/app_profile.plist" "$RUNNER_TEMP/ext_profile.plist" <<'PY'
+          from pathlib import Path
+          import plistlib
+          import sys
+
+          out = Path(sys.argv[1])
+          app_plist = plistlib.loads(Path(sys.argv[2]).read_bytes())
+          ext_plist = plistlib.loads(Path(sys.argv[3]).read_bytes())
+
+          data = plistlib.loads(out.read_bytes())
+          profiles = data["provisioningProfiles"]
+          profiles["com.agrimarche.app"] = app_plist["Name"]
+          profiles["com.agrimarche.app.NotificationServiceExtension"] = ext_plist["Name"]
+          out.write_bytes(plistlib.dumps(data, fmt=plistlib.FMT_XML, sort_keys=False))
+          print("Export profile APP:", app_plist["Name"])
+          print("Export profile EXT:", ext_plist["Name"])
+          PY
+
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/App.xcarchive" \
             -exportPath build/ios/ipa \
