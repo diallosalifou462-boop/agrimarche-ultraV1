@@ -352,21 +352,28 @@ jobs:
           API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
         run: |
           set -e
-          mkdir -p ~/private_keys
-          echo "$API_KEY_BASE64" | base64 -D -o ~/private_keys/AuthKey_${API_KEY_ID}.p8
+          mkdir -p "$RUNNER_TEMP/private_keys"
+          API_KEY_PATH="$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8"
 
-          if ! head -1 ~/private_keys/AuthKey_${API_KEY_ID}.p8 | grep -q "BEGIN PRIVATE KEY"; then
+          echo "$API_KEY_BASE64" | base64 -D -o "$API_KEY_PATH"
+
+          if ! head -1 "$API_KEY_PATH" | grep -q "BEGIN PRIVATE KEY"; then
             echo "❌ Le fichier .p8 décodé est invalide."
-            echo "→ Vérifie que le secret APP_STORE_CONNECT_API_KEY contient bien le"
-            echo "  résultat de : base64 -i AuthKey_XXXXXXXXXX.p8"
-            echo "  et non le contenu brut du fichier .p8."
+            echo "→ Vérifie que le secret APP_STORE_CONNECT_API_KEY contient bien"
+            echo "  le résultat de : base64 -i AuthKey_XXXXXXXXXX.p8"
             exit 1
           fi
+
           echo "✅ Clé API valide"
 
-          IPA_PATH=$(find build/ios/ipa -name "*.ipa" | head -n 1)
-          xcrun altool --upload-app \
-            --type ios \
-            --file "$IPA_PATH" \
-            --apiKey "$API_KEY_ID" \
-            --apiIssuer "$API_ISSUER_ID"
+          IPA_PATH=$(find build/ios/ipa -name "*.ipa" -print -quit)
+
+          if [ -z "$IPA_PATH" ]; then
+            echo "❌ Aucun fichier IPA trouvé."
+            exit 1
+          fi
+
+          echo "📦 IPA : $IPA_PATH"
+          echo "🚀 Upload vers App Store Connect avec iTMSTransporter"
+
+          xcrun iTMSTransporter             -m upload             -assetFile "$IPA_PATH"             -apiKey "$API_KEY_ID"             -apiIssuer "$API_ISSUER_ID"             -v informational

@@ -1744,6 +1744,62 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
     }
   };
 
+  // ── 🔔 Push automatique à la publication d'une promo/pub ────────────────
+  // Réutilise EXACTEMENT le moteur sendPushBatched (celui du broadcast manuel,
+  // déjà testé en prod) : concurrence limitée, retry+backoff, purge des tokens
+  // morts. Best-effort et non bloquant : si le push échoue, la promo/pub reste
+  // publiée quand même (elle est déjà en base au moment de l'appel).
+  const notifyNewAdPush = async (ad: { title: string; body: string; deepLink: string; imageUrl?: string }) => {
+    try {
+      const tokensSnap = await getDocs(collectionGroup(db, 'tokens'));
+      const targets: PushTarget[] = [];
+      tokensSnap.forEach(d => { const t = d.data()?.token; if (t) targets.push({ token: t, ref: d.ref }); });
+      const seen = new Set<string>();
+      const uniqueTargets = targets.filter(t => (seen.has(t.token) ? false : (seen.add(t.token), true)));
+      if (uniqueTargets.length === 0) {
+        console.warn('[Push auto promo/pub] Aucun token FCM enregistré — notification non envoyée');
+        return;
+      }
+
+      const { successCount, failureCount, deadRefs } = await sendPushBatched(
+        uniqueTargets,
+        {
+          title: ad.title,
+          body: ad.body,
+          deepLink: ad.deepLink,
+          urgent: false,
+          ...(ad.imageUrl ? { imageUrl: ad.imageUrl } : {}),
+        },
+        apiUrl,
+      );
+      pruneDeadTokens(deadRefs); // best effort, en arrière-plan
+
+      await addDoc(collection(db, 'broadcasts'), {
+        title: ad.title,
+        body: ad.body,
+        deepLink: ad.deepLink,
+        channels: { push: true, inApp: false, email: false, sms: false },
+        targetRole: 'auto_ad_publish',
+        sentBy: authUser?.uid,
+        sentAt: Timestamp.now(),
+        recipientCount: uniqueTargets.length,
+        pushCount: successCount,
+        pushFailCount: failureCount,
+        pushPrunedCount: deadRefs.length,
+      }).catch(() => {}); // traçabilité, non bloquant
+
+      if (failureCount > 0) {
+        toast.info(`📲 Notification envoyée à ${successCount} appareil(s) — ${failureCount} échec(s)`);
+      } else if (successCount > 0) {
+        toast.info(`📲 Notification push envoyée à ${successCount} appareil(s)`);
+      }
+    } catch (e) {
+      // Ne doit JAMAIS faire échouer la publication de la promo/pub :
+      // l'erreur est journalisée seulement.
+      console.error('[Push auto] Erreur envoi notification promo/pub:', e);
+    }
+  };
+
   // Nombre d'appareils actuellement joignables — lecture légère, une seule
   // fois au montage, juste pour donner une idée de portée avant l'envoi.
   useEffect(() => {
@@ -4728,6 +4784,16 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                                     createdBy: authUser?.uid,
                                   });
                                   toast.success('🔥 Promotion publiée avec succès');
+                                  // Notification push auto (fire-and-forget, ne bloque pas l'UI) —
+                                  // uniquement si la promo est publiée active immédiatement.
+                                  if (promoForm.active) {
+                                    notifyNewAdPush({
+                                      title: `${promoForm.badge || '🔥 PROMO'} ${selectedProduct.name}`,
+                                      body: `-${promoForm.discountPercent}% dès maintenant sur ${selectedProduct.name} !`,
+                                      deepLink: `/main/products?id=${promoForm.productId}`,
+                                      imageUrl: selectedProduct.images?.[0],
+                                    });
+                                  }
                                 }
                                 setEditingPromoId(null);
                                 setPromoForm({ productId:'', discountPercent:20, badge:'🔥 PROMO', placement:'banner', active:true, priority:0 });
@@ -5033,6 +5099,16 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                                   createdBy: authUser?.uid,
                                 });
                                 toast.success('🖼️ Bannière partenaire publiée !');
+                                // Notification push auto (fire-and-forget, ne bloque pas l'UI) —
+                                // uniquement si la bannière est publiée active immédiatement.
+                                if (pubForm.active) {
+                                  notifyNewAdPush({
+                                    title: `📢 ${pubForm.title || pubForm.partnerName}`,
+                                    body: `Nouvelle offre partenaire : ${pubForm.partnerName}`,
+                                    deepLink: pubForm.linkUrl || '/',
+                                    imageUrl: downloadURL,
+                                  });
+                                }
                               }
                               setEditingPubId(null);
                               setEditingPubOldPath(null);

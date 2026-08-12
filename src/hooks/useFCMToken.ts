@@ -42,6 +42,34 @@ export function useFCMToken() {
         // token FCM, sur iOS comme sur Android.
         try {
           const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
+
+          // ⚠️ CRITIQUE Android 8+ : /api/send-push envoie toujours un channelId
+          // explicite ("agrimarche_default" / "agrimarche_urgent"). Si ce canal
+          // n'existe pas nativement au moment où la notif arrive (app en fond ou
+          // fermée), Android la JETTE SILENCIEUSEMENT — pas d'erreur, rien dans
+          // les logs FCM (qui reportent success=true côté serveur quand même).
+          // On crée les deux canaux ici, au tout premier lancement natif, pour
+          // ne plus dépendre d'une config manifeste/native manquante. No-op sur
+          // iOS et sans effet si le canal existe déjà (createChannel est idempotent).
+          if (getNativePlatformName() === 'android') {
+            const channels: Array<{ id: string; name: string; importance: number; visibility: number; vibration: boolean }> = [
+              { id: 'agrimarche_default', name: 'Notifications AgriMarché', importance: 4, visibility: 1, vibration: true },
+              { id: 'agrimarche_urgent', name: 'Alertes urgentes AgriMarché', importance: 5, visibility: 1, vibration: true },
+            ];
+            await Promise.all(
+              channels.map((c) =>
+                FirebaseMessaging.createChannel({
+                  id: c.id,
+                  name: c.name,
+                  importance: c.importance as any,
+                  visibility: c.visibility as any,
+                  vibration: c.vibration,
+                  sound: 'default',
+                }).catch((err) => console.warn(`[FCM] Échec création canal Android "${c.id}":`, err))
+              )
+            );
+          }
+
           const status = await FirebaseMessaging.checkPermissions();
           setPermission(
             status.receive === 'granted'
