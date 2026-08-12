@@ -33,42 +33,11 @@ export function useUserLocation() {
     setError('');
 
     try {
-      // 1. Essayer l'API IP geolocation (détecte la vraie ville)
-      const ipResponse = await fetch('https://ipapi.co/json/');
-      
-      if (ipResponse.ok) {
-        const ipData = await ipResponse.json();
-        
-        if (ipData.latitude && ipData.longitude) {
-          // IP détectée - ville réelle (Thiès, Dakar, etc.)
-          const city = ipData.city || 'Dakar';
-          const region = ipData.region || city;
-          const country = ipData.country_name || 'Sénégal';
-          
-          const newLocation: UserLocation = {
-            city: city,
-            region: region,
-            country: country,
-            lat: ipData.latitude,
-            lng: ipData.longitude,
-            detected: true,
-            address: `${city}, ${region}`,
-            isDefault: false,
-          };
-          
-          console.log(`📍 Localisation détectée par IP : ${city}`);
-          setLocation(newLocation);
-          localStorage.setItem('user_location', JSON.stringify(newLocation));
-          setLoading(false);
-          return newLocation;
-        }
-      }
-      
-      // 2. Fallback sur la géolocalisation — natif (@capacitor/geolocation,
-      // via FusedLocationProviderClient) sur Android/iOS, navigator.geolocation
-      // sur web/PWA. Voir src/lib/geolocation.ts pour le détail : c'était la
-      // cause du blocage total sur Android (permissions manifest manquantes
-      // + pont WebView non fiable).
+      // 1. Essayer le GPS en premier — natif (@capacitor/geolocation, via
+      // FusedLocationProviderClient) sur Android/iOS, navigator.geolocation
+      // sur web/PWA. Voir src/lib/geolocation.ts pour le détail. C'est la
+      // source la plus précise (position réelle, pas juste la ville liée
+      // au FAI) ; on ne se rabat sur l'IP que si le GPS échoue.
       try {
         const position = await getCurrentPosition({ enableHighAccuracy: true, timeout: 10000 });
         const { latitude, longitude } = position.coords;
@@ -118,7 +87,45 @@ export function useUserLocation() {
           return defaultLocation;
         }
       } catch (geoErr) {
-        // GPS refusé/indisponible (natif ou web) : on garde la position par défaut.
+        // 2. GPS refusé/indisponible : on se rabat sur la géolocalisation IP
+        // (moins précise, à l'échelle de la ville, mais mieux que rien).
+        console.warn('GPS indisponible, repli sur la géolocalisation IP:', geoErr);
+
+        try {
+          const ipResponse = await fetch('https://ipapi.co/json/');
+
+          if (ipResponse.ok) {
+            const ipData = await ipResponse.json();
+
+            if (ipData.latitude && ipData.longitude) {
+              const city = ipData.city || 'Dakar';
+              const region = ipData.region || city;
+              const country = ipData.country_name || 'Sénégal';
+
+              const newLocation: UserLocation = {
+                city,
+                region,
+                country,
+                lat: ipData.latitude,
+                lng: ipData.longitude,
+                detected: true,
+                address: `${city}, ${region}`,
+                isDefault: true,
+              };
+
+              console.log(`📍 Localisation détectée par IP (repli) : ${city}`);
+              setError('📍 Position approximative (IP) - activez la localisation GPS pour plus de précision');
+              setLocation(newLocation);
+              localStorage.setItem('user_location', JSON.stringify(newLocation));
+              setLoading(false);
+              return newLocation;
+            }
+          }
+        } catch (ipErr) {
+          console.error('Erreur géolocalisation IP:', ipErr);
+        }
+
+        // 3. Ni GPS ni IP : position par défaut (Dakar).
         const denied = (geoErr as UnifiedPositionError)?.code === 1;
         const defaultLocation: UserLocation = {
           city: denied ? '📍 Ville non détectée' : '📍 Position approximative',
@@ -138,7 +145,7 @@ export function useUserLocation() {
         setLoading(false);
         return defaultLocation;
       }
-      
+
     } catch (err) {
       console.error('Erreur détection localisation:', err);
       const defaultLocation: UserLocation = {

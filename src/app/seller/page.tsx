@@ -418,7 +418,7 @@ export default function SellerDashboard() {
               <div className="text-center py-8">
                 <Package size={32} className="mx-auto text-gray-300 dark:text-gray-600 mb-2" />
                 <p className="text-xs text-gray-400 dark:text-gray-500">Aucun produit pour le moment</p>
-                <Link href="/seller/register" className="text-xs text-emerald-600 dark:text-emerald-400 mt-2 inline-block font-semibold hover:underline">
+                <Link href="/seller/products/add" className="text-xs text-emerald-600 dark:text-emerald-400 mt-2 inline-block font-semibold hover:underline">
                   + Ajouter un produit
                 </Link>
               </div>

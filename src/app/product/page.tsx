@@ -2,6 +2,7 @@
 
 import { doc, getDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
+import { getCurrentPosition } from '@/lib/geolocation';
 import { Suspense, useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -185,17 +186,13 @@ function ProductDetailContent() {
     }
   }, [updateDeliveryEstimate]);
 
-  // 📍 Détection
+  // 📍 Détection — passe par @/lib/geolocation (natif @capacitor/geolocation
+  // sur Android/iOS, navigator.geolocation sur web) au lieu de l'API web
+  // brute, qui échoue silencieusement dans la WebView Android et forçait
+  // un repli systématique sur l'IP (imprécis).
   const detectLocation = useCallback(() => {
-    if (!navigator.geolocation) {
-      setLocationError('Géolocalisation non supportée');
-      setLocationLoading(false);
-      fallbackToIPGeolocation();
-      return;
-    }
-
-    navigator.geolocation.getCurrentPosition(
-      async (position) => {
+    getCurrentPosition({ enableHighAccuracy: true, timeout: 10000, maximumAge: 300000 })
+      .then(async (position) => {
         const { latitude, longitude } = position.coords;
 
         try {
@@ -245,13 +242,11 @@ function ProductDetailContent() {
         } finally {
           setLocationLoading(false);
         }
-      },
-      () => {
+      })
+      .catch(() => {
         setLocationError('Erreur de localisation');
         fallbackToIPGeolocation();
-      },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 300000 }
-    );
+      });
   }, [fallbackToIPGeolocation, updateDeliveryEstimate]);
 
   // 📍 Init location
