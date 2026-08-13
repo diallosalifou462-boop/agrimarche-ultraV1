@@ -9,6 +9,9 @@
     "start": "next start",
     "lint": "next lint"
   },
+  "overrides": {
+    "jose": "4.15.9"
+  },
   "dependencies": {
     "@capacitor-community/sqlite": "^8.1.0",
     "@capacitor-firebase/authentication": "^8.3.0",
