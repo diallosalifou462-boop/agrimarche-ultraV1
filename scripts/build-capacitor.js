@@ -1,4 +1,4 @@
-// scripts/build-capacitor.js
+﻿// scripts/build-capacitor.js
 //
 // Le build statique (output: 'export') ne supporte pas les routes API
 // dynamiques (POST, accès à request.json(), secrets serveur, etc.).
@@ -19,7 +19,6 @@ const { execSync } = require('child_process');
 
 const projectRoot = path.join(__dirname, '..');
 
-// Détection automatique : src/app/api en priorité si src/ existe, sinon app/api
 const candidateDirs = [
   path.join(projectRoot, 'src', 'app', 'api'),
   path.join(projectRoot, 'app', 'api'),
@@ -67,7 +66,6 @@ function copyThenDeleteWithRetry(from, to, attempts = 5, delayMs = 800) {
         );
       }
       console.log(`→ Dossier verrouillé, nouvelle tentative (${i}/${attempts})...`);
-      // Nettoyage d'une copie partielle avant de réessayer
       if (fs.existsSync(to)) fs.rmSync(to, { recursive: true, force: true });
       sleep(delayMs);
     }
@@ -95,13 +93,12 @@ function moveBack() {
 try {
   cleanNextCache();
   moveOut();
-  execSync('next build', {
+  execSync('next build --webpack', {
     stdio: 'inherit',
     cwd: projectRoot,
     env: { ...process.env, CAPACITOR_BUILD: 'true' },
   });
   console.log('✅ Build mobile terminé avec succès.');
 } finally {
-  // Toujours restaurer api/, même si le build a échoué
   moveBack();
 }
