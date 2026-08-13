@@ -1,6 +1,7 @@
 {
   "compilerOptions": {
-    "target": "es5",
+    "target": "es2020",
+    "ignoreDeprecations": "6.0",
     "lib": [
       "dom",
       "dom.iterable",
@@ -38,6 +39,9 @@
   ],
   "exclude": [
     "node_modules",
-    "functions"
+    "functions",
+    "app_old",
+    "lib",
+    "src/__tests__"
   ]
 }
