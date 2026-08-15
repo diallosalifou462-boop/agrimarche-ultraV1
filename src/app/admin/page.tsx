@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useAuth } from "@/contexts/AuthContext";
 import { AdminGuard } from "@/components/AdminGuard";
 import { apiUrl } from "@/lib/api-config";
+import { computeDisplayPrice, computeAdminMargin, inferBasePrice, ADMIN_MARGIN_RATE } from "@/lib/pricing";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
 import {
@@ -18,7 +19,8 @@ import {
   CreditCard, Wallet, Target, AlertTriangle, CheckCircle, XCircle,
   HelpCircle, Menu, Moon, Sun, Monitor, Database, Cloud, Server, Megaphone,
   ShieldCheck, Fingerprint, Key, Lock, Unlock, Gift, Heart, ThumbsUp,
-  Send, Globe, Pencil, Trash2, Loader2, ImagePlus, RadioTower
+  Send, Globe, Pencil, Trash2, Loader2, ImagePlus, RadioTower,
+  Filter, ArrowUpDown, PackageX, Layers, Smartphone, History
 } from "lucide-react";
 import { db, auth } from "@/lib/firebase/firebase";
 import {
@@ -32,6 +34,7 @@ import {
 } from "firebase/auth";
 import { useFCMToken } from "@/hooks/useFCMToken"; // ⚠️ ajuste ce chemin vers l'emplacement réel de ton hook useFCMToken
 import { notifyUser } from "@/lib/notifications/notifyUser";
+import { categoryLink } from "@/lib/categoryLink";
 import { OrderStatus, ORDER_STATUS_CONFIG, normalizeStatus, statusTint } from "@/lib/orderStatus";
 import {
   AreaChart, Area, BarChart, Bar, LineChart, Line,
@@ -135,6 +138,10 @@ interface Order {
   paymentMethod?: 'wave' | 'orange' | 'free' | 'card';
   paymentStatus?: 'pending' | 'paid' | 'failed';
   commission?: number;
+  // Parcours de suivi hybride (voir functions/src/index.ts et
+  // delivery/dashboard/page.tsx) — écrit par assignDelivery ci-dessous et
+  // par le livreur lui-même, jusqu'ici jamais déclaré ni affiché côté admin.
+  tracking?: { phase?: 'assigned' | 'en_route' | 'approaching' | 'arrived' };
 }
 
 interface UserProfile {
@@ -532,6 +539,21 @@ const StatusBadge = ({ status }: { status: string }) => {
   );
 };
 
+// Palette déterministe par catégorie — même catégorie ⇒ même couleur/emoji,
+// pour repérer un type de produit d'un coup d'œil dans la grille admin.
+const CATEGORY_STYLES: { color: string; emoji: string }[] = [
+  { color:'#10b981', emoji:'🌿' }, { color:'#f59e0b', emoji:'🍊' },
+  { color:'#06b6d4', emoji:'🐟' }, { color:'#8b5cf6', emoji:'🚜' },
+  { color:'#ec4899', emoji:'🌾' }, { color:'#ef4444', emoji:'🥩' },
+  { color:'#eab308', emoji:'🌽' }, { color:'#14b8a6', emoji:'🥬' },
+];
+const categoryStyle = (category?: string) => {
+  const key = category || '—';
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  return CATEGORY_STYLES[hash % CATEGORY_STYLES.length];
+};
+
 const StatCard = ({ icon, label, value, change, color }: { icon: React.ReactNode; label: string; value: number; change?: number; color: string }) => (
   <div className="glass-card" style={{ padding:20 }}>
     <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:12 }}>
@@ -771,9 +793,19 @@ export default function AdminDashboard() {
   const [orders, setOrders]                 = useState<Order[]>([]);
   const [users, setUsers]                   = useState<UserProfile[]>([]);
   const [products, setProducts]             = useState<Product[]>([]);
+  // Prix vendeur (basePrice) par id produit — alimenté par la sous-collection
+  // privée `productPricing`, lisible admin uniquement. Jamais mélangé à `Product`.
+  const [pricingByProduct, setPricingByProduct] = useState<Record<string, number>>({});
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
-  const [productEditForm, setProductEditForm] = useState<{ name: string; category: string; price: number; region: string; stock: number }>({ name: '', category: '', price: 0, region: '', stock: 0 });
+  // NB: le champ "basePrice" de ce formulaire est le prix VENDEUR (celui qu'il
+  // reçoit) — c'est ce que l'admin édite. Le prix affiché partout ailleurs
+  // dans l'app (price = basePrice + marge plateforme) est recalculé
+  // automatiquement à l'enregistrement, voir saveProductEdit().
+  const [productEditForm, setProductEditForm] = useState<{ name: string; category: string; basePrice: number; region: string; stock: number }>({ name: '', category: '', basePrice: 0, region: '', stock: 0 });
   const [productSaving, setProductSaving]   = useState(false);
+  const [productSearchQuery, setProductSearchQuery]   = useState('');
+  const [productCategoryFilter, setProductCategoryFilter] = useState('all');
+  const [productSort, setProductSort] = useState<'name'|'stock-asc'|'stock-desc'|'price-asc'|'price-desc'>('name');
   const [loans, setLoans]                   = useState<Loan[]>([]);
   const [deliveryPersons, setDeliveryPersons] = useState<UserProfile[]>([]);
   const [notifications, setNotifications]   = useState<AppNotification[]>([]);
@@ -1002,6 +1034,24 @@ export default function AdminDashboard() {
       setProducts(snap.docs.map(d => ({ id: d.id, ...d.data() } as Product)));
     });
 
+    // ── Prix vendeur (basePrice) ──
+    // Stocké à part dans products/{id}/productPricing/base, lisible
+    // UNIQUEMENT par l'admin (règles Firestore). Jamais fusionné dans le
+    // document public `products/{id}` pour que le vendeur/l'acheteur ne
+    // puissent pas le lire, même via les outils développeur.
+    const unsubPricing = onSnapshot(
+      collectionGroup(db, 'productPricing'),
+      snap => {
+        const map: Record<string, number> = {};
+        snap.forEach(d => {
+          const productId = d.ref.parent.parent?.id;
+          if (productId) map[productId] = Number(d.data().basePrice) || 0;
+        });
+        setPricingByProduct(map);
+      },
+      err => console.error('productPricing (accès admin requis):', err)
+    );
+
     const unsubLoans = onSnapshot(
       query(collection(db, 'loans'), orderBy('createdAt', 'desc')),
       snap => setLoans(snap.docs.map(d => ({ id: d.id, ...d.data() } as Loan)))
@@ -1038,7 +1088,7 @@ export default function AdminDashboard() {
       err => console.error('reviews:', err)
     );
 
-    return () => { unsubOrders(); unsubUsers(); unsubProducts(); unsubLoans(); unsubNotifs(); unsubBroadcast(); unsubAds(); unsubReviews(); };
+    return () => { unsubOrders(); unsubUsers(); unsubProducts(); unsubPricing(); unsubLoans(); unsubNotifs(); unsubBroadcast(); unsubAds(); unsubReviews(); };
   }, [authUser]);
 
   // ── IA COMPUTATIONS ───────────────────────────────────────
@@ -1068,6 +1118,29 @@ export default function AdminDashboard() {
 
   // ── ACTIONS ───────────────────────────────────────────────
 
+  // ── Notification vendeur — changement de statut ──────────────────────
+  // ⚠️ CONSOLIDATION (suite à l'ajout du dossier functions/) : ce handler
+  // envoyait auparavant une notification acheteur ET vendeur pour chaque
+  // statut. Il s'avère que des triggers Firestore serveur
+  // (functions/src/index.ts) couvrent déjà, de façon garantie et
+  // indépendante du réseau de l'admin :
+  //   - l'acheteur, pour TOUS les statuts (notifyOrderStatusStep pour
+  //     en_preparation/en_livraison/livre, notifyOrderCancelled pour annule)
+  //   - le vendeur, pour 'livre' (notifyOrderStatusStep, nouveau bloc) et
+  //     'annule' (notifyOrderCancelled, envoie déjà aux deux parties)
+  // Avant cette prise en compte, CHAQUE changement de statut ici déclenchait
+  // 2 notifications pour le même événement (une du client, une du serveur),
+  // avec des textes différents. On ne garde donc plus ici QUE la notif
+  // vendeur pour les statuts que le serveur ne couvre pas.
+  // ⚠️ FIX : order.farmerId n'existe jamais (checkout écrit sellerId) —
+  // cette notification n'était donc historiquement jamais envoyée à personne.
+  const SELLER_STATUS_MESSAGES: Partial<Record<Order['status'], { title: string; body: string; icon: string; priority: 'low'|'medium'|'high'|'critical' }>> = {
+    en_attente:     { title: 'Commande #{n} — en attente',      body: 'Une commande attend votre confirmation.',     icon: '⏳', priority: 'medium' },
+    en_preparation: { title: 'Commande #{n} — en préparation',  body: 'La commande est passée en préparation.',     icon: '🔄', priority: 'medium' },
+    en_livraison:   { title: 'Commande #{n} — en livraison',    body: 'La commande est en cours de livraison.',     icon: '🚚', priority: 'medium' },
+    // livre / annule : intentionnellement absents, couverts côté serveur.
+  };
+
   const updateOrderStatus = async (orderId: string, status: Order['status']) => {
     try {
       // ⚠️ FIX cohérence inter-collections : seller-orders-page.tsx et les pages
@@ -1086,26 +1159,30 @@ export default function AdminDashboard() {
       // Firestore — une course non déterministe côté client.
       // Timestamp Firestore (pas string ISO) : account-page.tsx lit `.seconds`.
       const now = Timestamp.now();
+      const payload: Record<string, any> = { status, updatedAt: now };
+      // Analytique — voir seller/orders/page.tsx::updateStatus pour le
+      // même ajout ; ici pour couvrir le cas où c'est l'admin qui fait
+      // passer la commande en préparation, pas seulement le vendeur.
+      if (status === 'en_preparation') payload.enPreparationAt = now;
       const batch = writeBatch(db);
-      batch.set(doc(db, 'orders', orderId), { status, updatedAt: now }, { merge: true });
+      batch.set(doc(db, 'orders', orderId), payload, { merge: true });
       const sellerOrderSnap = await getDoc(doc(db, 'seller_orders', orderId));
       if (sellerOrderSnap.exists()) {
-        batch.set(doc(db, 'seller_orders', orderId), { status, updatedAt: now }, { merge: true });
+        batch.set(doc(db, 'seller_orders', orderId), payload, { merge: true });
       }
       await batch.commit();
       toast.success(`Statut : ${ORDER_STATUS_CONFIG[status].label}`);
       const order = orders.find(o => o.id === orderId);
-      // ⚠️ FIX : order.farmerId n'existe jamais (checkout écrit sellerId) —
-      // cette notification n'était donc JAMAIS envoyée à personne.
-      if (order?.sellerId) {
-        await notifyUser({
+      const m = order ? SELLER_STATUS_MESSAGES[status] : undefined;
+      if (order?.sellerId && m) {
+        notifyUser({
           userId: order.sellerId,
           type: 'order',
-          title: `Commande #${order.orderNumber} — ${ORDER_STATUS_CONFIG[status].label}`,
-          body: `Le statut de votre commande a changé.`,
-          icon: status === 'livre' ? '✅' : '📦',
-          link: `/orders/${order.orderNumber}`,
-          priority: 'medium',
+          title: m.title.replace('{n}', order.orderNumber),
+          body: m.body,
+          icon: m.icon,
+          link: `/seller/orders`,
+          priority: m.priority,
         });
       }
     } catch { toast.error('Erreur mise à jour'); }
@@ -1120,6 +1197,9 @@ export default function AdminDashboard() {
       const payload = {
         delivererId: deliveryId, delivererName: deliveryName, delivererPhone: deliveryPhone,
         delivererAssignedAt: Timestamp.now(), status: 'en_preparation' as const, updatedAt: now,
+        // Parcours de suivi hybride (voir delivery/dashboard::claimOrder pour
+        // le contexte complet) — cohérence entre les deux voies d'attribution.
+        'tracking.phase': 'assigned',
       };
       const batch = writeBatch(db);
       batch.set(doc(db, 'orders', orderId), payload, { merge: true });
@@ -1132,18 +1212,20 @@ export default function AdminDashboard() {
       setShowAssignModal(false);
       setAssignOrderId(null);
 
-      // Notifier l'acheteur : sa commande est en cours de livraison.
       const assignedOrder = orders.find(o => o.id === orderId);
-      if (assignedOrder?.userId) {
-        notifyUser({
-          userId: assignedOrder.userId,
-          type: 'shipping',
-          title: '🚚 Votre commande est en route !',
-          body: `${deliveryName} livre votre commande #${assignedOrder.orderNumber ?? orderId}.`,
-          link: `/account/orders?order=${orderId}`,
-          priority: 'high',
-        });
-      }
+
+      // ⚠️ DOUBLON RETIRÉ + INCOHÉRENCE SIGNALÉE (pas corrigée automatiquement,
+      // décision métier à confirmer) : cette fonction assigne un livreur en
+      // fixant status='en_preparation' (voir payload ci-dessus). Le trigger
+      // serveur notifyOrderStatusStep envoie donc déjà à l'acheteur
+      // "Commande en préparation 👨‍🌾" pour CETTE même écriture. Le code
+      // envoyait EN PLUS, manuellement ici, "🚚 Votre commande est en
+      // route !" — deux notifications contradictoires quasi simultanées
+      // (l'une dit "en préparation", l'autre "en route"). J'ai retiré le
+      // doublon, mais la question reste ouverte : si l'intention réelle est
+      // "le livreur est en route", le statut assigné ici devrait
+      // probablement être 'en_livraison', pas 'en_preparation' — à trancher
+      // côté métier avant de changer la valeur du statut.
 
       // ⚠️ FIX : seul l'acheteur était notifié ici — le livreur lui-même ne
       // l'était jamais. Il ne découvrait la commande qu'en rouvrant son
@@ -1234,19 +1316,13 @@ export default function AdminDashboard() {
       const clampedStock = Math.max(0, newStock);
       await updateDoc(doc(db, 'products', productId), { stock: clampedStock });
       toast.success('Stock mis à jour');
-      const product = products.find(p => p.id === productId);
-      if (product && clampedStock < 5 && product.stock >= 5) {
-        await notifyUser({
-          userId: product.sellerId,
-          type: 'alert',
-          title: '⚠️ Stock critique',
-          body: `Il ne reste que ${clampedStock} unités de "${product.name}".`,
-          icon: '⚠️',
-          link: `/products/${product.id}`,
-          priority: 'high',
-          urgent: true,
-        });
-      }
+      // ⚠️ CONSOLIDATION : cette notification "stock critique" partait
+      // auparavant d'ici, côté client, avec le même seuil (<5) que le
+      // trigger serveur notifyLowStock (functions/src/index.ts), qui
+      // réagit déjà automatiquement à l'écriture sur products/{id}.stock
+      // ci-dessus (avec en plus la distinction rupture totale/stock
+      // faible). L'admin recevait donc un doublon exact à chaque
+      // modification manuelle de stock passant sous le seuil.
     } catch { toast.error('Erreur stock'); }
   };
 
@@ -1255,7 +1331,11 @@ export default function AdminDashboard() {
     setProductEditForm({
       name: product.name || '',
       category: product.category || '',
-      price: product.price || 0,
+      // Produits dont la sous-collection productPricing n'est pas encore
+      // chargée/existante (ex. créés avant cette automatisation) : on
+      // reconstitue une valeur à partir du prix affiché pour ne rien
+      // changer côté acheteur/vendeur tant que l'admin ne modifie rien.
+      basePrice: pricingByProduct[product.id!] ?? inferBasePrice(product.price || 0),
       region: product.region || '',
       stock: product.stock || 0,
     });
@@ -1270,13 +1350,21 @@ export default function AdminDashboard() {
     if (!productEditForm.name.trim()) { toast.error('Le nom du produit est requis'); return; }
     setProductSaving(true);
     try {
+      const basePrice = Number(productEditForm.basePrice) || 0;
       await updateDoc(doc(db, 'products', editingProductId), {
         name: productEditForm.name.trim(),
         category: productEditForm.category.trim(),
-        price: Number(productEditForm.price) || 0,
+        // Prix réellement vu par le vendeur et l'acheteur = basePrice + 5% —
+        // recalculé automatiquement, jamais saisi directement.
+        price: computeDisplayPrice(basePrice),
         region: productEditForm.region.trim(),
         stock: Math.max(0, Number(productEditForm.stock) || 0),
       });
+      // basePrice va dans la sous-collection privée, jamais dans le document public.
+      await setDoc(doc(db, 'products', editingProductId, 'productPricing', 'base'), {
+        basePrice,
+        updatedAt: serverTimestamp(),
+      }, { merge: true });
       toast.success('Produit mis à jour');
       setEditingProductId(null);
     } catch {
@@ -1744,62 +1832,6 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
     }
   };
 
-  // ── 🔔 Push automatique à la publication d'une promo/pub ────────────────
-  // Réutilise EXACTEMENT le moteur sendPushBatched (celui du broadcast manuel,
-  // déjà testé en prod) : concurrence limitée, retry+backoff, purge des tokens
-  // morts. Best-effort et non bloquant : si le push échoue, la promo/pub reste
-  // publiée quand même (elle est déjà en base au moment de l'appel).
-  const notifyNewAdPush = async (ad: { title: string; body: string; deepLink: string; imageUrl?: string }) => {
-    try {
-      const tokensSnap = await getDocs(collectionGroup(db, 'tokens'));
-      const targets: PushTarget[] = [];
-      tokensSnap.forEach(d => { const t = d.data()?.token; if (t) targets.push({ token: t, ref: d.ref }); });
-      const seen = new Set<string>();
-      const uniqueTargets = targets.filter(t => (seen.has(t.token) ? false : (seen.add(t.token), true)));
-      if (uniqueTargets.length === 0) {
-        console.warn('[Push auto promo/pub] Aucun token FCM enregistré — notification non envoyée');
-        return;
-      }
-
-      const { successCount, failureCount, deadRefs } = await sendPushBatched(
-        uniqueTargets,
-        {
-          title: ad.title,
-          body: ad.body,
-          deepLink: ad.deepLink,
-          urgent: false,
-          ...(ad.imageUrl ? { imageUrl: ad.imageUrl } : {}),
-        },
-        apiUrl,
-      );
-      pruneDeadTokens(deadRefs); // best effort, en arrière-plan
-
-      await addDoc(collection(db, 'broadcasts'), {
-        title: ad.title,
-        body: ad.body,
-        deepLink: ad.deepLink,
-        channels: { push: true, inApp: false, email: false, sms: false },
-        targetRole: 'auto_ad_publish',
-        sentBy: authUser?.uid,
-        sentAt: Timestamp.now(),
-        recipientCount: uniqueTargets.length,
-        pushCount: successCount,
-        pushFailCount: failureCount,
-        pushPrunedCount: deadRefs.length,
-      }).catch(() => {}); // traçabilité, non bloquant
-
-      if (failureCount > 0) {
-        toast.info(`📲 Notification envoyée à ${successCount} appareil(s) — ${failureCount} échec(s)`);
-      } else if (successCount > 0) {
-        toast.info(`📲 Notification push envoyée à ${successCount} appareil(s)`);
-      }
-    } catch (e) {
-      // Ne doit JAMAIS faire échouer la publication de la promo/pub :
-      // l'erreur est journalisée seulement.
-      console.error('[Push auto] Erreur envoi notification promo/pub:', e);
-    }
-  };
-
   // Nombre d'appareils actuellement joignables — lecture légère, une seule
   // fois au montage, juste pour donner une idée de portée avant l'envoi.
   useEffect(() => {
@@ -2143,6 +2175,39 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
     return Object.entries(cats).map(([name,value]) => ({ name, value }));
   }, [products]);
 
+  // ── PRODUITS : recherche, filtre catégorie, tri, statistiques ──────
+  const productCategories = useMemo(
+    () => Array.from(new Set(products.map(p => p.category).filter(Boolean))).sort(),
+    [products]
+  );
+
+  const filteredProducts = useMemo(() => {
+    const q = productSearchQuery.trim().toLowerCase();
+    const list = products.filter(p => {
+      if (productCategoryFilter !== 'all' && p.category !== productCategoryFilter) return false;
+      if (!q) return true;
+      return p.name?.toLowerCase().includes(q) || p.sellerName?.toLowerCase().includes(q) || p.region?.toLowerCase().includes(q);
+    });
+    return [...list].sort((a, b) => {
+      switch (productSort) {
+        case 'stock-asc':  return (a.stock ?? 0) - (b.stock ?? 0);
+        case 'stock-desc': return (b.stock ?? 0) - (a.stock ?? 0);
+        case 'price-asc':  return (a.price ?? 0) - (b.price ?? 0);
+        case 'price-desc': return (b.price ?? 0) - (a.price ?? 0);
+        default:            return (a.name || '').localeCompare(b.name || '');
+      }
+    });
+  }, [products, productCategoryFilter, productSearchQuery, productSort]);
+
+  const productStats = useMemo(() => ({
+    total:      products.length,
+    totalValue: products.reduce((s,p) => s + (p.price || 0) * (p.stock || 0), 0),
+    lowStock:   products.filter(p => p.stock > 0 && p.stock < 5).length,
+    outOfStock: products.filter(p => p.stock === 0).length,
+    // Marge plateforme potentielle sur tout le catalogue en stock — admin uniquement.
+    marginValue: products.reduce((s,p) => s + computeAdminMargin(pricingByProduct[p.id!] ?? inferBasePrice(p.price || 0)) * (p.stock || 0), 0),
+  }), [products, pricingByProduct]);
+
   // ── KPIs ──────────────────────────────────────────────────
   const kpis = [
     { label:"Chiffre d'affaires",  value:totalRevenue,    change:12.4, icon:<TrendingUp size={20} color="#06b6d4"/>,  color:'#06b6d4' },
@@ -2158,7 +2223,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
     { id:'dashboard',      label:'Tableau de bord',  icon:<LayoutDashboard size={18}/>, badge:0 },
     { id:'orders',         label:'Commandes',         icon:<Package size={18}/>,         badge:orders.filter(o=>o.status==='en_attente').length },
     { id:'users',          label:'Utilisateurs',      icon:<Users size={18}/>,            badge:0 },
-    { id:'products',       label:'Produits',           icon:<Leaf size={18}/>,            badge:0 },
+    { id:'products',       label:'Produits',           icon:<Leaf size={18}/>,            badge:productStats.lowStock + productStats.outOfStock },
     { id:'loans',          label:'Financements',       icon:<Banknote size={18}/>,        badge:pendingLoans },
     { id:'analytics',      label:'Analyses IA',        icon:<Brain size={18}/>,           badge:0 },
     { id:'ai-assistant',   label:'Assistant DeepSeek',  icon:<Sparkles size={18}/>,        badge:0 },
@@ -2170,6 +2235,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
     { id:'reviews',        label:'Avis clients',         icon:<Star size={18}/>,            badge:reviews.filter(r=>r.rating<=2).length },
     { id:'notifications',  label:'Notifications',       icon:<BellRing size={18}/>,        badge:unreadCount },
     { id:'delivery',       label:'Livraisons',          icon:<Truck size={18}/>,           badge:0 },
+    { id:'logistics',      label:'Performance logistique', icon:<TrendingUp size={18}/>,   badge:0 },
     { id:'settings',       label:'Paramètres',          icon:<Settings size={18}/>,        badge:0 },
   ];
 
@@ -2210,7 +2276,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
           {/* Nav */}
           <nav style={{ padding:'12px', flex:1, overflowY:'auto', display:'flex', flexDirection:'column', gap:2 }}>
             {navItems.map(item => (
-              <div key={item.id} onClick={() => { setActiveTab(item.id); setCurrentPage(0); }} style={{
+              <div key={item.id} onClick={() => { if (item.id === 'logistics') { router.push('/admin/logistics'); return; } setActiveTab(item.id); setCurrentPage(0); }} style={{
                 display:'flex', alignItems:'center', gap:12, padding:'9px 12px',
                 borderRadius:12, cursor:'pointer',
                 background:activeTab===item.id?'rgba(16,185,129,.1)':'transparent',
@@ -2384,7 +2450,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                   <table style={{ width:'100%', borderCollapse:'collapse' }}>
                     <thead>
                       <tr style={{ borderBottom:'1px solid #1f2127' }}>
-                        {['N°','Client','Catégorie','Région','Montant','Commission','Statut','Actions'].map(h=>(
+                        {['N°','Client','Produit','Vendeur','Région','Montant','Commission','Statut','Actions'].map(h=>(
                           <th key={h} style={{ textAlign:'left', padding:'10px 8px', fontSize:11, color:'#6b7280' }}>{h}</th>
                         ))}
                       </tr>
@@ -2394,18 +2460,40 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                         <tr key={order.id} style={{ borderBottom:'1px solid #1a1c22' }}>
                           <td style={{ padding:'10px 8px', fontFamily:'monospace', fontSize:12, color:'#10b981' }}>{order.orderNumber}</td>
                           <td style={{ padding:'10px 8px', fontSize:13 }}>{order.userName ?? order.farmer ?? '—'}</td>
-                          <td style={{ padding:'10px 8px', fontSize:12, color:'#9ca3af' }}>
-                            {order.items?.[0]?.category
-                              ? `${order.items[0].category}${new Set(order.items.map(i=>i.category)).size > 1 ? ` +${new Set(order.items.map(i=>i.category)).size - 1}` : ''}`
-                              : (order.category ?? '—')}
+                          <td style={{ padding:'10px 8px', fontSize:13, maxWidth:220 }}>
+                            {order.items && order.items.length > 0 ? (
+                              <div style={{ display:'flex', flexDirection:'column', gap:2 }}>
+                                {order.items.slice(0,2).map((it,idx)=>(
+                                  <div key={idx} style={{ display:'flex', alignItems:'baseline', gap:5, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                                    <span style={{ fontWeight:600 }}>{it.productName ?? 'Produit inconnu'}</span>
+                                    <span style={{ color:'#6b7280', fontSize:11 }}>×{it.quantity ?? 1}</span>
+                                  </div>
+                                ))}
+                                {order.items.length > 2 && (
+                                  <span style={{ fontSize:11, color:'#6b7280' }}>+{order.items.length - 2} autre{order.items.length - 2 > 1 ? 's' : ''}</span>
+                                )}
+                              </div>
+                            ) : (order.category ?? '—')}
                           </td>
+                          <td style={{ padding:'10px 8px', fontSize:12 }}>{order.sellerName ?? order.farmer ?? '—'}</td>
                           <td style={{ padding:'10px 8px', fontSize:12 }}>{order.sellerRegion ?? order.region ?? '—'}</td>
                           <td style={{ padding:'10px 8px', fontWeight:600 }}>{(order.amount ?? 0).toLocaleString()} FCFA</td>
                           <td style={{ padding:'10px 8px', color:'#f59e0b', fontSize:12 }}>{Math.round((order.amount ?? 0)*COMMISSION_RATE).toLocaleString()} FCFA</td>
                           <td style={{ padding:'10px 8px' }}>
                             <StatusBadge status={order.status}/>
                             {order.delivererId && (
-                              <div style={{ fontSize:11, color:'#6b7280', marginTop:4 }}>🚴 {order.delivererName} · {order.delivererPhone}</div>
+                              <div style={{ fontSize:11, color:'#6b7280', marginTop:4 }}>
+                                🚴 {order.delivererName} · {order.delivererPhone}
+                                {order.tracking?.phase && (
+                                  <span style={{
+                                    marginLeft:6, padding:'1px 6px', borderRadius:6, fontSize:10, fontWeight:600,
+                                    background: order.tracking.phase === 'arrived' ? 'rgba(16,185,129,.15)' : 'rgba(6,182,212,.15)',
+                                    color: order.tracking.phase === 'arrived' ? '#10b981' : '#06b6d4',
+                                  }}>
+                                    {{ assigned: 'Attribué', en_route: 'En route', approaching: 'Proche', arrived: 'Arrivé' }[order.tracking.phase]}
+                                  </span>
+                                )}
+                              </div>
                             )}
                           </td>
                           <td style={{ padding:'10px 8px' }}>
@@ -2500,11 +2588,96 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
 
             {/* ═══ PRODUITS ═══════════════════════════════════ */}
             {activeTab === 'products' && (
-              <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(300px,1fr))', gap:16 }} className="animate-fadeIn">
-                {products.map(product => {
+              <div className="animate-fadeIn" style={{ display:'flex', flexDirection:'column', gap:20 }}>
+
+                {/* ── EN-TÊTE + STATS ─────────────────────────── */}
+                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-end', flexWrap:'wrap', gap:12 }}>
+                  <div>
+                    <h2 style={{ fontSize:22, fontWeight:700, display:'flex', alignItems:'center', gap:8 }}>
+                      <Leaf size={20} color="#10b981"/> Catalogue produits
+                    </h2>
+                    <p style={{ fontSize:12, color:'#6b7280', marginTop:2 }}>
+                      {filteredProducts.length} {filteredProducts.length>1?'produits affichés':'produit affiché'} sur {products.length} au total
+                    </p>
+                  </div>
+                </div>
+
+                <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(190px,1fr))', gap:14 }}>
+                  <div className="glass-card" style={{ padding:'16px 18px', display:'flex', alignItems:'center', gap:12 }}>
+                    <div style={{ width:40, height:40, borderRadius:12, background:'rgba(16,185,129,.15)', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+                      <Layers size={18} color="#10b981"/>
+                    </div>
+                    <div><div style={{ fontSize:20, fontWeight:700 }}>{productStats.total}</div><div style={{ fontSize:11, color:'#6b7280' }}>Produits référencés</div></div>
+                  </div>
+                  <div className="glass-card" style={{ padding:'16px 18px', display:'flex', alignItems:'center', gap:12 }}>
+                    <div style={{ width:40, height:40, borderRadius:12, background:'rgba(6,182,212,.15)', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+                      <DollarSign size={18} color="#06b6d4"/>
+                    </div>
+                    <div><div style={{ fontSize:20, fontWeight:700 }}>{productStats.totalValue.toLocaleString()}</div><div style={{ fontSize:11, color:'#6b7280' }}>Valeur du stock (FCFA)</div></div>
+                  </div>
+                  <div className="glass-card" style={{ padding:'16px 18px', display:'flex', alignItems:'center', gap:12 }}>
+                    <div style={{ width:40, height:40, borderRadius:12, background:'rgba(245,158,11,.15)', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+                      <Banknote size={18} color="#f59e0b"/>
+                    </div>
+                    <div><div style={{ fontSize:20, fontWeight:700 }}>{productStats.marginValue.toLocaleString()}</div><div style={{ fontSize:11, color:'#6b7280' }}>Marge plateforme potentielle (FCFA)</div></div>
+                  </div>
+                  <div className="glass-card" style={{ padding:'16px 18px', display:'flex', alignItems:'center', gap:12, borderColor:productStats.lowStock>0?'rgba(245,158,11,.35)':undefined }}>
+                    <div style={{ width:40, height:40, borderRadius:12, background:'rgba(245,158,11,.15)', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+                      <AlertTriangle size={18} color="#f59e0b"/>
+                    </div>
+                    <div><div style={{ fontSize:20, fontWeight:700, color:productStats.lowStock>0?'#f59e0b':undefined }}>{productStats.lowStock}</div><div style={{ fontSize:11, color:'#6b7280' }}>Stock faible (&lt;5)</div></div>
+                  </div>
+                  <div className="glass-card" style={{ padding:'16px 18px', display:'flex', alignItems:'center', gap:12, borderColor:productStats.outOfStock>0?'rgba(239,68,68,.35)':undefined }}>
+                    <div style={{ width:40, height:40, borderRadius:12, background:'rgba(239,68,68,.15)', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+                      <PackageX size={18} color="#ef4444"/>
+                    </div>
+                    <div><div style={{ fontSize:20, fontWeight:700, color:productStats.outOfStock>0?'#ef4444':undefined }}>{productStats.outOfStock}</div><div style={{ fontSize:11, color:'#6b7280' }}>En rupture</div></div>
+                  </div>
+                </div>
+
+                {/* ── BARRE DE RECHERCHE / FILTRES / TRI ──────── */}
+                <div className="glass-card" style={{ padding:14, display:'flex', flexWrap:'wrap', gap:10, alignItems:'center' }}>
+                  <div style={{ position:'relative', flex:'1 1 220px' }}>
+                    <Search size={15} style={{ position:'absolute', left:12, top:'50%', transform:'translateY(-50%)', color:'#6b7280' }}/>
+                    <input
+                      value={productSearchQuery}
+                      onChange={e=>setProductSearchQuery(e.target.value)}
+                      placeholder="Rechercher un produit, un vendeur, une région…"
+                      style={{ paddingLeft:36 }}
+                    />
+                  </div>
+                  <div style={{ position:'relative', flex:'0 1 190px' }}>
+                    <Filter size={14} style={{ position:'absolute', left:12, top:'50%', transform:'translateY(-50%)', color:'#6b7280', pointerEvents:'none' }}/>
+                    <select value={productCategoryFilter} onChange={e=>setProductCategoryFilter(e.target.value)} style={{ paddingLeft:32, appearance:'none' }}>
+                      <option value="all">Toutes les catégories</option>
+                      {productCategories.map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </div>
+                  <div style={{ position:'relative', flex:'0 1 190px' }}>
+                    <ArrowUpDown size={14} style={{ position:'absolute', left:12, top:'50%', transform:'translateY(-50%)', color:'#6b7280', pointerEvents:'none' }}/>
+                    <select value={productSort} onChange={e=>setProductSort(e.target.value as typeof productSort)} style={{ paddingLeft:32, appearance:'none' }}>
+                      <option value="name">Trier : Nom (A-Z)</option>
+                      <option value="stock-asc">Trier : Stock croissant</option>
+                      <option value="stock-desc">Trier : Stock décroissant</option>
+                      <option value="price-asc">Trier : Prix croissant</option>
+                      <option value="price-desc">Trier : Prix décroissant</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* ── GRILLE DE PRODUITS ───────────────────────── */}
+                <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(300px,1fr))', gap:16 }}>
+                {filteredProducts.map(product => {
                   const isEditing = editingProductId === product.id;
+                  const cat = categoryStyle(product.category);
+                  const isOut = product.stock === 0;
+                  const isLow = !isOut && product.stock < 5;
+                  const stockColor = isOut ? '#ef4444' : isLow ? '#f59e0b' : '#10b981';
                   return (
-                  <div key={product.id} className="glass-card" style={{ padding:16 }}>
+                  <div key={product.id} className="glass-card" style={{ padding:0, overflow:'hidden', position:'relative' }}>
+                    {/* Liseré de couleur par catégorie */}
+                    <div style={{ height:4, width:'100%', background:`linear-gradient(90deg, ${cat.color}, ${cat.color}00)` }}/>
+                    <div style={{ padding:16 }}>
                     {isEditing ? (
                       <>
                         <div style={{ display:'flex', flexDirection:'column', gap:8, marginBottom:12 }}>
@@ -2517,10 +2690,21 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                               style={{ padding:'8px 10px', borderRadius:8, border:'1px solid rgba(255,255,255,0.12)', background:'rgba(255,255,255,0.05)', color:'#fff', fontSize:12 }} />
                           </div>
                           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
-                            <input type="number" value={productEditForm.price} onChange={e=>setProductEditForm(f=>({...f,price:Number(e.target.value)}))} placeholder="Prix (FCFA)"
-                              style={{ padding:'8px 10px', borderRadius:8, border:'1px solid rgba(255,255,255,0.12)', background:'rgba(255,255,255,0.05)', color:'#fff', fontSize:12 }} />
+                            <div>
+                              <input type="number" value={productEditForm.basePrice} onChange={e=>setProductEditForm(f=>({...f,basePrice:Number(e.target.value)}))} placeholder="Prix vendeur (FCFA)"
+                                style={{ width:'100%', padding:'8px 10px', borderRadius:8, border:'1px solid rgba(255,255,255,0.12)', background:'rgba(255,255,255,0.05)', color:'#fff', fontSize:12 }} />
+                              <div style={{ fontSize:10, color:'#6b7280', marginTop:3 }}>Ce que le vendeur reçoit</div>
+                            </div>
                             <input type="number" value={productEditForm.stock} onChange={e=>setProductEditForm(f=>({...f,stock:Number(e.target.value)}))} placeholder="Stock"
                               style={{ padding:'8px 10px', borderRadius:8, border:'1px solid rgba(255,255,255,0.12)', background:'rgba(255,255,255,0.05)', color:'#fff', fontSize:12 }} />
+                          </div>
+                          {/* Aperçu admin-only : prix affiché + marge — jamais visible du vendeur/acheteur */}
+                          <div style={{ padding:'8px 10px', borderRadius:8, background:'rgba(16,185,129,.08)', border:'1px solid rgba(16,185,129,.2)', display:'flex', justifyContent:'space-between', alignItems:'center', fontSize:11 }}>
+                            <span style={{ color:'#6b7280' }}>Prix affiché (acheteur + vendeur)</span>
+                            <span style={{ fontWeight:700, color:'#10b981' }}>{computeDisplayPrice(productEditForm.basePrice).toLocaleString()} FCFA</span>
+                          </div>
+                          <div style={{ padding:'2px 10px', fontSize:10, color:'#6b7280' }}>
+                            Marge admin : {computeAdminMargin(productEditForm.basePrice).toLocaleString()} FCFA ({Math.round(ADMIN_MARGIN_RATE*100)}%)
                           </div>
                         </div>
                         <div style={{ display:'flex', gap:8 }}>
@@ -2530,21 +2714,47 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                       </>
                     ) : (
                       <>
-                        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:10 }}>
-                          <div><span style={{ fontSize:11, color:'#6b7280' }}>{product.category}</span><h3 style={{ fontSize:15, fontWeight:600, marginTop:3 }}>{product.name}</h3></div>
-                          <span style={{ fontSize:17, fontWeight:700, color:'#10b981', whiteSpace:'nowrap' }}>{product.price.toLocaleString()} FCFA</span>
+                        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:10, gap:10 }}>
+                          <div style={{ display:'flex', gap:10, alignItems:'flex-start', minWidth:0 }}>
+                            <div style={{ width:38, height:38, borderRadius:11, background:`${cat.color}20`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:18, flexShrink:0 }}>
+                              {cat.emoji}
+                            </div>
+                            <div style={{ minWidth:0 }}>
+                              <span style={{ fontSize:11, color:'#6b7280' }}>{product.category || 'Sans catégorie'}</span>
+                              <h3 style={{ fontSize:15, fontWeight:600, marginTop:2, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{product.name}</h3>
+                            </div>
+                          </div>
+                          <div style={{ textAlign:'right', flexShrink:0 }}>
+                            <span style={{ fontSize:17, fontWeight:700, color:'#10b981', whiteSpace:'nowrap' }}>{product.price.toLocaleString()} FCFA</span>
+                            {product.unit && <div style={{ fontSize:10, color:'#6b7280' }}>/ {product.unit}</div>}
+                          </div>
                         </div>
+
+                        {/* Détail réservé à l'admin : jamais montré au vendeur ni à l'acheteur */}
+                        <div style={{ display:'flex', justifyContent:'space-between', marginBottom:10, padding:'6px 10px', borderRadius:8, background:'rgba(255,255,255,0.03)', fontSize:11 }}>
+                          <span style={{ color:'#6b7280' }}>Prix vendeur : {(pricingByProduct[product.id!] ?? inferBasePrice(product.price)).toLocaleString()} FCFA</span>
+                          <span style={{ color:'#f59e0b', fontWeight:600 }}>+{computeAdminMargin(pricingByProduct[product.id!] ?? inferBasePrice(product.price)).toLocaleString()} FCFA marge</span>
+                        </div>
+
+                        {(isOut || isLow) && (
+                          <div style={{ marginBottom:10 }}>
+                            <span style={{ display:'inline-flex', alignItems:'center', gap:5, padding:'3px 9px', borderRadius:20, fontSize:10, fontWeight:600, background:`${stockColor}18`, color:stockColor }}>
+                              <AlertTriangle size={11}/> {isOut ? 'Rupture de stock' : 'Stock faible'}
+                            </span>
+                          </div>
+                        )}
+
                         <div style={{ display:'flex', justifyContent:'space-between', marginBottom:10, fontSize:12, color:'#6b7280' }}>
                           <span>📍 {product.region}</span>
-                          <span>👤 {product.sellerName}</span>
+                          <span style={{ overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', maxWidth:140 }}>👤 {product.sellerName}</span>
                         </div>
                         <div style={{ marginBottom:14 }}>
                           <div style={{ display:'flex', justifyContent:'space-between', marginBottom:4, fontSize:12 }}>
                             <span>Stock</span>
-                            <span style={{ fontWeight:600, color:product.stock<5?'#ef4444':'#10b981' }}>{product.stock} unités</span>
+                            <span style={{ fontWeight:600, color:stockColor }}>{product.stock} unités</span>
                           </div>
-                          <div style={{ height:4, background:'#1f2127', borderRadius:2 }}>
-                            <div style={{ width:`${Math.min(100,(product.stock/100)*100)}%`, height:'100%', background:product.stock<5?'#ef4444':'#10b981', borderRadius:2, transition:'width .3s' }}/>
+                          <div style={{ height:5, background:'#1f2127', borderRadius:3, overflow:'hidden' }}>
+                            <div style={{ width:`${Math.min(100,(product.stock/100)*100)}%`, height:'100%', background:`linear-gradient(90deg, ${stockColor}, ${stockColor}bb)`, borderRadius:3, transition:'width .3s' }}/>
                           </div>
                         </div>
                         <div style={{ display:'flex', gap:8, marginBottom:8 }}>
@@ -2557,12 +2767,25 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                         </div>
                       </>
                     )}
+                    </div>
                   </div>
                   );
                 })}
-                {products.length === 0 && (
-                  <div className="glass-card" style={{ padding:40, textAlign:'center', gridColumn:'1/-1', color:'#6b7280' }}>Aucun produit trouvé</div>
+                {filteredProducts.length === 0 && products.length > 0 && (
+                  <div className="glass-card" style={{ padding:40, textAlign:'center', gridColumn:'1/-1', color:'#6b7280' }}>
+                    <Search size={28} style={{ opacity:.4, marginBottom:10 }}/>
+                    <div style={{ fontWeight:600, color:'#9ca3af', marginBottom:4 }}>Aucun résultat</div>
+                    <div style={{ fontSize:12 }}>Aucun produit ne correspond à votre recherche ou filtre.</div>
+                  </div>
                 )}
+                {products.length === 0 && (
+                  <div className="glass-card" style={{ padding:40, textAlign:'center', gridColumn:'1/-1', color:'#6b7280' }}>
+                    <Leaf size={28} style={{ opacity:.4, marginBottom:10 }}/>
+                    <div style={{ fontWeight:600, color:'#9ca3af', marginBottom:4 }}>Aucun produit trouvé</div>
+                    <div style={{ fontSize:12 }}>Les produits publiés par les vendeurs apparaîtront ici.</div>
+                  </div>
+                )}
+                </div>
               </div>
             )}
 
@@ -3512,19 +3735,23 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
 
                 {/* Form */}
                 <div className="glass-card" style={{ padding:24 }}>
-                  <h2 style={{ fontSize:18, fontWeight:700, marginBottom:4 }}>📢 Envoyer un message</h2>
+                  <h2 style={{ fontSize:18, fontWeight:700, marginBottom:4, display:'flex', alignItems:'center', gap:8 }}>
+                    <Send size={18} color="#10b981"/> Envoyer un message
+                  </h2>
                   <p style={{ fontSize:12, color:'#6b7280', marginBottom:20 }}>Diffusez aux utilisateurs via notifications in-app et email (Resend).</p>
 
                   {/* Cible */}
                   <div style={{ marginBottom:20, padding:16, background:'rgba(16,185,129,.05)', borderRadius:12, border:'1px solid rgba(16,185,129,.15)' }}>
-                    <h4 style={{ fontSize:13, fontWeight:600, marginBottom:12, color:'#10b981' }}>🎯 Audience cible</h4>
+                    <h4 style={{ fontSize:13, fontWeight:600, marginBottom:12, color:'#10b981', display:'flex', alignItems:'center', gap:6 }}>
+                      <Target size={14}/> Audience cible
+                    </h4>
 
                     {/* Mode switcher */}
                     <div style={{ display:'flex', gap:8, marginBottom:14 }}>
-                      {([['filter','🔍 Par critères'],['manual','✅ Sélection manuelle']] as const).map(([mode,label])=>(
+                      {([['filter',<Search key="i" size={13}/>,'Par critères'],['manual',<CheckCircle key="i" size={13}/>,'Sélection manuelle']] as const).map(([mode,icon,label])=>(
                         <button key={mode} onClick={()=>{ setBroadcastMode(mode); setSelectedUserIds(new Set()); setUserPickerSearch(''); }}
-                          style={{ flex:1, padding:'8px 0', borderRadius:10, border:`1px solid ${broadcastMode===mode?'#10b981':'rgba(255,255,255,.08)'}`, background:broadcastMode===mode?'rgba(16,185,129,.1)':'transparent', color:broadcastMode===mode?'#10b981':'#6b7280', fontSize:12, fontWeight:600, cursor:'pointer', transition:'all .2s' }}>
-                          {label}
+                          style={{ flex:1, display:'inline-flex', alignItems:'center', justifyContent:'center', gap:6, padding:'8px 0', borderRadius:10, border:`1px solid ${broadcastMode===mode?'#10b981':'rgba(255,255,255,.08)'}`, background:broadcastMode===mode?'rgba(16,185,129,.1)':'transparent', color:broadcastMode===mode?'#10b981':'#6b7280', fontSize:12, fontWeight:600, cursor:'pointer', transition:'all .2s' }}>
+                          {icon}{label}
                         </button>
                       ))}
                     </div>
@@ -3550,12 +3777,13 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                             </select>
                           </div>
                         </div>
-                        <div style={{ marginTop:10, padding:'8px 12px', background:'#1f2127', borderRadius:8, fontSize:12, color:'#9ca3af' }}>
+                        <div style={{ marginTop:10, padding:'8px 12px', background:'#1f2127', borderRadius:8, fontSize:12, color:'#9ca3af', display:'flex', alignItems:'center', gap:6 }}>
+                          <Users size={13}/>
                           {(() => {
                             let count = users.length;
                             if (broadcastForm.targetRole !== 'all') count = users.filter(u=>u.role===broadcastForm.targetRole).length;
                             if (broadcastForm.targetRegion !== 'all') count = users.filter(u=>(broadcastForm.targetRole==='all'||u.role===broadcastForm.targetRole)&&u.region?.toLowerCase()===broadcastForm.targetRegion.toLowerCase()).length;
-                            return `👥 ${count} destinataire(s) sélectionné(s)`;
+                            return `${count} destinataire(s) sélectionné(s)`;
                           })()}
                         </div>
                       </>
@@ -3607,7 +3835,9 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                         {/* Chips sélectionnés */}
                         {selectedUserIds.size > 0 && (
                           <div style={{ marginTop:10, padding:'8px 12px', background:'#1f2127', borderRadius:8 }}>
-                            <div style={{ fontSize:11, color:'#10b981', fontWeight:600, marginBottom:6 }}>✅ {selectedUserIds.size} destinataire(s) sélectionné(s)</div>
+                            <div style={{ fontSize:11, color:'#10b981', fontWeight:600, marginBottom:6, display:'flex', alignItems:'center', gap:6 }}>
+                              <CheckCircle size={13}/> {selectedUserIds.size} destinataire(s) sélectionné(s)
+                            </div>
                             <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
                               {Array.from(selectedUserIds).slice(0,8).map(uid=>{
                                 const u = users.find(x=>(x.uid??x.id)===uid);
@@ -3628,11 +3858,14 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
 
                   {/* Canaux */}
                   <div style={{ marginBottom:20, padding:16, background:'rgba(6,182,212,.05)', borderRadius:12, border:'1px solid rgba(6,182,212,.15)' }}>
-                    <h4 style={{ fontSize:13, fontWeight:600, marginBottom:12, color:'#06b6d4' }}>📡 Canaux d'envoi</h4>
+                    <h4 style={{ fontSize:13, fontWeight:600, marginBottom:12, color:'#06b6d4', display:'flex', alignItems:'center', gap:6 }}>
+                      <RadioTower size={14}/> Canaux d'envoi
+                    </h4>
                     <div style={{ display:'flex', gap:12, flexWrap:'wrap' }}>
-                      {([['inApp','🔔 In-App','10b981'],['email','✉️ Email','8b5cf6'],['push','📲 Push','f59e0b'],['sms','💬 SMS','06b6d4']] as const).map(([key,label,color])=>(
+                      {([['inApp',<Bell key="i" size={14}/>,'In-App','10b981'],['email',<Mail key="i" size={14}/>,'Email','8b5cf6'],['push',<Smartphone key="i" size={14}/>,'Push','f59e0b'],['sms',<MessageSquare key="i" size={14}/>,'SMS','06b6d4']] as const).map(([key,icon,label,color])=>(
                         <label key={key} style={{ display:'flex', alignItems:'center', gap:8, cursor:'pointer', padding:'8px 14px', borderRadius:10, border:`1px solid ${broadcastForm.channels[key]?`#${color}`:'rgba(255,255,255,.08)'}`, background:broadcastForm.channels[key]?`rgba(${key==='inApp'?'16,185,129':key==='email'?'139,92,246':key==='push'?'245,158,11':'6,182,212'},.1)`:'transparent', transition:'all .2s', width:'auto' }}>
                           <input type="checkbox" checked={broadcastForm.channels[key]} onChange={e=>setBroadcastForm({...broadcastForm,channels:{...broadcastForm.channels,[key]:e.target.checked}})} style={{ width:'auto', cursor:'pointer' }}/>
+                          <span style={{ color:`#${color}`, display:'inline-flex' }}>{icon}</span>
                           <span style={{ fontSize:13, fontWeight:500 }}>{label}</span>
                         </label>
                       ))}
@@ -3680,7 +3913,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                     </div>
                     <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:12 }}>
                       <input type="checkbox" id="urgent" checked={broadcastForm.urgent} onChange={e=>setBroadcastForm({...broadcastForm,urgent:e.target.checked})} style={{ width:'auto', cursor:'pointer' }}/>
-                      <label htmlFor="urgent" style={{ fontSize:13, cursor:'pointer' }}>⚡ Message urgent</label>
+                      <label htmlFor="urgent" style={{ fontSize:13, cursor:'pointer', display:'inline-flex', alignItems:'center', gap:6 }}><Zap size={13} color="#f59e0b"/> Message urgent</label>
                     </div>
                   </div>
 
@@ -3706,7 +3939,9 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                 {/* History */}
                 <div>
                   <div className="glass-card" style={{ padding:20 }}>
-                    <h3 style={{ fontSize:15, fontWeight:600, marginBottom:16 }}>📋 Historique des envois</h3>
+                    <h3 style={{ fontSize:15, fontWeight:600, marginBottom:16, display:'flex', alignItems:'center', gap:8 }}>
+                      <History size={16} color="#8b5cf6"/> Historique des envois
+                    </h3>
                     <div style={{ maxHeight:600, overflowY:'auto', display:'flex', flexDirection:'column', gap:8 }}>
                       {broadcastHistory.length === 0
                         ? <div style={{ textAlign:'center', padding:30, color:'#4b5563', fontSize:13 }}>Aucun envoi pour le moment</div>
@@ -3722,11 +3957,11 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                                 </div>
                               </div>
                               <div style={{ display:'flex', gap:8, marginTop:10, flexWrap:'wrap' }}>
-                                <span style={{ fontSize:10, padding:'3px 8px', borderRadius:20, background:'rgba(16,185,129,.1)', color:'#10b981' }}>👥 {b.recipientCount}</span>
-                                {b.inAppCount>0   && <span style={{ fontSize:10, padding:'3px 8px', borderRadius:20, background:'rgba(6,182,212,.1)',   color:'#06b6d4' }}>🔔 {b.inAppCount}</span>}
-                                {b.emailCount>0    && <span style={{ fontSize:10, padding:'3px 8px', borderRadius:20, background:'rgba(139,92,246,.1)',   color:'#8b5cf6' }}>✉️ {b.emailCount}</span>}
-                                {b.pushCount>0     && <span style={{ fontSize:10, padding:'3px 8px', borderRadius:20, background:'rgba(245,158,11,.1)',  color:'#f59e0b' }}>📲 {b.pushCount}</span>}
-                                {b.emailCount>0   && <span style={{ fontSize:10, padding:'3px 8px', borderRadius:20, background:'rgba(139,92,246,.1)',   color:'#8b5cf6' }}>✉ {b.emailCount}</span>}
+                                <span style={{ display:'inline-flex', alignItems:'center', gap:4, fontSize:10, padding:'3px 8px', borderRadius:20, background:'rgba(16,185,129,.1)', color:'#10b981' }}><Users size={10}/> {b.recipientCount}</span>
+                                {b.inAppCount>0 && <span style={{ display:'inline-flex', alignItems:'center', gap:4, fontSize:10, padding:'3px 8px', borderRadius:20, background:'rgba(6,182,212,.1)',  color:'#06b6d4' }}><Bell size={10}/> {b.inAppCount}</span>}
+                                {b.emailCount>0 && <span style={{ display:'inline-flex', alignItems:'center', gap:4, fontSize:10, padding:'3px 8px', borderRadius:20, background:'rgba(139,92,246,.1)', color:'#8b5cf6' }}><Mail size={10}/> {b.emailCount}</span>}
+                                {b.pushCount>0  && <span style={{ display:'inline-flex', alignItems:'center', gap:4, fontSize:10, padding:'3px 8px', borderRadius:20, background:'rgba(245,158,11,.1)', color:'#f59e0b' }}><Smartphone size={10}/> {b.pushCount}</span>}
+                                {b.smsCount>0   && <span style={{ display:'inline-flex', alignItems:'center', gap:4, fontSize:10, padding:'3px 8px', borderRadius:20, background:'rgba(6,182,212,.1)',   color:'#06b6d4' }}><MessageSquare size={10}/> {b.smsCount}</span>}
                               </div>
                               <div style={{ fontSize:10, color:'#4b5563', marginTop:6 }}>
                                 {b.sentAt?.toDate?.().toLocaleString?.() ?? ''}
@@ -4764,7 +4999,11 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                                   subtitle: `${selectedProduct.category} · ${selectedProduct.region ?? ''}`,
                                   badge: promoForm.badge,
                                   imageUrl: selectedProduct.images?.[0] ?? '',
-                                  linkUrl: `/main/products?id=${promoForm.productId}`,
+                                  // ⚠️ FIX : `/main/products?id=…` ne menait nulle part de précis
+                                  // (le paramètre `id` n'est lu par aucune page). On pointe
+                                  // maintenant vers la catégorie complète du produit, comme
+                                  // Jumia/Alibaba le font pour leurs bannières promo.
+                                  linkUrl: categoryLink(selectedProduct.category),
                                   placement: promoForm.placement,
                                   active: promoForm.active,
                                   priority: promoForm.priority,
@@ -4784,16 +5023,6 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                                     createdBy: authUser?.uid,
                                   });
                                   toast.success('🔥 Promotion publiée avec succès');
-                                  // Notification push auto (fire-and-forget, ne bloque pas l'UI) —
-                                  // uniquement si la promo est publiée active immédiatement.
-                                  if (promoForm.active) {
-                                    notifyNewAdPush({
-                                      title: `${promoForm.badge || '🔥 PROMO'} ${selectedProduct.name}`,
-                                      body: `-${promoForm.discountPercent}% dès maintenant sur ${selectedProduct.name} !`,
-                                      deepLink: `/main/products?id=${promoForm.productId}`,
-                                      imageUrl: selectedProduct.images?.[0],
-                                    });
-                                  }
                                 }
                                 setEditingPromoId(null);
                                 setPromoForm({ productId:'', discountPercent:20, badge:'🔥 PROMO', placement:'banner', active:true, priority:0 });
@@ -4979,12 +5208,29 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                           />
                         </div>
 
+                        {/* Catégorie liée (optionnel) — pré-remplit le lien ci-dessous avec
+                            /category?category=... afin que la bannière conduise vers toute
+                            la catégorie du partenaire, comme Jumia/Alibaba */}
+                        <div style={{ gridColumn:'1/-1' }}>
+                          <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#8b5cf6', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>Catégorie liée (optionnel)</label>
+                          <select
+                            style={{ background:'#111317', border:'1px solid rgba(139,92,246,0.25)', borderRadius:10, padding:12, color:'#fff', width:'100%', fontSize:13, outline:'none' }}
+                            defaultValue=""
+                            onChange={e=>{ if (e.target.value) setPubForm({...pubForm, linkUrl: categoryLink(e.target.value)}); }}
+                          >
+                            <option value="">— Choisir une catégorie pour pré-remplir le lien —</option>
+                            {Array.from(new Set(products.map(p=>p.category).filter(Boolean))).sort().map(cat=>(
+                              <option key={cat} value={cat}>{cat}</option>
+                            ))}
+                          </select>
+                        </div>
+
                         {/* Lien au clic */}
                         <div>
                           <label style={{ display:'block', fontSize:11, fontWeight:600, color:'#8b5cf6', letterSpacing:1, textTransform:'uppercase', marginBottom:6 }}>Lien (au clic)</label>
                           <input
                             style={{ background:'rgba(255,255,255,0.05)', border:'1px solid rgba(139,92,246,0.25)', borderRadius:10, padding:12, color:'#fff', width:'100%', fontSize:13, outline:'none' }}
-                            placeholder="https://partenaire.com ou /main/products"
+                            placeholder="https://partenaire.com ou /category?category=riz"
                             value={pubForm.linkUrl}
                             onChange={e=>setPubForm({...pubForm, linkUrl:e.target.value})}
                           />
@@ -5099,16 +5345,6 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                                   createdBy: authUser?.uid,
                                 });
                                 toast.success('🖼️ Bannière partenaire publiée !');
-                                // Notification push auto (fire-and-forget, ne bloque pas l'UI) —
-                                // uniquement si la bannière est publiée active immédiatement.
-                                if (pubForm.active) {
-                                  notifyNewAdPush({
-                                    title: `📢 ${pubForm.title || pubForm.partnerName}`,
-                                    body: `Nouvelle offre partenaire : ${pubForm.partnerName}`,
-                                    deepLink: pubForm.linkUrl || '/',
-                                    imageUrl: downloadURL,
-                                  });
-                                }
                               }
                               setEditingPubId(null);
                               setEditingPubOldPath(null);

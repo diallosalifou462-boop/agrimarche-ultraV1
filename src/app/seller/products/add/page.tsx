@@ -5,8 +5,9 @@ import { useRouter } from 'next/navigation';
 import Image from 'next/image';
 import { auth, db } from '@/lib/firebase/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
-import { collection, addDoc, serverTimestamp, doc, getDoc } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp, doc, getDoc, setDoc } from 'firebase/firestore';
 import { notifyAllUsers } from '@/lib/notifications/notifyUser';
+import { computeDisplayPrice } from '@/lib/pricing';
 // Firebase Storage remplacé par Cloudinary
 import {
   ArrowLeft, Plus, X, Loader2, CheckCircle, XCircle,
@@ -214,10 +215,18 @@ export default function AddProductPage() {
       console.log('stock is int?', Number.isInteger(form.stock ? Number(form.stock) : null));
       console.log('name:', form.name.trim(), 'length:', form.name.trim().length);
 
+      // Le vendeur saisit le montant qu'il souhaite recevoir (basePrice).
+      // Le prix réellement affiché partout dans l'app (catalogue, panier,
+      // commande, et au vendeur lui-même) inclut automatiquement la marge
+      // plateforme — voir src/lib/pricing.ts. Le vendeur n'a pas à s'en
+      // préoccuper : il a déjà donné son accord en devenant vendeur.
+      const sellerBasePrice = Number(form.price);
+      const displayPrice = computeDisplayPrice(sellerBasePrice);
+
       const newProductRef = await addDoc(collection(db, 'products'), {
         name:          form.name.trim(),
         description:   form.description.trim(),
-        price:         Number(form.price),
+        price:         displayPrice,
         unit:          form.unit,
         category:      form.category,
         // stock: null = illimité (voir placeholder "Laisser vide = illimité")
@@ -235,12 +244,28 @@ export default function AddProductPage() {
         updatedAt:     serverTimestamp(),
       });
 
+      // Prix vendeur brut stocké à part, dans une sous-collection lisible
+      // UNIQUEMENT par l'admin (voir règles Firestore) — ni le vendeur ni
+      // l'acheteur ne peuvent le lire, même via les outils développeur,
+      // puisque le document public `products/{id}` ne contient plus que le
+      // prix final affiché. Best-effort : si ça échoue, l'admin retombera
+      // sur une valeur reconstituée (inferBasePrice) plutôt que de bloquer
+      // la publication du produit pour le vendeur.
+      try {
+        await setDoc(doc(db, 'products', newProductRef.id, 'productPricing', 'base'), {
+          basePrice: sellerBasePrice,
+          createdAt: serverTimestamp(),
+        });
+      } catch (pricingErr) {
+        console.error('Échec écriture productPricing (non bloquant) :', pricingErr);
+      }
+
       // Notifier tout le monde qu'un nouveau produit est disponible.
       // Best-effort : ne bloque jamais la publication du vendeur si ça échoue.
       notifyAllUsers({
         type: 'promotion',
         title: '🌾 Nouveau produit disponible !',
-        body: `${form.name.trim()} par ${sellerInfo.name} — ${Number(form.price).toLocaleString('fr-FR')} FCFA/${form.unit}`,
+        body: `${form.name.trim()} par ${sellerInfo.name} — ${displayPrice.toLocaleString('fr-FR')} FCFA/${form.unit}`,
         link: `/product?id=${newProductRef.id}`,
         excludeUserId: userId,
       });
@@ -534,12 +559,13 @@ export default function AddProductPage() {
             </div>
           </div>
 
-          {/* Prix affiché */}
+          {/* Prix affiché — c'est ce montant (et uniquement celui-ci) que verront
+              l'acheteur ET le vendeur partout dans l'app. */}
           {form.price && Number(form.price) > 0 && (
             <div className="bg-emerald-50 dark:bg-emerald-900/20 rounded-xl px-4 py-3 flex items-center justify-between">
               <span className="text-xs text-emerald-600 dark:text-emerald-400 font-medium">Prix affiché</span>
               <span className="text-lg font-black text-emerald-700 dark:text-emerald-300">
-                {Number(form.price).toLocaleString()} FCFA
+                {computeDisplayPrice(Number(form.price)).toLocaleString()} FCFA
                 <span className="text-xs font-normal ml-1 opacity-70">/{form.unit}</span>
               </span>
             </div>

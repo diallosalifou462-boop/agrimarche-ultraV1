@@ -6,6 +6,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { useEffect, useState } from 'react';
 import { collection, getDocs, limit, orderBy, query, where } from 'firebase/firestore';
 import { db, waitForFirestoreReady } from '@/lib/firebase/firebase';
+import { categoryLink } from '@/lib/categoryLink';
 
 // ⚠️ FIX (cohérence système) : même filet de sécurité que useCart.tsx /
 // userProfile.ts — getDocs() n'a par lui-même aucune limite de temps.
@@ -329,6 +330,7 @@ export default function CartPage() {
           const images = item.product.images ?? [];
           const productValue = item.product.price * item.quantity;
           const isLast = idx === cart.items.length - 1;
+          const goToCategory = () => router.push(categoryLink(item.product.category));
           
           return (
             <div
@@ -337,8 +339,13 @@ export default function CartPage() {
               style={{ animationDelay: `${idx * 100}ms` }}
             >
               <div className="flex gap-5">
-                {/* Image */}
-                <div className="relative w-24 h-24 flex-shrink-0">
+                {/* Image — cliquer conduit vers la catégorie du produit (comme Jumia/Alibaba) */}
+                <button
+                  type="button"
+                  onClick={goToCategory}
+                  className="relative w-24 h-24 flex-shrink-0 text-left cursor-pointer"
+                  aria-label={`Voir la catégorie ${item.product.category || ''}`}
+                >
                   <div className="absolute inset-0 bg-gradient-to-br from-emerald-100 to-green-100 rounded-xl blur-sm opacity-0 group-hover:opacity-40 transition-opacity duration-500" />
                   <div className="relative w-full h-full bg-gradient-to-br from-emerald-50 to-green-50 rounded-xl overflow-hidden shadow-md">
                     {images[0] ? (
@@ -353,32 +360,35 @@ export default function CartPage() {
                       </div>
                     )}
                   </div>
-                </div>
+                </button>
 
                 {/* Infos */}
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-[6px] text-emerald-500">✦</span>
-                    <span className="text-[7px] font-light text-emerald-600 uppercase tracking-[1px]">{item.product.category || 'PRODUIT'}</span>
-                  </div>
-                  <h3 className="font-medium text-gray-800 text-base truncate">
-                    {item.product.name}
-                  </h3>
-                  <p className="text-[8px] text-gray-400 mt-1">
-                    {item.product.farmer || item.product.sellerName || 'Producteur local'}
-                    {item.product.farmerVerified && (
-                      <span className="ml-2 text-[6px] bg-emerald-100 text-emerald-600 px-1.5 py-0.5 rounded-full">Vérifié</span>
-                    )}
-                  </p>
-                  <div className="mt-2">
-                    {item.product.originalPrice && item.product.originalPrice > item.product.price && (
-                      <p className="text-gray-400 text-xs line-through">{formatPrice(item.product.originalPrice)}</p>
-                    )}
-                    <p className="text-emerald-600 font-medium text-base">
-                      {formatPrice(item.product.price)}
-                      <span className="text-[7px] font-light text-gray-400 ml-1">/{item.product.unit}</span>
+                  {/* Catégorie + nom + prix cliquables → même destination que l'image */}
+                  <button type="button" onClick={goToCategory} className="text-left w-full cursor-pointer">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-[6px] text-emerald-500">✦</span>
+                      <span className="text-[7px] font-light text-emerald-600 uppercase tracking-[1px] hover:underline">{item.product.category || 'PRODUIT'}</span>
+                    </div>
+                    <h3 className="font-medium text-gray-800 text-base truncate">
+                      {item.product.name}
+                    </h3>
+                    <p className="text-[8px] text-gray-400 mt-1">
+                      {item.product.farmer || item.product.sellerName || 'Producteur local'}
+                      {item.product.farmerVerified && (
+                        <span className="ml-2 text-[6px] bg-emerald-100 text-emerald-600 px-1.5 py-0.5 rounded-full">Vérifié</span>
+                      )}
                     </p>
-                  </div>
+                    <div className="mt-2">
+                      {item.product.originalPrice && item.product.originalPrice > item.product.price && (
+                        <p className="text-gray-400 text-xs line-through">{formatPrice(item.product.originalPrice)}</p>
+                      )}
+                      <p className="text-emerald-600 font-medium text-base">
+                        {formatPrice(item.product.price)}
+                        <span className="text-[7px] font-light text-gray-400 ml-1">/{item.product.unit}</span>
+                      </p>
+                    </div>
+                  </button>
 
                   {/* Quantité */}
                   <div className="flex items-center gap-3 mt-3">

@@ -82,12 +82,20 @@ export default function AssignDeliveryPage() {
     setAssigning(orderId);
     try {
       const now = Timestamp.now();
+      // ⚠️ FIX (même bug que delivery/dashboard/page.tsx::claimOrder) :
+      // cette fonction ne changeait jamais `status`. Une commande assignée
+      // ici restait bloquée sur son statut d'origine (en_preparation) —
+      // invisible côté livreur dans les deux onglets : plus dans
+      // "Disponibles" (delivererId déjà posé) et jamais dans "En cours"
+      // (qui filtre status in ['en_livraison','livre']).
       const payload = {
         delivererId: deliveryPerson.id,
         delivererName: deliveryPerson.displayName,
         delivererPhone: deliveryPerson.phone,
         delivererVehicle: deliveryPerson.vehicle || 'Moto',
         delivererAssignedAt: now,
+        status: 'en_livraison' as const,
+        statusLabel: 'En livraison',
         updatedAt: now,
         'tracking.enabled': true,
         'tracking.currentLocation': null,

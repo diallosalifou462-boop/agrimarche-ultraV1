@@ -18,6 +18,48 @@
 
 import { apiUrl } from '@/lib/api-config';
 
+// ============================================================
+// MOTEUR D'ENVOI ROBUSTE — retry + backoff exponentiel
+// Même logique que `sendPushBatched` dans admin/page.tsx (diffusion à
+// tous les tokens), qui elle survit déjà aux pannes réseau ponctuelles.
+// notifyUser()/notifyAllUsers() faisaient un unique fetch : la moindre
+// erreur réseau ou 5xx transitoire (cold start Vercel, timeout Firestore
+// côté route...) faisait échouer silencieusement la notification, sans
+// aucune seconde chance — contrairement à la diffusion admin.
+// ============================================================
+export async function fetchWithRetry(
+  url: string,
+  body: unknown,
+  { maxRetries = 2, baseDelayMs = 600 }: { maxRetries?: number; baseDelayMs?: number } = {}
+): Promise<{ ok: boolean; status?: number }> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) return { ok: true, status: res.status };
+      // Erreur serveur/réseau transitoire : on retente. Une erreur 4xx
+      // (ex: userId/title manquant) ne se corrigera pas en réessayant,
+      // mais on ne peut pas la distinguer sans lire le corps — le coût
+      // d'un retry inutile est négligeable comparé à une notif perdue.
+      if (attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, baseDelayMs * Math.pow(2, attempt)));
+        continue;
+      }
+      return { ok: false, status: res.status };
+    } catch (err) {
+      if (attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, baseDelayMs * Math.pow(2, attempt)));
+        continue;
+      }
+      throw err;
+    }
+  }
+  return { ok: false };
+}
+
 export type NotificationType = string;
 
 export interface NotifyUserInput {
@@ -47,18 +89,17 @@ export async function notifyUser({
   channels = ['push'],
 }: NotifyUserInput): Promise<void> {
   try {
-    const res = await fetch(apiUrl('/api/notifications/send'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId, title, body, link, channels, priority, urgent, type, icon }),
+    const result = await fetchWithRetry(apiUrl('/api/notifications/send'), {
+      userId, title, body, link, channels, priority, urgent, type, icon,
     });
-    if (!res.ok) {
-      console.warn('[notifyUser] Échec envoi (statut', res.status, ')');
+    if (!result.ok) {
+      console.warn('[notifyUser] Échec envoi après retries (statut', result.status, ')');
     }
   } catch (err) {
-    // Best-effort : une notification ratée ne doit jamais faire échouer
-    // l'action principale de l'utilisateur (commande, publication...).
-    console.warn('[notifyUser] Erreur réseau:', err);
+    // Best-effort : une notification ratée (même après retries) ne doit
+    // jamais faire échouer l'action principale de l'utilisateur
+    // (commande, publication...).
+    console.warn('[notifyUser] Erreur réseau après retries:', err);
   }
 }
 
@@ -86,15 +127,13 @@ export async function notifyAllUsers({
   excludeUserId,
 }: NotifyAllUsersInput): Promise<void> {
   try {
-    const res = await fetch(apiUrl('/api/broadcast'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title, body, link, type, icon, priority, urgent, excludeUserId }),
+    const result = await fetchWithRetry(apiUrl('/api/broadcast'), {
+      title, body, link, type, icon, priority, urgent, excludeUserId,
     });
-    if (!res.ok) {
-      console.warn('[notifyAllUsers] Échec envoi (statut', res.status, ')');
+    if (!result.ok) {
+      console.warn('[notifyAllUsers] Échec envoi après retries (statut', result.status, ')');
     }
   } catch (err) {
-    console.warn('[notifyAllUsers] Erreur réseau:', err);
+    console.warn('[notifyAllUsers] Erreur réseau après retries:', err);
   }
 }

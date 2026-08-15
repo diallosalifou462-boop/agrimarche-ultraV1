@@ -21,6 +21,7 @@ interface Order {
     lastUpdate?: any;
     enabled?: boolean;
     speed?: number;
+    phase?: 'assigned' | 'en_route' | 'approaching' | 'arrived';
   };
   items?: { name: string; qty: number; price?: number }[];
   totalAmount?: number;
@@ -616,6 +617,19 @@ function TrackingClientContent() {
           borderRadius: '20px', padding: '20px 14px',
         }}>
           <Stepper status={order.status} />
+          {/* Sous-statut fin, dérivé de tracking.phase (voir
+              functions/src/index.ts::checkDeliveryProximity) — 'En route'
+              seul ne dit pas si le livreur vient de partir ou est devant
+              la porte ; cette ligne comble cet écart sans surcharger le
+              stepper à 4 étapes lui-même. */}
+          {order.status === 'en_livraison' && order.tracking?.phase && (
+            <p style={{ textAlign: 'center', marginTop: '10px', fontSize: '13px', fontWeight: 600, color: '#22c55e' }}>
+              {order.tracking.phase === 'assigned' && '🛵 Livreur attribué, préparation du trajet…'}
+              {order.tracking.phase === 'en_route' && '🛵 En route vers vous'}
+              {order.tracking.phase === 'approaching' && '📍 Arrive dans quelques instants'}
+              {order.tracking.phase === 'arrived' && '📍 Votre livreur est arrivé'}
+            </p>
+          )}
         </div>
 
         {/* ── Adresse ── */}

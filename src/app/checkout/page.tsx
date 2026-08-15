@@ -7,7 +7,7 @@ import { useCart } from '@/hooks/useCart';
 import { useAuth } from '@/hooks/useAuth';
 import { useUserLocation } from '@/hooks/useUserLocation';
 import {
-  collection, addDoc, Timestamp, doc, updateDoc, increment, getDoc, setDoc,
+  collection, addDoc, Timestamp, doc, updateDoc, getDoc, setDoc, runTransaction,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
 import {
@@ -512,6 +512,78 @@ export default function CheckoutPage() {
     setIsProcessing(true); setOrderError('');
     try {
       // ─────────────────────────────────────────────────────────────────
+      // ✅ FIX SURVENTE : avant, le stock était décrémenté avec un simple
+      // `updateDoc(..., { stock: increment(-qty) })` APRÈS la création de
+      // la commande, sans jamais vérifier qu'il restait assez d'unités.
+      // Si 2 acheteurs commandaient en même temps le dernier exemplaire
+      // d'un produit, les 2 commandes étaient acceptées et le stock
+      // passait à -1 — le vendeur ne pouvait en livrer qu'une.
+      //
+      // On regroupe les quantités par produit (un même article peut, en
+      // théorie, apparaître dans plusieurs lignes du panier) et on
+      // vérifie + réserve le stock de TOUT le panier en une seule
+      // transaction Firestore, AVANT de créer la moindre commande.
+      // `runTransaction` relit le stock au moment exact de l'écriture et
+      // réessaie automatiquement en cas de conflit avec une autre
+      // transaction concurrente sur le même produit — deux acheteurs qui
+      // valident au même instant sont donc sérialisés par Firestore, pas
+      // par notre code : l'un des deux verra toujours le stock à jour.
+      // stock === null/undefined reste traité comme "illimité" (voir
+      // seller/products/add/page.tsx), donc jamais bloqué ici.
+      const qtyByProduct = new Map<string, number>();
+      for (const item of cartItems) {
+        if (!item?.product?.id) continue;
+        qtyByProduct.set(item.product.id, (qtyByProduct.get(item.product.id) || 0) + (item.quantity || 1));
+      }
+      try {
+        await runTransaction(db, async (tx) => {
+          const entries = [...qtyByProduct.entries()];
+          const productRefs = entries.map(([productId]) => doc(db, 'products', productId));
+          // Toutes les lectures de la transaction doivent précéder ses écritures.
+          const snaps = await Promise.all(productRefs.map(ref => tx.get(ref)));
+          const shortages: { name: string; available: number }[] = [];
+          snaps.forEach((snap, idx) => {
+            const [, qty] = entries[idx];
+            if (!snap.exists()) { shortages.push({ name: 'Produit indisponible', available: 0 }); return; }
+            const data = snap.data() as any;
+            const currentStock = data?.stock;
+            if (currentStock === null || currentStock === undefined) return; // illimité
+            if (currentStock < qty) shortages.push({ name: data?.name || 'Produit', available: Math.max(0, currentStock) });
+          });
+          if (shortages.length > 0) {
+            const detail = shortages.map(s => `${s.name} (${s.available} dispo.)`).join(', ');
+            throw new Error(`STOCK_INSUFFISANT: ${detail}`);
+          }
+          snaps.forEach((snap, idx) => {
+            const currentStock = (snap.data() as any)?.stock;
+            if (currentStock === null || currentStock === undefined) return; // illimité, rien à décrémenter
+            const [, qty] = entries[idx];
+            tx.update(productRefs[idx], { stock: currentStock - qty });
+          });
+        });
+      } catch (stockErr: any) {
+        const msg = String(stockErr?.message || '');
+        if (msg.startsWith('STOCK_INSUFFISANT:')) {
+          setOrderError(`Stock insuffisant pour : ${msg.replace('STOCK_INSUFFISANT: ', '')}. Merci de mettre à jour votre panier.`);
+        } else {
+          console.error('stock transaction:', stockErr);
+          setOrderError('Impossible de vérifier le stock. Veuillez réessayer.');
+        }
+        setIsProcessing(false);
+        return false;
+      }
+      // Alerte "stock bas" événementielle, best-effort — voir plus loin
+      // pour le détail (ancien emplacement, déplacé ici puisque le stock
+      // est désormais décrémenté ci-dessus, avant la création des commandes).
+      for (const [productId] of qtyByProduct) {
+        fetch(apiUrl('/api/products/check-stock'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ productId }),
+        }).catch(() => {});
+      }
+
+      // ─────────────────────────────────────────────────────────────────
       // ✅ FIX MULTI-VENDEUR : un panier peut contenir des produits de
       // plusieurs vendeurs. Avant, une seule commande Firestore était créée
       // avec le sellerId du PREMIER article du panier seulement
@@ -662,22 +734,9 @@ export default function CheckoutPage() {
           });
         }
 
-        // Decrementer stock (uniquement les articles de CE vendeur)
-        // ✅ Alerte "stock bas" événementielle : dès que le stock d'un
-        // produit baisse, on demande au serveur de vérifier s'il est
-        // repassé sous le seuil et d'alerter le vendeur — instantané, pas
-        // besoin d'attendre un passage de cron. Fire-and-forget : ne doit
-        // jamais bloquer ni faire échouer le checkout si ça rate.
-        for (const item of items) {
-          if (item?.product?.id) {
-            try { await updateDoc(doc(db, 'products', item.product.id), { stock: increment(-(item.quantity || 1)) }); } catch {}
-            fetch(apiUrl('/api/products/check-stock'), {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ productId: item.product.id }),
-            }).catch(() => {});
-          }
-        }
+        // ⚠️ Le stock a déjà été vérifié + décrémenté atomiquement plus haut,
+        // avant que la moindre commande ne soit créée (voir transaction en
+        // début de fonction) — rien à refaire ici.
 
         createdOrders.push({ docRefId: docRef.id, orderNumber, deliveryFee: sellerDeliveryFee, remainingAmount: sellerRemainingAmount });
       }

@@ -7,7 +7,6 @@ import {
   Truck, Package, Clock, UserX, ChevronRight,
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
-import { apiUrl } from '@/lib/api-config';
 import {
   collection, query, where, doc, updateDoc, onSnapshot, Timestamp, getDoc, writeBatch,
 } from 'firebase/firestore';
@@ -118,9 +117,6 @@ export default function SellerOrdersPage() {
       const orderRef       = doc(db, 'orders', id);
       const sellerOrderRef = doc(db, 'seller_orders', id);
 
-      const orderSnap = await getDoc(orderRef);
-      const orderData = orderSnap.data();
-
       const payload: Record<string, any> = {
         status:         newStatus,
         statusLabel,
@@ -136,6 +132,11 @@ export default function SellerOrdersPage() {
         payload.cancelledBy = 'seller';
         payload.cancelledAt = Timestamp.now();
       }
+      // Analytique — sans cet horodatage, impossible de calculer le temps
+      // de préparation réel (createdAt → enPreparationAt) par vendeur.
+      if (newStatus === 'en_preparation') {
+        payload.enPreparationAt = Timestamp.now();
+      }
 
       const batch = writeBatch(db);
       batch.set(orderRef, payload, { merge: true });
@@ -147,35 +148,16 @@ export default function SellerOrdersPage() {
 
       await batch.commit();
 
-      const orderId = orderData?.orderNumber || id.slice(-8);
-      const notifBase = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
-
-      if (orderData?.userId) {
-        let notif: { title: string; body: string } | null = null;
-
-        if (newStatus === 'en_preparation') {
-          notif = { title: '👨‍🍳 Commande en préparation', body: `Votre commande #${orderId} est en cours de préparation par le vendeur.` };
-        } else if (newStatus === 'en_livraison') {
-          notif = { title: '🚚 Commande expédiée', body: `Votre commande #${orderId} est en route ! Vous serez livré bientôt.` };
-        } else if (newStatus === 'livre') {
-          notif = { title: '✅ Commande livrée', body: `Votre commande #${orderId} a été livrée. Confirmez la réception.` };
-        } else if (newStatus === 'annule') {
-          notif = { title: '❌ Commande refusée', body: `Le vendeur n'a pas pu traiter votre commande #${orderId}. Vous pouvez commander à nouveau.` };
-        }
-
-        if (notif) {
-          fetch(apiUrl('/api/notifications/send'), {
-            ...notifBase,
-            body: JSON.stringify({
-              userId: orderData.userId,
-              title: notif.title,
-              body: notif.body,
-              link: '/account/orders',
-              channels: ['push'],
-            }),
-          }).catch(console.error);
-        }
-      }
+      // ⚠️ CONSOLIDATION : cette fonction envoyait sa propre notification
+      // acheteur (via fetch brut, puis via notifyUser après un premier
+      // passage) — c'était la 3ᵉ implémentation indépendante du même
+      // événement (voir admin/page.tsx::updateOrderStatus et
+      // delivery/dashboard/page.tsx::markAsDelivered, qui font toutes les
+      // deux le même changement de `status`). L'écriture batch juste
+      // au-dessus déclenche déjà, côté serveur, le trigger Firestore
+      // notifyOrderStatusStep (en_preparation/en_livraison/livre) ou
+      // notifyOrderCancelled (annule) — garanti, indépendant du réseau du
+      // vendeur au moment du clic. Plus rien à envoyer manuellement ici.
     } catch (err) {
       console.error(err);
       alert('Erreur lors de la mise à jour');

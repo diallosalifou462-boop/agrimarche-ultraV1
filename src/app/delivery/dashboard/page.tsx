@@ -7,7 +7,7 @@ import { useRouter } from 'next/navigation';
 import { db } from '@/lib/firebase/firebase';
 import {
   collection, query, where, onSnapshot,
-  doc, updateDoc, serverTimestamp
+  doc, updateDoc, serverTimestamp, getDoc, writeBatch, Timestamp
 } from 'firebase/firestore';
 import {
   MapPin, Phone, CheckCircle, User,
@@ -26,6 +26,7 @@ interface Location { lat: number; lng: number }
 interface Order {
   id: string;
   orderNumber?: string;
+  userId?: string;
   userName?: string;
   userPhone?: string;
   status: string;
@@ -50,6 +51,8 @@ interface Order {
     enabled?: boolean;
     speed?: number;
     accuracy?: number;
+    // Parcours de suivi hybride — indépendant de `status` (voir claimOrder).
+    phase?: 'assigned' | 'en_route' | 'approaching' | 'arrived';
   };
   items?: { name: string; qty: number; productName?: string; quantity?: number }[];
   totalAmount?: number;
@@ -245,7 +248,7 @@ function TimelineBadge({ order }: { order: Order }) {
 
 // ─── Order Card ───────────────────────────────────────────────────────────────
 
-function OrderCard({ order, onMarkDelivered, currentLocation }: { order: Order; onMarkDelivered: (id: string) => void; currentLocation?: Location | null }) {
+function OrderCard({ order, onMarkDelivered, onMarkArrived, currentLocation }: { order: Order; onMarkDelivered: (id: string) => void; onMarkArrived: (id: string) => void; currentLocation?: Location | null }) {
   const [expanded, setExpanded] = useState(false);
   const [showDates, setShowDates] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -401,6 +404,19 @@ function OrderCard({ order, onMarkDelivered, currentLocation }: { order: Order; 
             <CheckCircle size={13} /> Livré
           </button>
         </div>
+
+        {/* Parcours de suivi hybride : seule étape que le livreur confirme
+            manuellement entre l'attribution et la livraison — le GPS seul
+            (précision de quelques dizaines de mètres) ne peut pas garantir
+            de façon fiable "je suis devant la porte du client". */}
+        {order.tracking?.phase && ['en_route', 'approaching'].includes(order.tracking.phase) && (
+          <button
+            onClick={() => onMarkArrived(order.id)}
+            style={{ ...btnStyleBtn('#eff6ff', '#2563eb'), width: '100%', marginBottom: '8px' }}
+          >
+            📍 Marquer comme arrivé chez le client
+          </button>
+        )}
 
         {/* Action row 2 — dates + support */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
@@ -673,15 +689,30 @@ export default function DeliveryDashboard() {
     return () => unsub();
   }, [user]);
 
-  // Listen commandes disponibles : dès leur création (en_attente), pas encore prises par un livreur.
-  // Cette requête est couverte par la règle `isDeliverer() && resource.data.status == 'en_attente'`
-  // (voir firestore.rules) — provable directement depuis le where('status', ...) ci-dessous.
+  // Listen commandes disponibles : une fois CONFIRMÉES par le vendeur
+  // (en_preparation), pas encore prises par un livreur.
+  // ⚠️ FIX MAJEUR : cette requête ciblait auparavant 'en_attente' — un
+  // statut où le VENDEUR N'A MÊME PAS ENCORE CONFIRMÉ la commande (il
+  // pourrait encore la refuser). Un livreur pouvait donc s'engager sur une
+  // commande qui n'existait pas encore vraiment côté préparation. Combiné
+  // au bug de claimOrder ci-dessous (qui ne touchait jamais `status`),
+  // c'est ce qui faisait "disparaître" les commandes acceptées : elles
+  // quittaient "disponibles" (delivererId posé) sans jamais apparaître
+  // dans "en cours" (qui exige status en_livraison/livre).
+  // ⚠️ RISQUE OPÉRATIONNEL NON RÉSOLU : ce fichier ne contient aucune
+  // firestore.rules — je n'ai pas pu vérifier ni corriger les règles de
+  // sécurité. Si une règle restreint explicitement la lecture des
+  // commandes par un livreur au statut 'en_attente' (comme le suggérait
+  // l'ancien commentaire ci-dessous), ce changement de requête renverra
+  // silencieusement ZÉRO résultat (permission denied, pas une erreur
+  // visible) tant que la règle n'est pas mise à jour côté Firebase Console
+  // pour autoriser 'en_preparation' à la place.
   const [availableOrders, setAvailableOrders] = useState<Order[]>([]);
   const [claimingId, setClaimingId] = useState<string | null>(null);
   const prevAvailableCountRef = useRef<number | null>(null);
   useEffect(() => {
     if (!user) return;
-    const q = query(collection(db, 'orders'), where('status', '==', 'en_attente'));
+    const q = query(collection(db, 'orders'), where('status', '==', 'en_preparation'));
     const unsub = onSnapshot(q, (snap) => {
       const list = snap.docs
         .map(d => ({ ...d.data(), id: d.id } as Order)) // FIX: id apres le spread
@@ -704,12 +735,50 @@ export default function DeliveryDashboard() {
     if (!user || !profile) return;
     setClaimingId(orderId);
     try {
-      await updateDoc(doc(db, 'orders', orderId), {
+      // ⚠️ FIX cohérence inter-collections (même bug que admin/page.tsx::
+      // updateOrderStatus avant son fix, et admin/assign-delivery avant le
+      // sien) : cette fonction n'écrivait QUE dans 'orders'. seller_orders
+      // — lu par le vendeur pour voir qui vient récupérer sa commande —
+      // ne recevait jamais delivererId/Name/Phone. Un vendeur regardant
+      // sa commande "en_attente" ne voyait jamais qu'un livreur l'avait
+      // déjà prise en charge, et pouvait par exemple la refuser alors
+      // qu'un livreur était déjà en route pour la récupérer.
+      const payload = {
         delivererId: user.uid,
         delivererName: profile.displayName || 'Livreur',
         delivererPhone: profile.phone || '',
-        delivererAssignedAt: serverTimestamp(),
-      });
+        delivererAssignedAt: Timestamp.now(),
+        // ⚠️ FIX MAJEUR — le vrai bug signalé ("accepter ne fait rien, la
+        // commande disparaît") : cette fonction ne touchait auparavant QUE
+        // delivererId, jamais `status`. Résultat : la commande quittait
+        // "disponibles" (delivererId désormais posé, filtré côté client)
+        // sans jamais apparaître dans "en cours" (qui exige status
+        // en_livraison/livre) — orpheline, invisible partout, tant que
+        // personne d'autre ne retouchait la commande. Puisque cette
+        // fonction ne cible désormais que des commandes déjà confirmées
+        // par le vendeur (en_preparation, voir la requête juste au-dessus),
+        // faire passer status → en_livraison au moment de l'acceptation
+        // est sémantiquement correct : le livreur prend en charge
+        // maintenant, pas "un jour peut-être".
+        status: 'en_livraison' as const,
+        // Parcours de suivi hybride : ce champ pilote désormais les
+        // notifications de progression (voir notifyDeliveryPhaseChange côté
+        // serveur), indépendamment de `status`.
+        'tracking.phase': 'assigned',
+      };
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'orders', orderId), payload, { merge: true });
+      const sellerOrderSnap = await getDoc(doc(db, 'seller_orders', orderId));
+      if (sellerOrderSnap.exists()) {
+        batch.set(doc(db, 'seller_orders', orderId), payload, { merge: true });
+      }
+      await batch.commit();
+
+      // ⚠️ CONSOLIDATION : cette notification vendeur partait auparavant
+      // d'ici, côté client. Elle est désormais gérée par le trigger serveur
+      // notifyDelivererClaimed (functions/src/index.ts), qui réagit à
+      // l'apparition de delivererId sur cette même écriture — garanti,
+      // même si l'app du livreur se ferme juste après ce clic.
     } catch {
       alert("Cette commande vient peut-être d'être prise par un autre livreur.");
     } finally {
@@ -736,14 +805,24 @@ export default function DeliveryDashboard() {
       setCurrentLocation({ lat: latitude, lng: longitude });
       setGpsAccuracy(accuracy ?? null);
       const activeOrders = ordersRef.current.filter(o => o.status === 'en_livraison');
-      await Promise.all(activeOrders.map(order =>
-        updateDoc(doc(db, 'orders', order.id), {
+      await Promise.all(activeOrders.map(order => {
+        const payload: Record<string, any> = {
           'tracking.currentLocation': { lat: latitude, lng: longitude },
           'tracking.lastUpdate': serverTimestamp(),
           'tracking.enabled': true,
           'tracking.accuracy': accuracy,
-        }).catch(console.error)
-      ));
+        };
+        // Premier point GPS reçu pour cette commande → passage automatique
+        // en 'en_route'. On ne touche PAS à la phase si elle est déjà plus
+        // avancée (le geofencing serveur peut déjà l'avoir mise à
+        // 'approaching', voire 'arrived' si le livreur a confirmé
+        // manuellement) — sinon un point GPS en retard pourrait faire
+        // régresser l'affichage côté acheteur.
+        if (!order.tracking?.phase || order.tracking.phase === 'assigned') {
+          payload['tracking.phase'] = 'en_route';
+        }
+        return updateDoc(doc(db, 'orders', order.id), payload).catch(console.error);
+      }));
     });
     setWatchId(id);
   }, []);
@@ -759,6 +838,21 @@ export default function DeliveryDashboard() {
     ));
   }, [watchId]);
 
+  const markAsArrived = async (orderId: string) => {
+    try {
+      const payload = { 'tracking.phase': 'arrived' as const };
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'orders', orderId), payload, { merge: true });
+      const sellerOrderSnap = await getDoc(doc(db, 'seller_orders', orderId));
+      if (sellerOrderSnap.exists()) {
+        batch.set(doc(db, 'seller_orders', orderId), payload, { merge: true });
+      }
+      await batch.commit();
+      // Notification côté serveur (notifyDeliveryPhaseChange, sur la
+      // transition de tracking.phase) — rien à envoyer manuellement ici.
+    } catch { toast.error("Erreur lors de la confirmation d'arrivée"); }
+  };
+
   const markAsDelivered = async (orderId: string) => {
     if (!confirm('Confirmer la livraison ?')) return;
     // Le montant du gain (deliveryFee) est capturé AVANT l'updateDoc pour
@@ -767,15 +861,41 @@ export default function DeliveryDashboard() {
     // dynamiquement à partir de toutes les commandes status:'livre').
     const order = ordersRef.current.find(o => o.id === orderId);
     try {
-      await updateDoc(doc(db, 'orders', orderId), {
-        status: 'livre', statusLabel: 'Livrée',
-        deliveredAt: serverTimestamp(), 'tracking.enabled': false,
-      });
+      // ⚠️ FIX cohérence inter-collections — LE bug le plus impactant de
+      // toute la chaîne de livraison : c'est ICI, quand le livreur confirme
+      // réellement la livraison sur le terrain, que le statut passe à
+      // 'livre' en production (pas depuis l'admin, qui ne sert qu'aux
+      // interventions manuelles). Cette fonction n'écrivait QUE dans
+      // 'orders' — jamais dans 'seller_orders', que "Mon compte" (acheteur)
+      // lit pour son historique. Concrètement : après une vraie livraison
+      // confirmée par le livreur, l'acheteur restait bloqué sur l'ancien
+      // statut ("En livraison") indéfiniment dans son compte.
+      const now = Timestamp.now();
+      const payload = {
+        status: 'livre' as const, statusLabel: 'Livrée',
+        deliveredAt: now, updatedAt: now, 'tracking.enabled': false,
+      };
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'orders', orderId), payload, { merge: true });
+      const sellerOrderSnap = await getDoc(doc(db, 'seller_orders', orderId));
+      if (sellerOrderSnap.exists()) {
+        batch.set(doc(db, 'seller_orders', orderId), payload, { merge: true });
+      }
+      await batch.commit();
       toast.success(
         order?.deliveryFee
           ? `Livraison confirmée ! +${formatFCFA(order.deliveryFee)} ajoutés à votre solde`
           : 'Livraison confirmée !'
       );
+
+      // ⚠️ CONSOLIDATION : les notifications push acheteur et vendeur sur
+      // livraison confirmée partaient auparavant d'ici, côté client.
+      // Le trigger serveur notifyOrderStatusStep (functions/src/index.ts)
+      // couvre désormais les deux — message acheteur enrichi (invitation à
+      // noter + lien /review) et bloc vendeur ajouté — déclenché
+      // automatiquement par l'écriture ci-dessus, garanti même si l'app du
+      // livreur se ferme juste après la confirmation.
+
       // SMS de confirmation de livraison au client (best-effort, via
       // Infobip — voir /api/send-sms). Ne bloque jamais la validation.
       if (order?.userPhone) {
@@ -1087,7 +1207,7 @@ export default function DeliveryDashboard() {
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
               {sortedActive.map(order => (
-                <OrderCard key={order.id} order={order} onMarkDelivered={markAsDelivered} currentLocation={currentLocation} />
+                <OrderCard key={order.id} order={order} onMarkDelivered={markAsDelivered} onMarkArrived={markAsArrived} currentLocation={currentLocation} />
               ))}
             </div>
           )

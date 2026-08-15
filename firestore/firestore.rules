@@ -231,6 +231,17 @@ service cloud.firestore {
       allow read: if isAdmin();
     }
 
+    // Requête collectionGroup('productPricing') utilisée par l'onglet
+    // Produits de l'admin (app/admin/page.tsx) pour charger en une seule
+    // fois tous les basePrice/marge de tous les produits. Une règle
+    // imbriquée simple (voir plus bas, sous /products/{productId}) régit
+    // les accès document par document (create/update/delete) ; celle-ci,
+    // avec le wildcard récursif {path=**}, est nécessaire en plus pour
+    // que la requête collectionGroup elle-même soit autorisée en lecture.
+    match /{path=**}/productPricing/{doc} {
+      allow read: if isAdmin();
+    }
+
     // =========================================================
     // PRODUITS
     // =========================================================
@@ -259,6 +270,29 @@ service cloud.firestore {
       // (seller/products/page.tsx a un vrai bouton supprimer pour lui) —
       // avant, seul l'admin le pouvait, donc ça échouait silencieusement.
       allow delete: if (isSeller() && resource.data.sellerId == request.auth.uid) || isAdmin();
+
+      // =========================================================
+      // PRIX VENDEUR BRUT (basePrice) — sous-collection privée
+      // Le document public products/{productId} ci-dessus ne contient que
+      // `price` (le prix final affiché = basePrice + 5% de marge
+      // plateforme). basePrice lui-même — et donc la marge qu'il révèle —
+      // ne doit JAMAIS être lisible par le vendeur ni l'acheteur, même via
+      // les outils développeur du navigateur. D'où ce document séparé,
+      // réservé à l'admin en lecture. Voir src/lib/pricing.ts.
+      // =========================================================
+      match /productPricing/{doc} {
+        allow read: if isAdmin();
+
+        // Le vendeur propriétaire du produit peut créer ce document une
+        // seule fois, juste après avoir créé products/{productId} (voir
+        // seller/products/add/page.tsx). Il n'y a pas de page d'édition
+        // vendeur dans l'app — seul l'admin modifie ensuite ce document,
+        // depuis l'onglet Produits.
+        allow create: if isSeller()
+          && get(/databases/$(database)/documents/products/$(productId)).data.sellerId == request.auth.uid;
+
+        allow update, delete: if isAdmin();
+      }
     }
 
     // =========================================================
@@ -276,6 +310,34 @@ service cloud.firestore {
     // =========================================================
     // COMMANDES
     // =========================================================
+    // 🔒 DURCISSEMENT (pas lié au bug d'origine, trouvé pendant l'audit) :
+    // les branches isDeliverer() de `orders`.update ci-dessous n'avaient
+    // AUCUNE restriction de champ — un compte livreur authentifié pouvait
+    // réécrire n'importe quel champ (sellerId, total, userId...) sur une
+    // commande 'en_attente' libre ou déjà assignée à lui. Liste exhaustive
+    // ci-dessous, vérifiée champ par champ contre TOUS les points d'écriture
+    // livreur du code : delivery/dashboard/page.tsx (claimOrder,
+    // markAsDelivered, saveDates, GPS tracking start/stop), admin/page.tsx
+    // et admin/assign-delivery/page.tsx (isAdmin(), pas concernés par cette
+    // fonction). Note : les écritures en dot-notation comme
+    // updateDoc(ref, {'tracking.enabled': false}) apparaissent dans
+    // affectedKeys() sous leur clé de premier niveau ('tracking'), pas sous
+    // le chemin complet — d'où 'tracking' seul dans la liste, pas
+    // 'tracking.enabled'.
+    // ⚠️ Non testé contre l'émulateur Firestore avant déploiement — à
+    // valider avec `firebase emulators:start --only firestore` (ou en
+    // staging) avant de pousser en prod, séparément des fix critiques
+    // ci-dessus : une erreur ici bloquerait TOUS les livreurs, un risque
+    // plus grave que le bug d'origine.
+    function isDelivererOrderUpdate() {
+      return onlyChanges([
+        'delivererId', 'delivererName', 'delivererPhone', 'delivererAssignedAt',
+        'status', 'statusLabel', 'updatedAt', 'deliveredAt', 'tracking',
+        'dateDepart', 'dateArrivee', 'dateRetour', 'dateLivree',
+        'dateProbleme', 'noteProbleme',
+      ]);
+    }
+
     match /orders/{orderId} {
       allow read: if isAdmin()
                   || isOwner(resource.data.userId)
@@ -283,8 +345,9 @@ service cloud.firestore {
                   // Un livreur voit les commandes qui lui sont déjà assignées...
                   || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid)
                   // ...ainsi que celles encore 'en_attente' (jamais assignées à ce stade —
-                  // assignDelivery() ne pose delivererId qu'en même temps que le passage à
-                  // 'en_preparation'), nécessaire pour la liste "commandes disponibles".
+                  // claimOrder()/assignDelivery()/assignDeliveryPerson() posent delivererId
+                  // EN MÊME TEMPS que le passage à 'en_livraison', jamais avant), nécessaire
+                  // pour la liste "commandes disponibles".
                   // ⚠️ Basé sur `status` (champ du where() de la requête) et non `delivererId`
                   // (absent du where()) : une requête list() ne peut être autorisée que si
                   // Firestore peut prouver la règle à partir des seuls champs filtrés par la
@@ -324,8 +387,8 @@ service cloud.firestore {
       // immédiate après création), sans rapport avec ce changement.
       allow update: if (isOwner(resource.data.userId) && isOrderCompletionUpdate())
                     || (isSeller() && resource.data.sellerId == request.auth.uid)
-                    || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid)
-                    || (isDeliverer() && resource.data.get('delivererId', null) == null)
+                    || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid && isDelivererOrderUpdate())
+                    || (isDeliverer() && resource.data.get('delivererId', null) == null && isDelivererOrderUpdate())
                     || isAdmin();
 
       allow delete: if false;
@@ -340,10 +403,19 @@ service cloud.firestore {
       // faisait échouer l'annulation/la confirmation dès cette lecture,
       // avant même d'arriver au batch.commit(). On autorise donc la lecture
       // d'un doc absent (elle renverra juste exists()==false côté client).
+      // ⚠️ FIX CRITIQUE : delivery/dashboard/page.tsx (claimOrder ET
+      // markAsDelivered) fait un getDoc() sur ce chemin exact AVANT chaque
+      // écriture, pour savoir s'il faut synchroniser le miroir vendeur.
+      // Sans isDeliverer() ici, ce getDoc() était refusé pour TOUT compte
+      // livreur — l'erreur permission-denied survenait avant même d'arriver
+      // au batch.commit(), ce qui faisait échouer silencieusement
+      // l'acceptation d'une commande ET la confirmation de livraison.
       allow read: if resource == null
                   || isAdmin()
                   || isOwner(resource.data.userId)
-                  || (isSeller() && resource.data.sellerId == request.auth.uid);
+                  || (isSeller() && resource.data.sellerId == request.auth.uid)
+                  || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid)
+                  || (isDeliverer() && resource.data.get('delivererId', null) == null);
 
       // ✅ Assoupli, en miroir de /orders : plus d'exigence de champs à la
       // création, et l'acheteur peut mettre à jour le statut (annuler /
@@ -362,7 +434,23 @@ service cloud.firestore {
       // /orders — l'acheteur n'a plus de branche update ici du tout,
       // isCancelUpdate()/isConfirmDeliveryUpdate() étaient les deux seules
       // raisons pour lesquelles il en avait une.
+      // ⚠️ FIX CRITIQUE : delivery/dashboard/page.tsx écrit TOUJOURS dans
+      // orders ET seller_orders dans le même writeBatch (claimOrder,
+      // markAsDelivered) — checkout crée systématiquement le miroir
+      // seller_orders, donc sellerOrderSnap.exists() est vrai pour
+      // quasiment toutes les commandes. Un writeBatch Firestore est
+      // atomique CÔTÉ RÈGLES : si UNE des écritures du batch est refusée,
+      // le batch ENTIER échoue en permission-denied — y compris
+      // l'écriture sur `orders`, qui aurait pourtant été autorisée seule.
+      // Sans ce correctif, un livreur qui accepte une commande ou confirme
+      // une livraison n'écrivait RIEN NULLE PART, avec juste une alerte
+      // générique côté client masquant l'échec réel. Mêmes clauses
+      // qu'/orders ci-dessus, pour la même raison : soit le livreur déjà
+      // assigné à cette commande, soit une commande encore libre qu'il est
+      // en train de réclamer.
       allow update: if (isSeller() && resource.data.sellerId == request.auth.uid)
+                    || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid && isDelivererOrderUpdate())
+                    || (isDeliverer() && resource.data.get('delivererId', null) == null && isDelivererOrderUpdate())
                     || isAdmin();
 
       allow delete: if false;

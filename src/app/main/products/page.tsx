@@ -78,9 +78,20 @@ interface ProductData {
   sellerId?: string;
   createdAt?: any;
   whatsappClicks?: number;
+  // 'inactive' = masqué par le vendeur (bouton œil dans seller/products/page.tsx).
+  // Absent = ancien produit créé avant l'ajout de ce champ → toujours actif.
+  status?: 'active' | 'inactive';
 }
 
 interface SellerRating { sellerId: string; averageRating: number; reviewCount: number; }
+
+// Un produit est visible côté acheteur s'il a du stock (ou stock
+// illimité : null/undefined) ET si le vendeur ne l'a pas masqué via le
+// bouton œil de seller/products/page.tsx (status: 'inactive'). Un produit
+// réellement supprimé (deleteDoc) disparaît de toute façon du listener
+// Firestore — inutile de le filtrer ici, il n'arrive même plus jusque-là.
+const isBuyerVisible = (p: { stock?: number | null; status?: string }) =>
+  (p.stock === undefined || p.stock === null || p.stock > 0) && p.status !== 'inactive';
 
 // ─────────────────────────────────────────────────────────────────────────────
 export default function AgriMarket() {
@@ -469,12 +480,12 @@ export default function AgriMarket() {
     // On applique désormais le même filtre de catégorie à chaque rangée.
     const byCat = <T extends { category?: string }>(arr: T[]) =>
       cat === 'Tous' ? arr : arr.filter(p => p.category === cat);
-    const inStock = byCat(products).filter(p => p.stock === undefined || p.stock === null || p.stock > 0);
+    const inStock = byCat(products).filter(isBuyerVisible);
     const sections: { key: string; title: string; icon: string; items: ProductData[]; distances?: Map<string, number> }[] = [];
 
     // Basé sur la requête dédiée orderBy(createdAt) — précis quel que soit le nombre
     // de produits déjà chargés dans la page principale.
-    const fresh = byCat(freshProducts).filter(p => p.stock === undefined || p.stock === null || p.stock > 0);
+    const fresh = byCat(freshProducts).filter(isBuyerVisible);
     if (fresh.length >= 3) {
       sections.push({ key: 'new', title: 'Nouveautés du jour', icon: '✦', items: fresh.slice(0, 10) });
     }
@@ -492,9 +503,7 @@ export default function AgriMarket() {
 
     // Basé sur la requête dédiée orderBy(whatsappClicks) — précis même si le produit
     // le plus demandé ne fait pas partie des 40 premiers chargés dans la grille.
-    const popular = byCat(popularProducts).filter(p =>
-      (p.whatsappClicks ?? 0) > 0 && (p.stock === undefined || p.stock === null || p.stock > 0)
-    );
+    const popular = byCat(popularProducts).filter(p => (p.whatsappClicks ?? 0) > 0 && isBuyerVisible(p));
     if (popular.length >= 3) {
       sections.push({ key: 'popular', title: 'Les plus demandés', icon: '🔥', items: popular.slice(0, 10) });
     }
@@ -504,7 +513,9 @@ export default function AgriMarket() {
 
   const recommendationSections = useMemo(() => {
     if (!selected) return [] as { title: string; badge: string; items: ProductData[]; distances?: Map<string, number> }[];
-    const others = products.filter(p => p.id !== selected.id);
+    // Même règle que la grille principale : jamais de produit en rupture
+    // de stock recommandé (stock null/undefined = illimité, toujours affiché).
+    const others = products.filter(p => p.id !== selected.id && isBuyerVisible(p));
     const sections: { title: string; badge: string; items: ProductData[]; distances?: Map<string, number> }[] = [];
 
     // 1. Région de l'utilisateur (uniquement si une région réelle a été détectée/choisie)
@@ -568,8 +579,10 @@ export default function AgriMarket() {
 
   useEffect(() => {
     let r = [...products];
-    // Exclure les produits en rupture de stock
-    r = r.filter(p => p.stock === undefined || p.stock === null || p.stock > 0);
+    // Exclure les produits en rupture de stock et ceux masqués par le
+    // vendeur (bouton œil dans seller/products/page.tsx, status:'inactive')
+    // — sinon un produit "masqué" restait visible dans le catalogue acheteur.
+    r = r.filter(isBuyerVisible);
     if (search) r = r.filter(p => p.name?.toLowerCase().includes(search.toLowerCase()));
     // ⚠️ FIX (retour en arrière) : j'avais retiré cette ligne en pensant
     // qu'elle faisait double emploi avec le `where('category', ...)` côté

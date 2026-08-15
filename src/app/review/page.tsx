@@ -11,6 +11,7 @@ import { ArrowLeft, Star, AlertCircle, CheckCircle, Loader2 } from 'lucide-react
 // `submitReview` (ownership + statut 'livre' vérifiés côté serveur,
 // anti-doublon atomique) — voir src/lib/reviewActions.ts.
 import { submitOrderReview, ReviewActionError } from '@/lib/reviewActions';
+import { fetchWithRetry } from '@/lib/notifications/notifyUser';
 
 function ReviewContent() {
   const searchParams = useSearchParams();
@@ -116,26 +117,26 @@ function ReviewContent() {
       // dans 'reviews' — un appel manuel en plus aurait doublé la
       // notification reçue par le vendeur.
 
-      // 🔔 NOTIFICATION À L'ADMIN — chaque avis client doit aussi remonter à l'admin
+      // 🔔 NOTIFICATION À L'ADMIN — chaque avis client doit aussi remonter à
+      // l'admin. Passe désormais par fetchWithRetry (retry + backoff
+      // exponentiel, même moteur que notifyUser() / sendPushBatched) au lieu
+      // d'un fetch unique : un cold start Vercel ou un timeout Firestore
+      // transitoire ne fait plus perdre la notification en silence.
       try {
-        const res = await fetch(apiUrl('/api/notifications/notify-admins'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: 'review',
-            icon: '⭐',
-            title: '⭐ Nouvel avis client',
-            body: `${user?.displayName || 'Un client'} a noté ${sellerName} : ${rating}/5`,
-            link: '/admin',
-          }),
+        const result = await fetchWithRetry(apiUrl('/api/notifications/notify-admins'), {
+          type: 'review',
+          icon: '⭐',
+          title: '⭐ Nouvel avis client',
+          body: `${user?.displayName || 'Un client'} a noté ${sellerName} : ${rating}/5`,
+          link: '/admin',
         });
-        if (!res.ok) {
-          console.warn('⚠️ Notification admin avis : réponse non OK', res.status, await res.text().catch(() => ''));
+        if (!result.ok) {
+          console.warn('⚠️ Notification admin avis : échec après retries (statut', result.status, ')');
         } else {
           console.log('✅ Notification admin avis envoyée');
         }
       } catch (notifError) {
-        console.error('Erreur envoi notification admin avis:', notifError);
+        console.error('Erreur envoi notification admin avis après retries:', notifError);
       }
 
       alert('⭐ Merci pour votre avis !');

@@ -15,11 +15,13 @@
 //    On bascule sur le SDK Admin (même pattern que
 //    api/orders/notify-seller, api/notifications/send, api/broadcast),
 //    qui n'est pas soumis aux règles.
-// 3) Cette route forçait status:'en_livraison' inconditionnellement, même
-//    si la commande était encore 'en_attente' (pas préparée par le
-//    vendeur). On ne touche plus au statut ici : l'assignation d'un
-//    livreur ne fait pas avancer le pipeline de préparation, exactement
-//    comme admin/assign-delivery/page.tsx.
+// 3) MISE À JOUR : cette route ne touchait pas au statut, sur le modèle
+//    (à l'époque) de admin/assign-delivery/page.tsx. Or cette page vient
+//    d'être corrigée : ne pas faire avancer `status` vers 'en_livraison'
+//    rend la commande invisible dans les deux onglets du dashboard livreur
+//    (ni "Disponibles" — delivererId déjà posé —, ni "En cours" — status
+//    resté sur sa valeur d'origine). Cette route suit désormais le même
+//    correctif, pour rester cohérente si elle est un jour rebranchée.
 
 // ⚠️ Comme /api/orders/notify-seller, cette route n'est actuellement
 // appelée par AUCUN code client du projet (vérifié : aucune référence à
@@ -62,6 +64,8 @@ export async function POST(request: Request) {
       delivererName: delivererName || '',
       delivererPhone: delivererPhone || '',
       delivererAssignedAt: FieldValue.serverTimestamp(),
+      status: 'en_livraison' as const,
+      statusLabel: 'En livraison',
       updatedAt: FieldValue.serverTimestamp(),
     };
 

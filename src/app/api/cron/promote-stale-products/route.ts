@@ -32,6 +32,7 @@ import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getFirestore, FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
 import { getAuth } from 'firebase-admin/auth';
+import { categoryLink } from '@/lib/categoryLink';
 
 function getAdminApp() {
   if (getApps().length > 0) return getApps()[0];
@@ -139,32 +140,39 @@ async function generatePromoCopy(product: {
 }
 
 export async function GET(req: NextRequest) {
-  const app = getAdminApp();
-  const db = getFirestore(app);
-
-  // ── Auth : soit Vercel Cron (CRON_SECRET), soit un admin authentifié qui ─
-  // déclenche manuellement depuis le panneau "Promotion IA" de l'admin.
-  const cronSecret = process.env.CRON_SECRET;
-  const authHeader = req.headers.get('authorization');
-  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
-
-  const isCron = !!cronSecret && bearerToken === cronSecret;
-  let isAdmin = false;
-  if (!isCron && bearerToken) {
-    try {
-      const decoded = await getAuth(app).verifyIdToken(bearerToken);
-      const userSnap = await db.collection('users').doc(decoded.uid).get();
-      isAdmin = userSnap.exists && userSnap.data()?.role === 'admin';
-    } catch {
-      isAdmin = false;
-    }
-  }
-  // Si CRON_SECRET n'est pas configuré (dev), on laisse passer sans blocage.
-  if (cronSecret && !isCron && !isAdmin) {
-    return NextResponse.json({ error: 'Non autorisé' }, { status: 401 });
-  }
-
+  // ⚠️ FIX : getAdminApp()/getFirestore() étaient appelés HORS du try/catch
+  // ci-dessous — une variable d'env manquante ou mal formée (typiquement
+  // FIREBASE_SERVICE_ACCOUNT_JSON absente en dev local, injectée seulement
+  // par Vercel en prod) faisait planter la route AVANT même l'authentification,
+  // avec un 500 brut sans aucun message côté client ("Internal Server Error"
+  // nu dans la console réseau, rien d'exploitable pour diagnostiquer). On
+  // déplace tout dans le try/catch pour toujours renvoyer un message JSON clair.
   try {
+    const app = getAdminApp();
+    const db = getFirestore(app);
+
+    // ── Auth : soit Vercel Cron (CRON_SECRET), soit un admin authentifié qui ─
+    // déclenche manuellement depuis le panneau "Promotion IA" de l'admin.
+    const cronSecret = process.env.CRON_SECRET;
+    const authHeader = req.headers.get('authorization');
+    const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+
+    const isCron = !!cronSecret && bearerToken === cronSecret;
+    let isAdmin = false;
+    if (!isCron && bearerToken) {
+      try {
+        const decoded = await getAuth(app).verifyIdToken(bearerToken);
+        const userSnap = await db.collection('users').doc(decoded.uid).get();
+        isAdmin = userSnap.exists && userSnap.data()?.role === 'admin';
+      } catch {
+        isAdmin = false;
+      }
+    }
+    // Si CRON_SECRET n'est pas configuré (dev), on laisse passer sans blocage.
+    if (cronSecret && !isCron && !isAdmin) {
+      return NextResponse.json({ error: 'Non autorisé' }, { status: 401 });
+    }
+
     const messaging = getMessaging(app);
 
     // ── 1. Paramètres admin ───────────────────────────────
@@ -253,7 +261,12 @@ export async function GET(req: NextRequest) {
       let pushSuccessCount = 0;
       let pushFailureCount = 0;
       const invalidTokens: string[] = [];
-      const deepLink = `/product/${productId}`;
+      // ⚠️ FIX : `/product/${productId}` est un lien mort — aucune route
+      // dynamique `/product/[id]` n'existe dans l'app (seulement
+      // `/product?id=`, non lu non plus). On conduit vers la catégorie
+      // complète du produit, comme Jumia/Alibaba le font pour leurs push
+      // de relance produit.
+      const deepLink = categoryLink(product.category);
 
       for (let i = 0; i < tokens.length; i += 500) {
         const chunk = tokens.slice(i, i + 500);
