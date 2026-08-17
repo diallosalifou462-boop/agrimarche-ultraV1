@@ -7,7 +7,7 @@ import { useRouter } from 'next/navigation';
 import { db } from '@/lib/firebase/firebase';
 import {
   collection, query, where, onSnapshot,
-  doc, updateDoc, serverTimestamp, getDoc, writeBatch, Timestamp
+  doc, updateDoc, serverTimestamp, getDoc, writeBatch
 } from 'firebase/firestore';
 import {
   MapPin, Phone, CheckCircle, User,
@@ -19,6 +19,11 @@ import {
 import { toast } from 'sonner';
 import { ORDER_STATUS_CONFIG, statusTint, formatFCFA } from '@/lib/orderStatus';
 import { apiUrl } from '@/lib/api-config';
+// ✅ Le code de livraison appartient au client : ces deux appels
+// remplacent les écritures Firestore directes ci-dessous (claimOrder,
+// markAsDelivered) par des Cloud Functions qui génèrent/vérifient le
+// code côté serveur — le livreur ne le voit jamais.
+import { claimOrder as claimOrderSecure, confirmDeliveryWithCode, DeliveryCodeError } from '@/lib/deliveryCodeActions';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -248,11 +253,34 @@ function TimelineBadge({ order }: { order: Order }) {
 
 // ─── Order Card ───────────────────────────────────────────────────────────────
 
-function OrderCard({ order, onMarkDelivered, onMarkArrived, currentLocation }: { order: Order; onMarkDelivered: (id: string) => void; onMarkArrived: (id: string) => void; currentLocation?: Location | null }) {
+// Motifs prédéfinis pour le signalement rapide — couvrent les cas de
+// terrain les plus fréquents (section 9 du cahier des charges). "Autre"
+// laisse la note libre pour tout ce qui ne rentre pas dans ces cases.
+const PROBLEM_REASONS = [
+  'Client absent',
+  'Vendeur fermé',
+  'Adresse incorrecte',
+  'Téléphone injoignable',
+  'Produit indisponible',
+  'Accident / panne',
+  'Autre',
+] as const;
+
+function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLocation }: { order: Order; onMarkDelivered: (id: string) => void; onMarkArrived: (id: string) => void; onRelease: (id: string) => void; currentLocation?: Location | null }) {
   const [expanded, setExpanded] = useState(false);
   const [showDates, setShowDates] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  // ✅ NOUVEAU — signalement de problème en un geste. Avant, la seule façon
+  // de renseigner dateProbleme/noteProbleme était d'ouvrir "Dates suivi",
+  // choisir un champ, taper une date/heure manuellement puis écrire une
+  // note libre : trop d'étapes pour un livreur planté devant une porte
+  // fermée, en plein soleil, avec une seule main. Ici : un motif prédéfini
+  // en un tap suffit ; la note libre reste disponible en option.
+  const [showProblem, setShowProblem] = useState(false);
+  const [problemReason, setProblemReason] = useState<typeof PROBLEM_REASONS[number] | null>(null);
+  const [problemNote, setProblemNote] = useState('');
+  const [reportingProblem, setReportingProblem] = useState(false);
   const [dates, setDates] = useState({
     dateDepart: order.dateDepart || '',
     dateArrivee: order.dateArrivee || '',
@@ -283,20 +311,71 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, currentLocation }: {
   const saveDates = async () => {
     setSaving(true);
     try {
-      await updateDoc(doc(db, 'orders', order.id), {
+      const payload = {
         dateDepart: dates.dateDepart || null,
         dateArrivee: dates.dateArrivee || null,
         dateRetour: dates.dateRetour || null,
         dateLivree: dates.dateLivree || null,
         dateProbleme: dates.dateProbleme || null,
         noteProbleme: dates.noteProbleme || null,
-      });
+      };
+      // ✅ FIX cohérence inter-collections (même bug que claimOrder/
+      // markAsArrived/markAsDelivered ci-dessous) : cette fonction n'écrivait
+      // QUE dans 'orders'. Le vendeur et l'admin, qui lisent 'seller_orders',
+      // ne voyaient donc jamais les dates de suivi ni les notes de problème
+      // saisies manuellement ici.
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'orders', order.id), payload, { merge: true });
+      const sellerOrderSnap = await getDoc(doc(db, 'seller_orders', order.id));
+      if (sellerOrderSnap.exists()) {
+        batch.set(doc(db, 'seller_orders', order.id), payload, { merge: true });
+      }
+      await batch.commit();
       setSaved(true);
       setTimeout(() => { setSaved(false); setShowDates(false); }, 1200);
     } catch {
       alert('Erreur lors de la sauvegarde');
     } finally {
       setSaving(false);
+    }
+  };
+
+  // ✅ NOUVEAU — signalement rapide. Écrit dateProbleme + noteProbleme (même
+  // champs que le panneau "Dates suivi", donc rien de nouveau côté
+  // Firestore/règles/admin) dans 'orders' ET 'seller_orders' pour que le
+  // vendeur et AgriMarché voient immédiatement le blocage, avec le même
+  // motif choisi affiché dans la note. Ne touche jamais `status` : une
+  // livraison signalée reste "en cours" tant qu'AgriMarché ou le livreur ne
+  // la referme pas explicitement — pas de fermeture forcée depuis ce bouton.
+  const reportProblem = async () => {
+    if (!problemReason) return;
+    setReportingProblem(true);
+    try {
+      const note = problemReason === 'Autre'
+        ? (problemNote.trim() || 'Problème signalé (motif non précisé)')
+        : problemNote.trim() ? `${problemReason} — ${problemNote.trim()}` : problemReason;
+      const payload = { dateProbleme: nowLocal(), noteProbleme: note };
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'orders', order.id), payload, { merge: true });
+      const sellerOrderSnap = await getDoc(doc(db, 'seller_orders', order.id));
+      if (sellerOrderSnap.exists()) {
+        batch.set(doc(db, 'seller_orders', order.id), payload, { merge: true });
+      }
+      await batch.commit();
+      // Pas d'affirmation "support notifié" ici : ce commit écrit
+      // dateProbleme/noteProbleme, rien de plus — aucun trigger serveur
+      // vérifié dans ce fichier n'envoie une alerte au support à cet
+      // instant. Si un tel trigger existe côté functions/, le message peut
+      // être enrichi ; sinon le bouton "🆘 Support" (WhatsApp) reste le
+      // canal réel pour une urgence.
+      toast.success('Problème signalé sur la commande');
+      setShowProblem(false);
+      setProblemReason(null);
+      setProblemNote('');
+    } catch {
+      toast.error('Erreur lors du signalement — réessaie ou contacte le support');
+    } finally {
+      setReportingProblem(false);
     }
   };
 
@@ -418,16 +497,87 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, currentLocation }: {
           </button>
         )}
 
-        {/* Action row 2 — dates + support */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+        {/* ✅ NOUVEAU — "refuser lorsque le système le permet" (section 3 du
+            cahier des charges) : un livreur peut se rendre compte juste
+            après avoir accepté qu'il ne peut pas assurer cette course
+            (trop loin, urgence personnelle, doublon...). Visible UNIQUEMENT
+            tant que `tracking.phase === 'assigned'`, c'est-à-dire avant le
+            premier point GPS envoyé pour cette commande (voir
+            startSharingLocation, qui fait passer la phase à 'en_route' dès
+            la première position reçue) — donc jamais une fois la course
+            réellement commencée sur le terrain. Remet la commande dans le
+            pool `en_preparation` pour qu'un autre livreur puisse la prendre. */}
+        {order.tracking?.phase === 'assigned' && (
+          <button
+            onClick={() => onRelease(order.id)}
+            style={{ ...btnStyleBtn('#fff7ed', '#c2410c'), width: '100%', marginBottom: '8px' }}
+          >
+            ↩️ Libérer cette commande
+          </button>
+        )}
+
+        {/* Action row 2 — dates + problème + support */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px' }}>
           <button onClick={() => setShowDates(s => !s)} style={btnStyleBtn(showDates ? '#ede9fe' : '#f1f5f9', showDates ? '#7c3aed' : '#475569')}>
             <Calendar size={13} />
-            {showDates ? 'Fermer' : 'Dates suivi'}
+            {showDates ? 'Fermer' : 'Dates'}
+          </button>
+          <button
+            onClick={() => setShowProblem(s => !s)}
+            style={btnStyleBtn(showProblem ? '#fee2e2' : '#fef2f2', '#ef4444')}
+          >
+            <AlertCircle size={13} />
+            {showProblem ? 'Fermer' : 'Problème'}
           </button>
           <a href="https://wa.me/221779747073" target="_blank" rel="noopener noreferrer" style={btnStyle('#fff7ed', '#ea580c')}>
             🆘 Support
           </a>
         </div>
+
+        {/* Panneau de signalement — motif en un tap, note libre optionnelle */}
+        {showProblem && (
+          <div style={{ marginTop: '10px', padding: '16px', background: '#fef2f2', borderRadius: '16px', border: '1px solid #fecaca', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <AlertCircle size={13} color="#ef4444" />
+              <p style={{ color: '#ef4444', fontSize: '12px', fontWeight: 700 }}>SIGNALER UN PROBLÈME</p>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+              {PROBLEM_REASONS.map(reason => (
+                <button
+                  key={reason}
+                  onClick={() => setProblemReason(reason)}
+                  style={{
+                    padding: '8px 12px', borderRadius: '99px', fontSize: '12px', fontWeight: 600, cursor: 'pointer',
+                    background: problemReason === reason ? '#ef4444' : '#ffffff',
+                    color: problemReason === reason ? '#fff' : '#7f1d1d',
+                    border: `1px solid ${problemReason === reason ? '#ef4444' : '#fecaca'}`,
+                  }}
+                >
+                  {reason}
+                </button>
+              ))}
+            </div>
+            <textarea
+              value={problemNote}
+              onChange={e => setProblemNote(e.target.value)}
+              placeholder={problemReason === 'Autre' ? 'Décris le problème...' : 'Détail optionnel...'}
+              rows={2}
+              style={{ width: '100%', padding: '9px 11px', border: '1px solid #fecaca', borderRadius: '10px', fontSize: '13px', color: '#1e293b', background: '#fff', outline: 'none', resize: 'none', fontFamily: 'inherit' }}
+            />
+            <button
+              onClick={reportProblem}
+              disabled={!problemReason || reportingProblem}
+              style={{
+                padding: '12px', border: 'none', borderRadius: '12px', color: '#fff', fontSize: '13px', fontWeight: 700,
+                background: !problemReason ? '#fca5a5' : reportingProblem ? '#f87171' : '#ef4444',
+                cursor: !problemReason || reportingProblem ? 'not-allowed' : 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
+              }}
+            >
+              {reportingProblem ? 'Envoi...' : <><AlertCircle size={14} /> Confirmer le signalement</>}
+            </button>
+          </div>
+        )}
 
         {/* Date fields panel */}
         {showDates && (
@@ -517,6 +667,95 @@ function btnStyle(bg: string, color: string): React.CSSProperties {
 }
 function btnStyleBtn(bg: string, color: string): React.CSSProperties {
   return { ...btnStyle(bg, color), border: 'none', cursor: 'pointer' };
+}
+
+// ─── Delivery Code Modal ───────────────────────────────────────────────────────
+// ✅ NOUVEAU — remplace le window.confirm() aveugle de markAsDelivered.
+// Le livreur ne voit JAMAIS le code : il saisit ici exactement ce que le
+// CLIENT vient de lui dicter à voix haute, après avoir ouvert lui-même
+// AgriMarché. Le serveur (confirmDeliveryWithCode) tranche.
+
+function DeliveryCodeModal({
+  orderId, orderNumber, onClose, onSubmit,
+}: {
+  orderId: string;
+  orderNumber?: string;
+  onClose: () => void;
+  onSubmit: (orderId: string, code: string) => Promise<void>;
+}) {
+  const [code, setCode] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = async () => {
+    if (code.length !== 4) {
+      setError('Le code comporte 4 chiffres.');
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      await onSubmit(orderId, code);
+    } catch (e: any) {
+      setError(e?.message || 'Code incorrect.');
+      setCode('');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.55)',
+      display: 'flex', alignItems: 'flex-end', justifyContent: 'center', zIndex: 1000,
+    }}>
+      <div style={{
+        width: '100%', maxWidth: '480px', background: '#fff',
+        borderRadius: '24px 24px 0 0', padding: '24px', paddingBottom: '32px',
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+          <h3 style={{ fontSize: '17px', fontWeight: 800, color: '#1e293b' }}>🔐 Code de validation requis</h3>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer' }}>
+            <X size={20} />
+          </button>
+        </div>
+        <p style={{ color: '#64748b', fontSize: '13px', lineHeight: 1.5, margin: '8px 0 18px' }}>
+          Demandez au client d'ouvrir AgriMarché{orderNumber ? ` (commande #${orderNumber})` : ''} et de vous
+          communiquer le code affiché dans sa commande. Vous seul ne pouvez pas le connaître.
+        </p>
+        <input
+          type="tel"
+          inputMode="numeric"
+          maxLength={4}
+          autoFocus
+          value={code}
+          onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 4))}
+          placeholder="• • • •"
+          style={{
+            width: '100%', textAlign: 'center', fontSize: '32px', fontWeight: 800,
+            letterSpacing: '12px', padding: '16px', borderRadius: '16px',
+            border: error ? '2px solid #ef4444' : '2px solid #e2e8f0', color: '#1e293b',
+            marginBottom: '10px', fontFamily: 'monospace',
+          }}
+        />
+        {error && (
+          <p style={{ color: '#ef4444', fontSize: '13px', textAlign: 'center', marginBottom: '10px' }}>{error}</p>
+        )}
+        <button
+          onClick={handleSubmit}
+          disabled={submitting || code.length !== 4}
+          style={{
+            width: '100%', padding: '15px', borderRadius: '14px', border: 'none',
+            background: submitting || code.length !== 4 ? '#cbd5e1' : 'linear-gradient(135deg, #10b981, #059669)',
+            color: '#fff', fontSize: '15px', fontWeight: 700,
+            cursor: submitting || code.length !== 4 ? 'not-allowed' : 'pointer',
+          }}
+        >
+          {submitting ? 'Vérification…' : 'Confirmer la livraison'}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 // ─── Earnings Modal ────────────────────────────────────────────────────────────
@@ -653,6 +892,54 @@ export default function DeliveryDashboard() {
   const [activeTab, setActiveTab] = useState<'disponibles' | 'encours' | 'terminees'>('encours');
   const [autoTabSet, setAutoTabSet] = useState(false);
   const [showEarnings, setShowEarnings] = useState(false);
+  // ✅ NOUVEAU — modal de vérification du code de livraison (preuve de
+  // livraison). `codeModalOrderId` porte l'id de la commande en cours de
+  // confirmation ; null = modal fermé. Le code lui-même n'est jamais
+  // détenu côté client : la vérification se fait côté serveur dans
+  // confirmDeliveryWithCode (voir submitDeliveryCode ci-dessous).
+  const [codeModalOrderId, setCodeModalOrderId] = useState<string | null>(null);
+  // ✅ NOUVEAU — statut disponible/indisponible du livreur (section 2 du
+  // cahier des charges), distinct du partage GPS. Par défaut `true` :
+  // un livreur existant dont le champ `isAvailable` n'existe pas encore en
+  // base doit continuer à voir les missions comme avant (pas de trou noir
+  // silencieux le jour de ce déploiement). Écrit sur `users/{uid}`, la
+  // collection déjà lue par `profile` — aucune nouvelle collection, aucune
+  // règle Firestore à ajouter.
+  const [isAvailable, setIsAvailable] = useState(true);
+  const [availabilityLoaded, setAvailabilityLoaded] = useState(false);
+  const [savingAvailability, setSavingAvailability] = useState(false);
+  useEffect(() => {
+    if (!profile || availabilityLoaded) return;
+    setIsAvailable(profile.isAvailable !== false);
+    setAvailabilityLoaded(true);
+  }, [profile, availabilityLoaded]);
+
+  const toggleAvailability = useCallback(async () => {
+    if (!user) return;
+    const next = !isAvailable;
+    setIsAvailable(next); // optimiste — un livreur dehors avec un réseau
+    // faible ne doit pas attendre l'aller-retour Firestore pour voir son
+    // propre bouton changer d'état.
+    setSavingAvailability(true);
+    try {
+      await updateDoc(doc(db, 'users', user.uid), {
+        isAvailable: next,
+        availabilityUpdatedAt: serverTimestamp(),
+      });
+    } catch {
+      setIsAvailable(!next); // rollback si l'écriture échoue réellement
+      toast.error('Impossible de changer ton statut — vérifie ta connexion');
+    } finally {
+      setSavingAvailability(false);
+    }
+  }, [user, isAvailable]);
+
+  // Ref à jour pour être lue depuis le listener temps réel des commandes
+  // disponibles (effect à deps [user], qui ne doit pas se réabonner à
+  // chaque toggle de disponibilité).
+  const isAvailableRef = useRef(isAvailable);
+  useEffect(() => { isAvailableRef.current = isAvailable; }, [isAvailable]);
+
   const ordersRef = useRef<Order[]>([]);
 
   useEffect(() => { ordersRef.current = orders; }, [orders]);
@@ -689,30 +976,28 @@ export default function DeliveryDashboard() {
     return () => unsub();
   }, [user]);
 
-  // Listen commandes disponibles : une fois CONFIRMÉES par le vendeur
-  // (en_preparation), pas encore prises par un livreur.
-  // ⚠️ FIX MAJEUR : cette requête ciblait auparavant 'en_attente' — un
-  // statut où le VENDEUR N'A MÊME PAS ENCORE CONFIRMÉ la commande (il
-  // pourrait encore la refuser). Un livreur pouvait donc s'engager sur une
-  // commande qui n'existait pas encore vraiment côté préparation. Combiné
-  // au bug de claimOrder ci-dessous (qui ne touchait jamais `status`),
-  // c'est ce qui faisait "disparaître" les commandes acceptées : elles
-  // quittaient "disponibles" (delivererId posé) sans jamais apparaître
-  // dans "en cours" (qui exige status en_livraison/livre).
-  // ⚠️ RISQUE OPÉRATIONNEL NON RÉSOLU : ce fichier ne contient aucune
-  // firestore.rules — je n'ai pas pu vérifier ni corriger les règles de
-  // sécurité. Si une règle restreint explicitement la lecture des
-  // commandes par un livreur au statut 'en_attente' (comme le suggérait
-  // l'ancien commentaire ci-dessous), ce changement de requête renverra
-  // silencieusement ZÉRO résultat (permission denied, pas une erreur
-  // visible) tant que la règle n'est pas mise à jour côté Firebase Console
-  // pour autoriser 'en_preparation' à la place.
+  // Listen commandes disponibles : CONFIRMÉES par le vendeur (en_preparation)
+  // OU tout juste passées (en_attente), tant qu'aucun livreur n'est encore
+  // assigné.
+  // 🐛 FIX : cette requête ne ciblait auparavant QUE 'en_preparation'. Une
+  // commande qui vient d'être passée reste 'en_attente' jusqu'à ce que le
+  // vendeur la confirme — parfois plusieurs minutes, parfois jamais si le
+  // vendeur est lent à répondre. Pendant tout ce temps, la commande était
+  // invisible pour TOUS les livreurs, même sans aucun delivererId. Elle
+  // réapparaît maintenant dès sa création, permettant à un livreur de s'y
+  // positionner à l'avance ; claimOrder (Cloud Function) gère les deux
+  // cas : s'il est encore 'en_attente' au moment du clic, seul delivererId
+  // est posé (le statut ne bouge pas, la confirmation du vendeur reste
+  // requise) ; s'il est déjà 'en_preparation', le comportement historique
+  // s'applique (passage direct à 'en_livraison'). Nécessite le firestore.rules
+  // correspondant (resource.data.status in ['en_attente', 'en_preparation'])
+  // — sans quoi Firestore refuse la requête list() en permission-denied.
   const [availableOrders, setAvailableOrders] = useState<Order[]>([]);
   const [claimingId, setClaimingId] = useState<string | null>(null);
   const prevAvailableCountRef = useRef<number | null>(null);
   useEffect(() => {
     if (!user) return;
-    const q = query(collection(db, 'orders'), where('status', '==', 'en_preparation'));
+    const q = query(collection(db, 'orders'), where('status', 'in', ['en_attente', 'en_preparation']));
     const unsub = onSnapshot(q, (snap) => {
       const list = snap.docs
         .map(d => ({ ...d.data(), id: d.id } as Order)) // FIX: id apres le spread
@@ -723,7 +1008,7 @@ export default function DeliveryDashboard() {
       // permanence. Le premier chargement (prevAvailableCountRef.current
       // === null) ne déclenche jamais l'alerte — seulement les arrivées
       // après coup.
-      if (prevAvailableCountRef.current !== null && list.length > prevAvailableCountRef.current) {
+      if (prevAvailableCountRef.current !== null && list.length > prevAvailableCountRef.current && isAvailableRef.current) {
         playNewOrderAlert();
       }
       prevAvailableCountRef.current = list.length;
@@ -735,52 +1020,22 @@ export default function DeliveryDashboard() {
     if (!user || !profile) return;
     setClaimingId(orderId);
     try {
-      // ⚠️ FIX cohérence inter-collections (même bug que admin/page.tsx::
-      // updateOrderStatus avant son fix, et admin/assign-delivery avant le
-      // sien) : cette fonction n'écrivait QUE dans 'orders'. seller_orders
-      // — lu par le vendeur pour voir qui vient récupérer sa commande —
-      // ne recevait jamais delivererId/Name/Phone. Un vendeur regardant
-      // sa commande "en_attente" ne voyait jamais qu'un livreur l'avait
-      // déjà prise en charge, et pouvait par exemple la refuser alors
-      // qu'un livreur était déjà en route pour la récupérer.
-      const payload = {
-        delivererId: user.uid,
-        delivererName: profile.displayName || 'Livreur',
-        delivererPhone: profile.phone || '',
-        delivererAssignedAt: Timestamp.now(),
-        // ⚠️ FIX MAJEUR — le vrai bug signalé ("accepter ne fait rien, la
-        // commande disparaît") : cette fonction ne touchait auparavant QUE
-        // delivererId, jamais `status`. Résultat : la commande quittait
-        // "disponibles" (delivererId désormais posé, filtré côté client)
-        // sans jamais apparaître dans "en cours" (qui exige status
-        // en_livraison/livre) — orpheline, invisible partout, tant que
-        // personne d'autre ne retouchait la commande. Puisque cette
-        // fonction ne cible désormais que des commandes déjà confirmées
-        // par le vendeur (en_preparation, voir la requête juste au-dessus),
-        // faire passer status → en_livraison au moment de l'acceptation
-        // est sémantiquement correct : le livreur prend en charge
-        // maintenant, pas "un jour peut-être".
-        status: 'en_livraison' as const,
-        // Parcours de suivi hybride : ce champ pilote désormais les
-        // notifications de progression (voir notifyDeliveryPhaseChange côté
-        // serveur), indépendamment de `status`.
-        'tracking.phase': 'assigned',
-      };
-      const batch = writeBatch(db);
-      batch.set(doc(db, 'orders', orderId), payload, { merge: true });
-      const sellerOrderSnap = await getDoc(doc(db, 'seller_orders', orderId));
-      if (sellerOrderSnap.exists()) {
-        batch.set(doc(db, 'seller_orders', orderId), payload, { merge: true });
-      }
-      await batch.commit();
-
-      // ⚠️ CONSOLIDATION : cette notification vendeur partait auparavant
-      // d'ici, côté client. Elle est désormais gérée par le trigger serveur
-      // notifyDelivererClaimed (functions/src/index.ts), qui réagit à
-      // l'apparition de delivererId sur cette même écriture — garanti,
-      // même si l'app du livreur se ferme juste après ce clic.
-    } catch {
-      alert("Cette commande vient peut-être d'être prise par un autre livreur.");
+      // ✅ Cette écriture directe (orders + seller_orders, delivererId,
+      // status → en_livraison, code de livraison à 4 chiffres) vit
+      // désormais côté serveur dans la Cloud Function claimOrder
+      // (functions/src/deliveryCode.ts) — même comportement fonctionnel,
+      // mais exécutée en transaction Admin SDK, ce qui permet d'y générer
+      // le code de livraison sans jamais l'exposer au frontend du
+      // livreur : le code appartient au client, jamais au livreur (voir
+      // src/lib/deliveryCodeActions.ts). Le SMS "code de confirmation" est
+      // supprimé — le code n'est plus jamais envoyé par SMS ; le client le
+      // consulte dans "Mon compte" (voir account/orders/page.tsx) et le
+      // communique de vive voix. La notification vendeur reste gérée par
+      // notifyDelivererClaimed côté serveur, inchangée.
+      await claimOrderSecure(orderId);
+    } catch (e) {
+      const message = e instanceof DeliveryCodeError ? e.message : "Cette commande vient peut-être d'être prise par un autre livreur.";
+      alert(message);
     } finally {
       setClaimingId(null);
     }
@@ -853,27 +1108,25 @@ export default function DeliveryDashboard() {
     } catch { toast.error("Erreur lors de la confirmation d'arrivée"); }
   };
 
-  const markAsDelivered = async (orderId: string) => {
-    if (!confirm('Confirmer la livraison ?')) return;
-    // Le montant du gain (deliveryFee) est capturé AVANT l'updateDoc pour
-    // l'afficher dans le toast de confirmation — il vient s'ajouter au
-    // "montant" total du livreur (visible dans le panneau Mes gains, calculé
-    // dynamiquement à partir de toutes les commandes status:'livre').
+  // ✅ NOUVEAU — miroir exact de claimOrder, en sens inverse : remet la
+  // commande dans le pool des commandes disponibles pour un autre livreur.
+  // N'est appelable côté UI que quand tracking.phase === 'assigned' (voir
+  // OrderCard), donc jamais après un vrai début de course — mais on
+  // revérifie ici côté client par sécurité, au cas où l'état local serait
+  // périmé de quelques centaines de ms par rapport à Firestore.
+  const releaseOrder = async (orderId: string) => {
     const order = ordersRef.current.find(o => o.id === orderId);
+    if (order?.tracking?.phase && order.tracking.phase !== 'assigned') {
+      toast.error('Cette course a déjà commencé, elle ne peut plus être libérée.');
+      return;
+    }
+    if (!confirm('Libérer cette commande ? Elle redeviendra disponible pour un autre livreur.')) return;
     try {
-      // ⚠️ FIX cohérence inter-collections — LE bug le plus impactant de
-      // toute la chaîne de livraison : c'est ICI, quand le livreur confirme
-      // réellement la livraison sur le terrain, que le statut passe à
-      // 'livre' en production (pas depuis l'admin, qui ne sert qu'aux
-      // interventions manuelles). Cette fonction n'écrivait QUE dans
-      // 'orders' — jamais dans 'seller_orders', que "Mon compte" (acheteur)
-      // lit pour son historique. Concrètement : après une vraie livraison
-      // confirmée par le livreur, l'acheteur restait bloqué sur l'ancien
-      // statut ("En livraison") indéfiniment dans son compte.
-      const now = Timestamp.now();
       const payload = {
-        status: 'livre' as const, statusLabel: 'Livrée',
-        deliveredAt: now, updatedAt: now, 'tracking.enabled': false,
+        delivererId: null, delivererName: null, delivererPhone: null,
+        delivererAssignedAt: null,
+        status: 'en_preparation' as const,
+        'tracking.phase': null,
       };
       const batch = writeBatch(db);
       batch.set(doc(db, 'orders', orderId), payload, { merge: true });
@@ -882,22 +1135,44 @@ export default function DeliveryDashboard() {
         batch.set(doc(db, 'seller_orders', orderId), payload, { merge: true });
       }
       await batch.commit();
+      toast.success('Commande libérée');
+    } catch { toast.error('Erreur — la commande est peut-être déjà partie plus loin.'); }
+  };
+
+  // ✅ Ne livre plus "à l'aveugle" sur un simple confirm() : ouvre la
+  // modal de saisie du code que le CLIENT doit avoir communiqué au
+  // livreur. La vérification réelle se fait côté serveur dans
+  // submitDeliveryCode ci-dessous (bouton "Livré" de OrderCard).
+  const markAsDelivered = (orderId: string) => {
+    setCodeModalOrderId(orderId);
+  };
+
+  const submitDeliveryCode = async (orderId: string, code: string) => {
+    // Le montant du gain (deliveryFee) est capturé pour le toast de
+    // confirmation — il vient s'ajouter au solde du livreur (panneau
+    // "Mes gains", calculé dynamiquement à partir des commandes 'livre').
+    const order = ordersRef.current.find(o => o.id === orderId);
+    try {
+      // ✅ Remplace l'ancienne écriture directe (orders + seller_orders,
+      // status → 'livre') par confirmDeliveryWithCode côté serveur : le
+      // code saisi ici est celui que le client vient de donner au
+      // livreur, vérifié en transaction contre le hash stocké par
+      // claimOrder. Le miroir seller_orders reste synchronisé côté
+      // serveur, et l'écriture est garantie atomique (5 tentatives max,
+      // usage unique).
+      await confirmDeliveryWithCode(orderId, code);
+      setCodeModalOrderId(null);
       toast.success(
         order?.deliveryFee
           ? `Livraison confirmée ! +${formatFCFA(order.deliveryFee)} ajoutés à votre solde`
           : 'Livraison confirmée !'
       );
 
-      // ⚠️ CONSOLIDATION : les notifications push acheteur et vendeur sur
-      // livraison confirmée partaient auparavant d'ici, côté client.
-      // Le trigger serveur notifyOrderStatusStep (functions/src/index.ts)
-      // couvre désormais les deux — message acheteur enrichi (invitation à
-      // noter + lien /review) et bloc vendeur ajouté — déclenché
-      // automatiquement par l'écriture ci-dessus, garanti même si l'app du
-      // livreur se ferme juste après la confirmation.
+      // Notifications acheteur/vendeur : notifyOrderStatusStep côté
+      // serveur, déclenché par le passage à 'livre' ci-dessus.
 
-      // SMS de confirmation de livraison au client (best-effort, via
-      // Infobip — voir /api/send-sms). Ne bloque jamais la validation.
+      // SMS "commande livrée, bon appétit" : best-effort, distinct du
+      // code de livraison (qui, lui, n'est plus jamais envoyé par SMS).
       if (order?.userPhone) {
         fetch(apiUrl('/api/send-sms'), {
           method: 'POST',
@@ -908,7 +1183,11 @@ export default function DeliveryDashboard() {
           }),
         }).catch((e) => console.warn('[delivery] SMS confirmation non envoyé:', e));
       }
-    } catch { toast.error('Erreur lors de la validation'); }
+    } catch (e) {
+      const message = e instanceof DeliveryCodeError ? e.message : 'Erreur lors de la validation';
+      toast.error(message);
+      throw e; // la modal reste ouverte et affiche l'erreur inline
+    }
   };
 
   const handleLogout = async () => {
@@ -924,12 +1203,12 @@ export default function DeliveryDashboard() {
   useEffect(() => {
     if (autoTabSet || loading) return;
     const hasActive = orders.some(o => o.status === 'en_livraison');
-    const hasAvailable = availableOrders.length > 0;
+    const hasAvailable = isAvailable && availableOrders.length > 0;
     if (hasActive) setActiveTab('encours');
     else if (hasAvailable) setActiveTab('disponibles');
     else setActiveTab('terminees');
     setAutoTabSet(true);
-  }, [loading, orders, availableOrders, autoTabSet]);
+  }, [loading, orders, availableOrders, autoTabSet, isAvailable]);
 
   if (authLoading || loading) {
     return (
@@ -1020,6 +1299,43 @@ export default function DeliveryDashboard() {
               </button>
             </div>
           </div>
+
+          {/* ✅ NOUVEAU : statut disponible/indisponible — juge à lui seul si
+              le livreur reçoit des propositions de mission (section 2 du
+              cahier des charges). Grande cible tactile en haut, avant même
+              le solde : c'est la première décision du livreur en ouvrant
+              l'app, avant de regarder quoi que ce soit d'autre. */}
+          <button
+            onClick={toggleAvailability}
+            disabled={savingAvailability}
+            style={{
+              width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              background: isAvailable ? 'rgba(16,185,129,0.16)' : 'rgba(148,163,184,0.14)',
+              border: `1px solid ${isAvailable ? 'rgba(16,185,129,0.4)' : 'rgba(148,163,184,0.35)'}`,
+              borderRadius: '14px', padding: '13px 14px', marginBottom: '10px',
+              cursor: savingAvailability ? 'default' : 'pointer', opacity: savingAvailability ? 0.7 : 1,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '9px' }}>
+              <div style={{
+                width: '10px', height: '10px', borderRadius: '50%',
+                background: isAvailable ? '#10b981' : '#94a3b8',
+                boxShadow: isAvailable ? '0 0 0 3px rgba(16,185,129,0.25)' : 'none',
+              }} />
+              <span style={{ color: '#fff', fontSize: '14px', fontWeight: 700 }}>
+                {isAvailable ? 'Disponible' : 'Indisponible'}
+              </span>
+              <span style={{ color: '#94a3b8', fontSize: '11px' }}>
+                {isAvailable ? '— tu reçois des missions' : '— en pause'}
+              </span>
+            </div>
+            <span style={{
+              padding: '5px 12px', borderRadius: '99px', fontSize: '11px', fontWeight: 700,
+              background: isAvailable ? '#ef4444' : '#10b981', color: '#fff',
+            }}>
+              {savingAvailability ? '...' : isAvailable ? 'Passer en pause' : 'Activer'}
+            </span>
+          </button>
 
           {/* ✅ NOUVEAU : solde total, cliquable, toujours visible en haut —
               répond au besoin de voir "le montant" du livreur d'un coup
@@ -1139,7 +1455,30 @@ export default function DeliveryDashboard() {
 
         {/* Contenu de l'onglet actif */}
         {activeTab === 'disponibles' && (
-          sortedAvailable.length === 0 ? (
+          !isAvailable ? (
+            // ✅ NOUVEAU : tant que le livreur est en pause, on ne propose
+            // aucune mission — cohérent avec le statut affiché en haut de
+            // l'écran. Le nombre réel de courses en attente reste visible
+            // (honnête, pas de chiffre masqué) pour donner envie de se
+            // réactiver, mais la liste elle-même n'apparaît qu'une fois
+            // redevenu disponible.
+            <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '20px', padding: '48px 24px', textAlign: 'center' }}>
+              <WifiOff size={44} color="#cbd5e1" style={{ marginBottom: '12px' }} />
+              <p style={{ color: '#475569', fontWeight: 500, fontSize: '16px', marginBottom: '4px' }}>Tu es en pause</p>
+              <p style={{ color: '#94a3b8', fontSize: '13px', marginBottom: '16px' }}>
+                {sortedAvailable.length > 0
+                  ? `${sortedAvailable.length} course(s) en attente — active-toi pour les voir`
+                  : 'Aucune course en attente pour le moment'}
+              </p>
+              <button
+                onClick={toggleAvailability}
+                disabled={savingAvailability}
+                style={{ padding: '11px 24px', background: '#10b981', border: 'none', borderRadius: '12px', color: '#fff', fontSize: '13px', fontWeight: 700, cursor: savingAvailability ? 'default' : 'pointer' }}
+              >
+                Passer disponible
+              </button>
+            </div>
+          ) : sortedAvailable.length === 0 ? (
             <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '20px', padding: '48px 24px', textAlign: 'center' }}>
               <Zap size={44} color="#cbd5e1" style={{ marginBottom: '12px' }} />
               <p style={{ color: '#475569', fontWeight: 500, fontSize: '16px', marginBottom: '4px' }}>Aucune commande disponible</p>
@@ -1172,9 +1511,20 @@ export default function DeliveryDashboard() {
                         produits + livraison) affiché ici — trompeur pour un
                         livreur qui doit voir CE QU'IL GAGNE, c'est-à-dire
                         `deliveryFee` uniquement. */}
-                    <span style={{ padding: '4px 10px', background: '#dcfce7', borderRadius: '99px', color: '#059669', fontSize: '11px', fontWeight: 700, whiteSpace: 'nowrap' }}>
-                      Gain {formatFCFA(order.deliveryFee ?? 0)}
-                    </span>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
+                      <span style={{ padding: '4px 10px', background: '#dcfce7', borderRadius: '99px', color: '#059669', fontSize: '11px', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                        Gain {formatFCFA(order.deliveryFee ?? 0)}
+                      </span>
+                      {/* ✅ NOUVEAU : distingue les commandes déjà confirmées par
+                          le vendeur (prêtes à partir immédiatement) de celles
+                          encore 'en_attente' (le livreur peut se positionner en
+                          avance, mais la préparation n'a pas encore commencé). */}
+                      {order.status === 'en_attente' && (
+                        <span style={{ padding: '3px 9px', background: '#fef3c7', borderRadius: '99px', color: '#b45309', fontSize: '10px', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                          En attente du vendeur
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: pickup ? '1fr 1fr' : '1fr', gap: '8px' }}>
                     {pickup && (
@@ -1207,7 +1557,7 @@ export default function DeliveryDashboard() {
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
               {sortedActive.map(order => (
-                <OrderCard key={order.id} order={order} onMarkDelivered={markAsDelivered} onMarkArrived={markAsArrived} currentLocation={currentLocation} />
+                <OrderCard key={order.id} order={order} onMarkDelivered={markAsDelivered} onMarkArrived={markAsArrived} onRelease={releaseOrder} currentLocation={currentLocation} />
               ))}
             </div>
           )
@@ -1262,6 +1612,15 @@ export default function DeliveryDashboard() {
           weekEarnings={weekEarnings}
           completedDeliveries={completedDeliveries}
           onClose={() => setShowEarnings(false)}
+        />
+      )}
+
+      {codeModalOrderId && (
+        <DeliveryCodeModal
+          orderId={codeModalOrderId}
+          orderNumber={ordersRef.current.find(o => o.id === codeModalOrderId)?.orderNumber}
+          onClose={() => setCodeModalOrderId(null)}
+          onSubmit={submitDeliveryCode}
         />
       )}
     </div>

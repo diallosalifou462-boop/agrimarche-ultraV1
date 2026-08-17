@@ -36,6 +36,7 @@ interface Product {
   description?: string;
   images?: string[];
   stock?: number;
+  minOrder?: number;
 }
 
 interface UserLocation {
@@ -287,9 +288,14 @@ function ProductDetailContent() {
     loadProduct();
   }, [id]);
 
+  // ✅ Commande minimale définie par le vendeur (formulaire "Ajouter un
+  // produit" → src/app/seller/products/add/page.tsx). Le sélecteur de
+  // quantité ne doit jamais démarrer, ni redescendre, en dessous de ce seuil.
+  const minOrder = product?.minOrder || 1;
+
   // ✅ Reset
   useEffect(() => {
-    setQuantity(1);
+    setQuantity(product?.minOrder || 1);
     setSelectedImage(0);
     setImageError(false);
   }, [product]);
@@ -319,6 +325,7 @@ function ProductDetailContent() {
       category: product.category,
       images: product.images || [],
       stock: stock,
+      minOrder: product.minOrder || 1,
     };
     
     setAdding(true);
@@ -530,12 +537,19 @@ function ProductDetailContent() {
                 </div>
               </div>
 
+              {(product.minOrder || 1) > 1 && (
+                <p className="mt-3 text-xs text-emerald-700 bg-emerald-50 inline-block px-3 py-1.5 rounded-full">
+                  Commande minimale : {product.minOrder} {product.unit}
+                </p>
+              )}
+
               {/* QUANTITY */}
               <div className="mt-8">
                 <div className="flex items-center gap-4">
                   <button
-                    onClick={() => setQuantity((q) => Math.max(1, q - 1))}
-                    className="w-10 h-10 rounded-lg bg-gray-100 hover:bg-gray-200 transition"
+                    onClick={() => setQuantity((q) => Math.max(minOrder, q - 1))}
+                    disabled={quantity <= minOrder}
+                    className="w-10 h-10 rounded-lg bg-gray-100 hover:bg-gray-200 transition disabled:opacity-40"
                   >
                     -
                   </button>

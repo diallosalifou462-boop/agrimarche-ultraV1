@@ -18,6 +18,7 @@ import { Capacitor } from '@capacitor/core';
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
 import { auth, db, waitForFirestoreReady, trace } from '@/lib/firebase/firebase';
 import { ensureUserExists } from '@/lib/firebase/userProfile';
+import { trackActivityTick } from '@/lib/interests/trackActivity';
 
 // =====================================================
 // ⚡ FUSION useAuth.ts + AuthContext.tsx
@@ -222,6 +223,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setAuthDebugInfo(`profil non chargé : ${(error as Error)?.message || error}`);
         }
         registerNotificationToken(firebaseUser.uid); // fire-and-forget, ne bloque pas le chargement
+        trackActivityTick(firebaseUser.uid); // fire-and-forget, throttlé en interne (voir trackActivity.ts)
       } else {
         setProfile(null);
       }
@@ -246,6 +248,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             FirebaseAuthentication.getCurrentUser().catch((err) => {
               console.error('[AuthContext] Échec resynchro (reprise app):', err);
             });
+            // Reprise d'activité côté natif : onAuthStateChanged ne se
+            // redéclenche pas ici (la session ne change pas), donc c'est
+            // le seul point où capter qu'un utilisateur déjà connecté
+            // vient d'ouvrir l'app à CETTE heure-ci.
+            trackActivityTick(auth.currentUser?.uid);
           }
         }).then((handle) => {
           removeResumeListener = () => handle.remove();

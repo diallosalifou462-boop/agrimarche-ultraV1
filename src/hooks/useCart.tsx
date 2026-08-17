@@ -314,6 +314,13 @@ export function CartProvider({ children }: { children: ReactNode }) {
       // ✅ SAFE STOCK CHECK
       if ((product.stock || 0) <= 0) return;
 
+      // ✅ COMMANDE MINIMALE : un premier ajout au panier ne peut jamais
+      // être inférieur à la quantité minimale définie par le vendeur
+      // (product.minOrder). Sans ce garde-fou, le bouton "Panier" (qui
+      // ajoute toujours 1 par défaut) contournait silencieusement la
+      // commande minimale affichée sur la fiche produit.
+      const minOrder = product.minOrder || 1;
+
       const newItems = existing
         ? prev.map((i) =>
             i.product.id === product.id
@@ -330,7 +337,10 @@ export function CartProvider({ children }: { children: ReactNode }) {
             ...prev,
             {
               product,
-              quantity: Math.min(quantity, product.stock || 0),
+              quantity: Math.min(
+                Math.max(quantity, minOrder),
+                product.stock || 0
+              ),
             },
           ];
 
@@ -355,14 +365,19 @@ export function CartProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      const newItems = itemsRef.current.map((i) =>
-        i.product.id !== productId
-          ? i
-          : {
-              ...i,
-              quantity: Math.min(quantity, i.product.stock || 0),
-            }
-      );
+      const newItems = itemsRef.current.map((i) => {
+        if (i.product.id !== productId) return i;
+        // ✅ COMMANDE MINIMALE : le bouton "−" du panier ne doit jamais
+        // faire descendre la quantité en dessous du minOrder du produit.
+        // Pour repasser sous ce seuil, l'utilisateur doit retirer
+        // l'article via le bouton de suppression dédié.
+        const minOrder = i.product.minOrder || 1;
+        const clamped = Math.max(quantity, minOrder);
+        return {
+          ...i,
+          quantity: Math.min(clamped, i.product.stock || 0),
+        };
+      });
 
       persist(newItems);
     },

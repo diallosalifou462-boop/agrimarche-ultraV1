@@ -15,12 +15,20 @@ import {
   OrderStatus, ORDER_STATUS_CONFIG, STATUS_TO_DELIVERY,
   normalizeStatus, statusTint, formatFCFA,
 } from '@/lib/orderStatus';
+import { inferBasePrice } from '@/lib/pricing';
 
 interface Order {
   id: string;
   customerName: string;
   customerPhone: string;
   amount: number;
+  // ⚠️ FIX : `amount` (= dd.total, produits + frais de livraison) était
+  // affiché tel quel au vendeur comme montant de la commande — il croyait
+  // donc parfois recevoir plus qu'il n'avait réellement vendu en produits.
+  // Le document stocke déjà `subtotal` (produits seuls) séparément ; c'est
+  // ce champ qui doit être montré au vendeur, jamais `total`/`amount`.
+  subtotal: number;
+  deliveryFee: number;
   status: OrderStatus;
   statusLabel?: string;
   date: string;
@@ -58,6 +66,20 @@ const FILTERS: { key: 'all' | OrderStatus; label: string }[] = [
   { key: 'livre', label: ORDER_STATUS_CONFIG.livre.label },
 ];
 
+// ⚠️ `order.subtotal` (= sellerSubtotal écrit au checkout) inclut déjà la
+// marge plateforme de 5% (voir lib/pricing.ts) : chaque `item.productPrice`
+// dans `order.products` est `product.price` = basePrice + marge, jamais
+// basePrice seul. Un vendeur ne doit voir QUE ce qu'il a lui-même demandé à
+// recevoir (basePrice) — donc on reconstitue ce montant ligne par ligne via
+// inferBasePrice (l'inverse exact de computeDisplayPrice), et on ne se sert
+// jamais de order.subtotal pour l'affichage vendeur.
+function sellerBaseTotal(order: Order): number {
+  return (order.products || []).reduce(
+    (sum, item) => sum + inferBasePrice(item.productPrice || 0) * (item.quantity || 1),
+    0
+  );
+}
+
 export default function SellerOrdersPage() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -82,6 +104,8 @@ export default function SellerOrdersPage() {
           customerName:   dd.userName || 'Client inconnu',
           customerPhone:  dd.userPhone || 'Non renseigné',
           amount:         dd.total || 0,
+          subtotal:       dd.subtotal ?? (dd.total || 0),
+          deliveryFee:    dd.deliveryFee || 0,
           status,
           statusLabel:    dd.statusLabel,
           date:           dd.date || new Date().toLocaleDateString('fr-FR'),
@@ -178,7 +202,10 @@ export default function SellerOrdersPage() {
 
   const stats = useMemo(() => {
     const nonCancelled = orders.filter(o => o.status !== 'annule');
-    const revenue = nonCancelled.reduce((sum, o) => sum + (o.amount || 0), 0);
+    // ⚠️ FIX (v2) : sommait o.subtotal, qui inclut encore la marge de 5%
+    // (voir sellerBaseTotal ci-dessus) — le vendeur voyait un chiffre
+    // d'affaires légèrement gonflé de ce qu'il n'a jamais demandé à recevoir.
+    const revenue = nonCancelled.reduce((sum, o) => sum + sellerBaseTotal(o), 0);
     const pending = orders.filter(o => o.status === 'en_attente').length;
     return { total: orders.length, revenue, pending };
   }, [orders]);
@@ -313,7 +340,9 @@ export default function SellerOrdersPage() {
                     )}
                   </div>
                   <div className="text-right">
-                    <p className="text-2xl font-bold text-emerald-700">{formatFCFA(order.amount)}</p>
+                    {/* ⚠️ FIX (v2) : affichait order.subtotal, qui inclut
+                        encore la marge de 5% — voir sellerBaseTotal. */}
+                    <p className="text-2xl font-bold text-emerald-700">{formatFCFA(sellerBaseTotal(order))}</p>
                     <p className="text-xs text-gray-400">{order.date || 'Date inconnue'}</p>
                   </div>
                 </div>
@@ -325,8 +354,11 @@ export default function SellerOrdersPage() {
                       {order.products.map((item, idx) => (
                         <div key={idx} className="flex justify-between text-sm">
                           <span className="text-gray-700">{item.productName} x{item.quantity}{item.unit ? ` ${item.unit}` : ''}</span>
+                          {/* ⚠️ FIX (v2) : item.productPrice = product.price
+                              (basePrice + marge 5%), jamais basePrice seul —
+                              même correction que sellerBaseTotal ci-dessus. */}
                           <span className="font-semibold text-gray-800">
-                            {formatFCFA((item.productPrice || 0) * (item.quantity || 1))}
+                            {formatFCFA(inferBasePrice(item.productPrice || 0) * (item.quantity || 1))}
                           </span>
                         </div>
                       ))}

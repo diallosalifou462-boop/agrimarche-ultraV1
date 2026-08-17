@@ -15,7 +15,7 @@ import { db } from '@/lib/firebase/firebase';
 import {
   User, Mail, Phone, Package, ShoppingBag, LogOut, Edit2, Save,
   CheckCircle, Store, ChevronRight, Shield, Crown, Loader2, X,
-  Sparkles, ArrowRight, AlertTriangle, Star,
+  Sparkles, ArrowRight, AlertTriangle, Star, Lock,
 } from 'lucide-react';
 import { ORDER_STATUS_CONFIG, normalizeStatus, statusTint, formatFCFA, canClientCancel, canClientConfirmDelivery } from '@/lib/orderStatus';
 // ✅ Toute transition de statut passe désormais par la Cloud Function
@@ -541,6 +541,14 @@ export default function AccountPage() {
               <ChevronRight size={18} className="opacity-70" />
             </Link>
           )}
+
+          <Link href="/account/privacy" className="w-full flex items-center justify-between bg-white border border-gray-100 text-gray-700 px-5 py-4 rounded-2xl text-sm font-semibold active:bg-gray-50 transition">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-xl bg-emerald-50 flex items-center justify-center"><Lock size={16} className="text-emerald-600" /></div>
+              Confidentialité
+            </div>
+            <ChevronRight size={18} className="opacity-40" />
+          </Link>
 
           <button onClick={handleLogout} className="w-full flex items-center justify-between bg-white border border-rose-100 text-rose-500 px-5 py-4 rounded-2xl text-sm font-semibold active:bg-rose-50 transition">
             <div className="flex items-center gap-3">

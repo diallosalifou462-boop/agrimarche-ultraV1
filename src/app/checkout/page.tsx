@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCart } from '@/hooks/useCart';
@@ -20,6 +20,10 @@ import {
 import { initDeliveryTracking, getEstimatedDeliveryDate } from '@/lib/deliveryTracking';
 import { notifyUser } from '@/lib/notifications/notifyUser';
 import { apiUrl } from '@/lib/api-config';
+// ✅ Commande sans compte : session invité (déterministe par téléphone,
+// sans mot de passe, sans SMS) démarrée juste avant la création de la
+// commande — voir startGuestCheckoutSession (Cloud Function).
+import { startGuestCheckoutSession, DeliveryCodeError } from '@/lib/deliveryCodeActions';
 
 /* ─────────────────────────────────────────────
    Styles injectés globalement
@@ -356,6 +360,53 @@ const PAYMENT_METHODS_CONFIG = {
 /* ─────────────────────────────────────────────
    Payment Modal simplifié (sans confirmation ID)
 ───────────────────────────────────────────── */
+// ─── Guest Checkout Modal ──────────────────────────────────────────────────
+// ✅ NOUVEAU — remplace la redirection forcée vers /auth/login. Minimum
+// d'informations nécessaires : un téléphone suffit, le nom est optionnel.
+// Aucun SMS envoyé ici — la session s'ouvre directement via
+// startGuestCheckoutSession.
+function GuestCheckoutModal({
+  phone, setPhone, name, setName, error, submitting, onContinue, onCancel,
+}: {
+  phone: string; setPhone: (v: string) => void;
+  name: string; setName: (v: string) => void;
+  error: string; submitting: boolean;
+  onContinue: () => void; onCancel: () => void;
+}) {
+  return (
+    <div className="modal-card" style={{ maxWidth: 420 }}>
+      <div className="modal-header" style={{ padding: '24px 28px', borderBottom: '1px solid var(--border)', textAlign: 'center' }}>
+        <div style={{ width: 56, height: 56, borderRadius: '50%', background: 'linear-gradient(135deg, var(--gold-lt), var(--gold))', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
+          <Phone size={24} color="#fff" />
+        </div>
+        <h3 className="serif" style={{ fontSize: 20, fontWeight: 600, color: 'var(--ink)' }}>Continuer sans compte</h3>
+        <p style={{ fontSize: 13, color: 'var(--ink-lt)', marginTop: 6, lineHeight: 1.5 }}>
+          Juste votre numéro — vous en aurez besoin pour retrouver votre commande et votre code de livraison.
+        </p>
+      </div>
+      <div style={{ padding: '24px 28px' }}>
+        <input
+          type="tel" inputMode="tel" value={phone} onChange={(e) => setPhone(e.target.value)}
+          placeholder="Ex. 77 123 45 67" autoFocus
+          style={{ width: '100%', padding: '13px 16px', borderRadius: 10, border: '1px solid var(--border)', fontSize: 14, marginBottom: 10 }}
+        />
+        <input
+          type="text" value={name} onChange={(e) => setName(e.target.value)}
+          placeholder="Votre nom (optionnel)"
+          style={{ width: '100%', padding: '13px 16px', borderRadius: 10, border: '1px solid var(--border)', fontSize: 14, marginBottom: 4 }}
+        />
+        {error && <p style={{ color: '#dc2626', fontSize: 12.5, marginTop: 8, lineHeight: 1.4 }}>{error}</p>}
+        <button onClick={onContinue} disabled={submitting} className="cta-btn" style={{ marginTop: 18, width: '100%' }}>
+          {submitting ? 'Un instant…' : 'Continuer'}
+        </button>
+        <button onClick={onCancel} style={{ marginTop: 10, width: '100%', background: 'none', border: 'none', color: 'var(--ink-lt)', fontSize: 12.5, cursor: 'pointer' }}>
+          J'ai déjà un compte — me connecter
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PaymentModal({ method, amount, remainingAmount, onConfirm, onBack }: { method: any; amount: number; remainingAmount: number; onConfirm: () => void; onBack: () => void }) {
   const wavePaymentUrl = method.paymentLink ? method.paymentLink(amount) : null;
 
@@ -443,6 +494,13 @@ export default function CheckoutPage() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [orderError, setOrderError] = useState('');
   const [waveReturn, setWaveReturn] = useState(false);
+  // ── Checkout invité (sans compte) ─────────────────────────────────
+  const [showGuestModal, setShowGuestModal] = useState(false);
+  const [guestPhone, setGuestPhone] = useState('');
+  const [guestName, setGuestName] = useState('');
+  const [guestSubmitting, setGuestSubmitting] = useState(false);
+  const [guestError, setGuestError] = useState('');
+  const pendingGuestCheckoutRef = useRef(false);
 
   // Detection retour Wave
   useEffect(() => {
@@ -615,9 +673,9 @@ export default function CheckoutPage() {
         const firstItem = items[0];
         const orderNumber = isMultiVendor ? `${orderGroupId}-${String.fromCharCode(65 + i)}` : orderGroupId;
         const safeSellerId = groupSellerId || user?.uid || 'agrimarche-official';
-        const safeSellerName = firstItem?.product?.sellerName || 'AgriMarché';
+        const safeSellerName = firstItem?.product?.sellerName || firstItem?.product?.farmer || 'AgriMarché';
         const safeSellerPhone = firstItem?.product?.sellerPhone || '221779747073';
-        const safeSellerRegion = firstItem?.product?.region || 'Dakar, Sénégal';
+        const safeSellerRegion = firstItem?.product?.region || 'Dakar';
         let sellerLat = 14.7167; let sellerLng = -17.4677; let sellerAddress = 'Dakar, Sénégal';
         if (safeSellerId && safeSellerId !== 'agrimarche-official') {
           try {
@@ -667,8 +725,12 @@ export default function CheckoutPage() {
           // faisait, sous un nom qui ne peut entrer en collision avec rien.
           sellerId: safeSellerId, sellerName: safeSellerName,
           sellerPhone: safeSellerPhone, sellerRegion: safeSellerRegion,
-          userId: user.uid, userName: user?.displayName || 'Client AgriMarché',
-          userEmail: user?.email || '', userPhone: profile?.phone || (user as any)?.phoneNumber || '',
+          userId: user.uid, userName: user?.displayName || guestName || 'Client AgriMarché',
+          userEmail: user?.email || '', userPhone: profile?.phone || guestPhone || (user as any)?.phoneNumber || '',
+          // 🔐 Sert exclusivement au parcours invité (findGuestOrders) : permet
+          // de retrouver cette commande par téléphone sans compte ni SMS. Vide
+          // pour un compte normal (non nécessaire, userId suffit déjà).
+          ...(((profile as any)?.isGuest || (guestPhone && !profile)) ? { guestPhone: guestPhone.replace(/[^\d+]/g, '') } : {}),
           sellerLocation: { lat: sellerLat, lng: sellerLng, address: sellerAddress },
           customerLocation: { lat: location?.lat || null, lng: location?.lng || null, address: location?.address || location?.city || 'Adresse non détectée' },
           date: new Date().toLocaleDateString('fr-FR', { day:'numeric', month:'long', year:'numeric', hour:'2-digit', minute:'2-digit' }),
@@ -796,10 +858,44 @@ export default function CheckoutPage() {
   }, [waveReturn, cartItems.length, user]);
 
   const handleCheckout = async () => {
-    if (!user) { router.push('/auth/login?redirect=/checkout'); return; }
+    // ✅ Avant : redirection forcée vers /auth/login, ce qui obligeait à
+    // créer un compte (donc, dans ce projet, un OTP SMS) juste pour
+    // commander. Désormais : un simple numéro de téléphone suffit — la
+    // modal ci-dessous ouvre une session invité sans SMS ni mot de passe.
+    if (!user) { setShowGuestModal(true); return; }
     if (cartItems.length === 0) { setOrderError('Votre panier est vide'); return; }
     const method = PAYMENT_METHODS_CONFIG[selectedPaymentMethod as keyof typeof PAYMENT_METHODS_CONFIG];
     if (method) { setActivePaymentMethod(method); setShowPaymentModal(true); }
+  };
+
+  // Une fois la session invité active, `user` devient vrai via le
+  // listener onAuthStateChanged (dans useAuth) — pas de façon synchrone
+  // juste après signInWithCustomToken. On attend ce signal plutôt que de
+  // parier sur un délai arbitraire avant d'ouvrir le paiement.
+  useEffect(() => {
+    if (user && pendingGuestCheckoutRef.current) {
+      pendingGuestCheckoutRef.current = false;
+      const method = PAYMENT_METHODS_CONFIG[selectedPaymentMethod as keyof typeof PAYMENT_METHODS_CONFIG];
+      if (method) { setActivePaymentMethod(method); setShowPaymentModal(true); }
+    }
+  }, [user, selectedPaymentMethod]);
+
+  const handleGuestContinue = async () => {
+    if (guestPhone.trim().replace(/\D/g, '').length < 8) {
+      setGuestError('Entrez un numéro de téléphone valide.');
+      return;
+    }
+    setGuestSubmitting(true);
+    setGuestError('');
+    try {
+      await startGuestCheckoutSession(guestPhone, guestName.trim() || undefined);
+      pendingGuestCheckoutRef.current = true;
+      setShowGuestModal(false);
+    } catch (e) {
+      setGuestError(e instanceof DeliveryCodeError ? e.message : 'Erreur de connexion, réessayez.');
+    } finally {
+      setGuestSubmitting(false);
+    }
   };
 
   /* -- Traitement retour Wave -- */
@@ -1087,6 +1183,18 @@ export default function CheckoutPage() {
             remainingAmount={remainingAmount}
             onConfirm={handlePaymentConfirm}
             onBack={() => setShowPaymentModal(false)}
+          />
+        </div>
+      )}
+
+      {showGuestModal && (
+        <div className="modal-overlay">
+          <GuestCheckoutModal
+            phone={guestPhone} setPhone={setGuestPhone}
+            name={guestName} setName={setGuestName}
+            error={guestError} submitting={guestSubmitting}
+            onContinue={handleGuestContinue}
+            onCancel={() => { setShowGuestModal(false); router.push('/auth/login?redirect=/checkout'); }}
           />
         </div>
       )}

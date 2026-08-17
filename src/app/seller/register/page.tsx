@@ -6,6 +6,7 @@ import { auth, db } from '@/lib/firebase/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 import { ArrowLeft, Loader2, CheckCircle, User, Phone, MapPin } from 'lucide-react';
+import { ADMIN_MARGIN_RATE } from '@/lib/pricing';
 
 const REGIONS = [
   'Dakar', 'Thiès', 'Saint-Louis', 'Kaolack', 'Ziguinchor',
@@ -35,6 +36,7 @@ export default function SellerRegisterPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({ name: '', phone: '', region: '', city: '' });
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
 
@@ -56,6 +58,7 @@ export default function SellerRegisterPage() {
             region: data.region || '',
             city: data.city || '',
           });
+          setAcceptedTerms(!!data.termsAcceptedAt);
           setIsEditing(true);
         } else {
           setIsEditing(false);
@@ -73,6 +76,11 @@ export default function SellerRegisterPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.name.trim() || !form.phone.trim() || !form.region) return;
+    // ⚠️ Garde-fou obligatoire : pas de compte vendeur sans acceptation
+    // explicite de la commission. Le `required` HTML sur la case suffit en
+    // usage normal, mais on revérifie ici pour ne jamais dépendre uniquement
+    // de la validation du navigateur.
+    if (!acceptedTerms) return;
 
     const user = auth.currentUser;
     if (!user) return;
@@ -107,6 +115,8 @@ export default function SellerRegisterPage() {
         email?: string | null;
         createdAt?: Date;
         uid?: string;
+        termsAcceptedAt: Date;
+        termsAcceptedMarginRate: number;
       } = {
         displayName: form.name.trim(),
         phone: form.phone.trim(),
@@ -114,6 +124,12 @@ export default function SellerRegisterPage() {
         city: form.city || '',
         role: 'seller',
         updatedAt: new Date(),
+        // Preuve d'acceptation : horodatage + taux exact accepté au moment
+        // du clic (utile si ADMIN_MARGIN_RATE change plus tard — on garde
+        // une trace de ce à quoi CE vendeur a consenti, pas juste "il a
+        // coché une case un jour").
+        termsAcceptedAt: new Date(),
+        termsAcceptedMarginRate: ADMIN_MARGIN_RATE,
       };
 
       if (!exists) {
@@ -251,9 +267,24 @@ export default function SellerRegisterPage() {
             </div>
           )}
 
+          <div className="flex items-start gap-3 pt-1">
+            <input
+              type="checkbox"
+              id="acceptedTerms"
+              checked={acceptedTerms}
+              onChange={(e) => setAcceptedTerms(e.target.checked)}
+              required
+              className="mt-1 w-4 h-4 accent-emerald-600 shrink-0"
+            />
+            <label htmlFor="acceptedTerms" className="text-xs text-gray-600 dark:text-gray-400 leading-relaxed">
+              J'accepte les conditions de vente d'AgriMarché, notamment l'application
+              d'une commission de X % sur les ventes réalisées via la plateforme.
+            </label>
+          </div>
+
           <button
             type="submit"
-            disabled={saving}
+            disabled={saving || !acceptedTerms}
             className="w-full py-3 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-xl font-semibold flex items-center justify-center gap-2 shadow-md transition-transform active:scale-98 disabled:opacity-70"
           >
             {saving ? (

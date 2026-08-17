@@ -82,6 +82,8 @@ export { normalizeKeyword };
 // désactive, on purge aussi l'historique déjà collecté plutôt que de le
 // laisser trainer en base avec juste un flag — un vrai "désactiver" doit
 // aussi être un vrai "oublier", pas seulement un interrupteur cosmétique.
+// (activityHistogram inclus depuis l'ajout du tracking d'activité horaire,
+// voir trackActivity.ts — même logique de consentement, même purge.)
 export async function setPersonalizedNotificationsEnabled(
   userId: string,
   enabled: boolean
@@ -96,7 +98,31 @@ export async function setPersonalizedNotificationsEnabled(
           interestKeywords: [],
           interestDetails: {},
           hasInterests: false,
+          activityHistogram: [],
         },
+    { merge: true }
+  );
+}
+
+// Préférence fine par catégorie — lue côté serveur par
+// passesPersonalizationGate (index.ts / Cloud Functions) sur
+// userData.notificationPreferences.{category}. Contrairement à
+// setPersonalizedNotificationsEnabled (interrupteur général qui purge tout
+// l'historique), ceci ne fait que couper UN type de notification sans
+// toucher au reste — ex: garder les alertes de retour en stock mais couper
+// le résumé hebdomadaire. setDoc avec merge:true fusionne en profondeur
+// dans la map existante, donc écrire { restock: false } ne touche pas une
+// éventuelle valeur déjà présente pour { digest: ... }.
+export type NotificationCategory = 'restock' | 'digest';
+export async function setNotificationPreference(
+  userId: string,
+  category: NotificationCategory,
+  enabled: boolean
+): Promise<void> {
+  const userRef = doc(db, 'users', userId);
+  await setDoc(
+    userRef,
+    { notificationPreferences: { [category]: enabled } },
     { merge: true }
   );
 }

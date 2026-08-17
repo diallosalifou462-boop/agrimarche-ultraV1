@@ -470,6 +470,42 @@ const styles = `
     to   { opacity:1; transform:translateY(0) scale(1); }
   }
   @keyframes notchBlink { 0%,100%{opacity:1} 50%{opacity:.3} }
+  @keyframes haloSpin   { to { transform:rotate(360deg); } }
+  @keyframes shimmerSweep {
+    0%   { background-position:0% 50%; }
+    100% { background-position:200% 50%; }
+  }
+  @keyframes celestialPulse {
+    0%,100% { box-shadow:0 0 0 0 rgba(212,175,55,.0), 0 20px 60px rgba(0,0,0,.35); }
+    50%     { box-shadow:0 0 0 6px rgba(212,175,55,.08), 0 20px 70px rgba(212,175,55,.15); }
+  }
+  @keyframes sparkleFloat {
+    0%   { transform:translateY(6px) scale(.6); opacity:0; }
+    30%  { opacity:1; }
+    100% { transform:translateY(-38px) scale(1); opacity:0; }
+  }
+  @keyframes ringExpand {
+    0%   { transform:scale(.85); opacity:.5; }
+    100% { transform:scale(1.5); opacity:0; }
+  }
+  @keyframes cardSheen {
+    0%   { transform:translateX(-120%) skewX(-12deg); }
+    100% { transform:translateX(220%) skewX(-12deg); }
+  }
+  .divine-shimmer-text {
+    background-size:200% auto; animation:shimmerSweep 3.5s linear infinite;
+  }
+  .divine-halo { animation:haloSpin 9s linear infinite; }
+  .divine-hero { animation:celestialPulse 4.5s ease-in-out infinite; }
+  .divine-sparkle { position:absolute; border-radius:50%; pointer-events:none; animation:sparkleFloat 3.2s ease-in infinite; }
+  .divine-card { position:relative; overflow:hidden; transition:transform .35s cubic-bezier(.2,.8,.2,1), box-shadow .35s ease, border-color .35s ease; }
+  .divine-card:hover { transform:translateY(-4px) scale(1.008); }
+  .divine-card::after {
+    content:''; position:absolute; top:0; left:0; width:38%; height:100%;
+    background:linear-gradient(100deg,transparent,rgba(255,255,255,.10),transparent);
+    transform:translateX(-120%) skewX(-12deg); pointer-events:none;
+  }
+  .divine-card:hover::after { animation:cardSheen 1.1s ease; }
   .animate-fadeIn { animation:fadeIn .3s ease-out; }
   .animate-pulse  { animation:pulse 2s ease-in-out infinite; }
   .animate-spin   { animation:spin 1s linear infinite; }
@@ -555,19 +591,24 @@ const categoryStyle = (category?: string) => {
 };
 
 const StatCard = ({ icon, label, value, change, color }: { icon: React.ReactNode; label: string; value: number; change?: number; color: string }) => (
-  <div className="glass-card" style={{ padding:20 }}>
-    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:12 }}>
-      <div style={{ width:40, height:40, borderRadius:12, background:`${color}20`, display:'flex', alignItems:'center', justifyContent:'center' }}>
+  <div className="divine-card" style={{
+    position:'relative', padding:20, borderRadius:20, overflow:'hidden',
+    background:`linear-gradient(160deg,rgba(255,255,255,0.05),rgba(255,255,255,0.015)), linear-gradient(135deg,rgba(17,19,23,.95),rgba(10,12,16,.98))`,
+    border:'1px solid rgba(255,255,255,0.08)', transition:'all .3s ease',
+  }}>
+    <div style={{ position:'absolute', top:-40, right:-40, width:120, height:120, borderRadius:'50%', background:`radial-gradient(circle,${color}33,transparent 70%)`, pointerEvents:'none' }}/>
+    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:12, position:'relative', zIndex:1 }}>
+      <div style={{ width:42, height:42, borderRadius:13, background:`${color}22`, border:`1px solid ${color}40`, display:'flex', alignItems:'center', justifyContent:'center', boxShadow:`0 4px 16px ${color}30` }}>
         {icon}
       </div>
       {change !== undefined && (
-        <span style={{ fontSize:11, color:change>=0?'#10b981':'#ef4444', background:`${change>=0?'#10b981':'#ef4444'}15`, padding:'2px 8px', borderRadius:20 }}>
-          {change>=0?'+':''}{change}%
+        <span style={{ fontSize:11, fontWeight:600, color:change>=0?'#10b981':'#ef4444', background:`${change>=0?'#10b981':'#ef4444'}15`, padding:'3px 9px', borderRadius:20, border:`1px solid ${change>=0?'#10b981':'#ef4444'}30` }}>
+          {change>=0?'▲ +':'▼ '}{change}%
         </span>
       )}
     </div>
-    <div style={{ fontSize:26, fontWeight:700, marginBottom:4 }}>{value?.toLocaleString?.() ?? 0}</div>
-    <div style={{ fontSize:12, color:'#6b7280' }}>{label}</div>
+    <div style={{ fontSize:28, fontWeight:800, marginBottom:4, position:'relative', zIndex:1, textShadow:`0 0 24px ${color}30` }}>{value?.toLocaleString?.() ?? 0}</div>
+    <div style={{ fontSize:12, color:'#8b93a1', position:'relative', zIndex:1, letterSpacing:0.2 }}>{label}</div>
   </div>
 );
 
@@ -725,6 +766,18 @@ export default function AdminDashboard() {
   const [statusFilter, setStatusFilter]     = useState('all');
   const [currentPage, setCurrentPage]       = useState(0);
   const pageSize = 10;
+
+  // ── ONGLET UTILISATEURS ──────────────────────────────────
+  // ⚠️ Volontairement des états DÉDIÉS (pas `searchQuery`/`statusFilter`/
+  // `currentPage`, qui pilotent déjà le tableau Commandes) : ces deux
+  // tableaux vivant dans le même composant, réutiliser les mêmes states
+  // aurait fait sauter le filtre/la page de l'un dès qu'on touche l'autre
+  // en changeant d'onglet.
+  const [userSearch, setUserSearch]         = useState('');
+  const [userRoleFilter, setUserRoleFilter] = useState('all');
+  const [userSort, setUserSort]             = useState<'recent' | 'name' | 'role'>('recent');
+  const [userPage, setUserPage]             = useState(0);
+  const userPageSize = 15;
 
   // ── MODALS ────────────────────────────────────────────────
   const [selectedUser, setSelectedUser]     = useState<UserProfile | null>(null);
@@ -901,6 +954,11 @@ export default function AdminDashboard() {
   const [weatherAdvice, setWeatherAdvice]   = useState<Record<string, string>>({});
   const [weatherAdviceLoading, setWeatherAdviceLoading] = useState<Record<string, boolean>>({});
 
+  // ── RÉGIONS (onglet admin) ──────────────────────────────────
+  const [regionSearch, setRegionSearch] = useState('');
+  const [regionSort, setRegionSort]     = useState<'revenue' | 'orders' | 'users' | 'products' | 'name'>('revenue');
+  const [showInactiveRegions, setShowInactiveRegions] = useState(false);
+
   // ── NOTIFICATION SETTINGS ─────────────────────────────────
   const [soundEnabled, setSoundEnabled]     = useState(true);
   const { token: fcmToken, permission: fcmPermission, requestPermission: requestFcmPermission } = useFCMToken();
@@ -967,17 +1025,105 @@ export default function AdminDashboard() {
       const regionOrders  = orders.filter(o => o.sellerRegion?.toLowerCase() === region.toLowerCase());
       const regionUsers   = users.filter(u  => u.region?.toLowerCase() === region.toLowerCase());
       const regionProducts= products.filter(p => p.region?.toLowerCase() === region.toLowerCase());
-      const revenue       = regionOrders.filter(o => o.status === 'livre').reduce((s,o) => s + (o.amount ?? 0), 0);
+      const deliveredOrders = regionOrders.filter(o => o.status === 'livre');
+      const revenue       = deliveredOrders.reduce((s,o) => s + (o.amount ?? 0), 0);
+      const avgOrderValue = deliveredOrders.length > 0 ? revenue / deliveredOrders.length : 0;
+      const isActive       = regionOrders.length > 0 || regionUsers.length > 0 || regionProducts.length > 0;
       return {
         region,
         orders:   regionOrders.length,
         users:    regionUsers.length,
         products: regionProducts.length,
         revenue,
+        avgOrderValue,
+        isActive,
         ...REGION_INFO[region]
       };
     }).sort((a,b) => b.revenue - a.revenue);
   }, [orders, users, products]);
+
+  // ✅ Rang basé sur le revenu (classement de référence, indépendant du tri
+  // choisi par l'admin dans l'UI) — permet d'afficher un badge 🥇🥈🥉 stable.
+  const regionRankByRevenue = useMemo(() => {
+    const map = new Map<string, number>();
+    regionStats.forEach((r, i) => map.set(r.region, i + 1));
+    return map;
+  }, [regionStats]);
+
+  // ✅ Recherche + tri appliqués côté UI, sans recalculer les stats brutes.
+  const visibleRegionStats = useMemo(() => {
+    const q = regionSearch.trim().toLowerCase();
+    let list = regionStats.filter(r => !q || r.region.toLowerCase().includes(q));
+    const sorters: Record<typeof regionSort, (a: typeof list[number], b: typeof list[number]) => number> = {
+      revenue:  (a,b) => b.revenue - a.revenue,
+      orders:   (a,b) => b.orders - a.orders,
+      users:    (a,b) => b.users - a.users,
+      products: (a,b) => b.products - a.products,
+      name:     (a,b) => a.region.localeCompare(b.region),
+    };
+    return [...list].sort(sorters[regionSort]);
+  }, [regionStats, regionSearch, regionSort]);
+
+  const activeRegionStats   = useMemo(() => visibleRegionStats.filter(r => r.isActive), [visibleRegionStats]);
+  const inactiveRegionStats = useMemo(() => visibleRegionStats.filter(r => !r.isActive), [visibleRegionStats]);
+
+  // ⚠️ TRAÇABILITÉ : une commande dont `sellerRegion` ne correspond
+  // exactement (insensible à la casse) à AUCUNE des 14 régions officielles
+  // (texte libre, faute de frappe, ancien format "Ville, Région"…) ne
+  // matche jamais aucune carte ci-dessus — mais son montant reste compté
+  // dans `totalRevenue`, donc dans le dénominateur des %. Sans ce calcul,
+  // ce revenu "orphelin" disparaît silencieusement de l'onglet Régions
+  // tout en faussant les pourcentages affichés (ex: Dakar à 51,6% au lieu
+  // de ~100% alors qu'aucune autre région n'a de commande visible).
+  const unassignedRegionStats = useMemo(() => {
+    const known = new Set(SENEGAL_REGIONS.map(r => r.toLowerCase()));
+    const delivered = orders.filter(o => o.status === 'livre' && !known.has((o.sellerRegion || '').toLowerCase()));
+    const revenue = delivered.reduce((s,o) => s + (o.amount ?? 0), 0);
+    return { orders: delivered.length, revenue };
+  }, [orders]);
+
+  // ── ONGLET UTILISATEURS : recherche + tri + pagination ─────
+  const sellerProductCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    products.forEach(p => map.set(p.sellerId, (map.get(p.sellerId) || 0) + 1));
+    return map;
+  }, [products]);
+
+  const userStatsByRole = useMemo(() => ({
+    total:    users.length,
+    client:   users.filter(u => u.role === 'client').length,
+    seller:   users.filter(u => u.role === 'seller').length,
+    delivery: users.filter(u => u.role === 'delivery').length,
+    admin:    users.filter(u => u.role === 'admin').length,
+  }), [users]);
+
+  const filteredUsers = useMemo(() => {
+    const q = userSearch.trim().toLowerCase();
+    let list = users.filter(u => {
+      if (userRoleFilter !== 'all' && u.role !== userRoleFilter) return false;
+      if (!q) return true;
+      return u.displayName?.toLowerCase().includes(q)
+        || u.email?.toLowerCase().includes(q)
+        || u.phone?.toLowerCase().includes(q);
+    });
+    const sorters: Record<typeof userSort, (a: UserProfile, b: UserProfile) => number> = {
+      recent: (a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0),
+      name:   (a, b) => (a.displayName || '').localeCompare(b.displayName || ''),
+      role:   (a, b) => (a.role || '').localeCompare(b.role || ''),
+    };
+    return [...list].sort(sorters[userSort]);
+  }, [users, userSearch, userRoleFilter, userSort]);
+
+  const paginatedUsers = useMemo(() => {
+    const start = userPage * userPageSize;
+    return filteredUsers.slice(start, start + userPageSize);
+  }, [filteredUsers, userPage]);
+
+  const userTotalPages = Math.max(1, Math.ceil(filteredUsers.length / userPageSize));
+
+  // Revenir à la page 1 dès que la recherche/le filtre change, pour ne
+  // jamais se retrouver sur une page vide qui n'existe plus.
+  useEffect(() => { setUserPage(0); }, [userSearch, userRoleFilter]);
 
   // ── ROLE GUARD ────────────────────────────────────────────
   useEffect(() => {
@@ -1252,7 +1398,12 @@ export default function AdminDashboard() {
   };
 
   const deleteUser = async (userId: string) => {
-    if (!confirm('Supprimer cet utilisateur ?')) return;
+    // ⚠️ Message générique remplacé : sans nom affiché, un admin qui
+    // supprime plusieurs comptes à la suite ne peut pas vérifier qu'il
+    // clique bien sur le bon avant de confirmer.
+    const target = users.find(u => u.id === userId);
+    const label = target?.displayName || target?.email || 'cet utilisateur';
+    if (!confirm(`Supprimer définitivement le compte de "${label}" ? Cette action est irréversible.`)) return;
     try {
       await deleteDoc(doc(db, 'users', userId));
       toast.success('Utilisateur supprimé');
@@ -2139,14 +2290,51 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
 
   // ── FILTERS ───────────────────────────────────────────────
 
+  // ⚠️ FIX AFFICHAGE COLONNE "Vendeur" : la table `orders` affichait
+  // `order.sellerName ?? order.farmer ?? '—'` — mais un bug côté
+  // checkout/page.tsx (produits créés sans `sellerName`, désormais corrigé
+  // dans seller/products/add/page.tsx) faisait retomber `sellerName` sur
+  // le défaut littéral `'AgriMarché'`. Comme ce champ était déjà rempli
+  // (avec la mauvaise valeur), le `?? order.farmer` ne se déclenchait
+  // JAMAIS — `??` ne retombe que sur `null`/`undefined`, pas sur une
+  // chaîne non vide mais fausse. Résultat : TOUTES les commandes
+  // affichaient "AgriMarché" au lieu du vrai vendeur, y compris celles où
+  // `order.farmer` contenait déjà le bon nom.
+  //
+  // Fix définitif et rétroactif : on résout le nom du vendeur depuis la
+  // collection `users` (déjà chargée ci-dessus, source de vérité pour un
+  // compte vendeur réel) via `sellerId`/`farmerId`. Ça corrige l'affichage
+  // pour TOUTES les commandes existantes en base, même celles créées avant
+  // ce correctif — pas seulement les nouvelles. On ne retombe sur les
+  // champs stockés sur la commande (`sellerName` puis `farmer`) que si
+  // aucun compte utilisateur correspondant n'est trouvé, et on ignore
+  // explicitement la valeur placeholder `'AgriMarché'` à chaque étage pour
+  // ne jamais l'afficher tant qu'une vraie info existe quelque part.
+  const usersById = useMemo(() => {
+    const map = new Map<string, UserProfile>();
+    users.forEach(u => { if (u.uid) map.set(u.uid, u); });
+    return map;
+  }, [users]);
+
+  const PLACEHOLDER_SELLER_NAME = 'AgriMarché';
+  const getOrderSellerName = useCallback((order: Order): string => {
+    const sellerAccount = usersById.get(order.sellerId || order.farmerId || '');
+    if (sellerAccount?.displayName) return sellerAccount.displayName;
+    if (order.sellerName && order.sellerName !== PLACEHOLDER_SELLER_NAME) return order.sellerName;
+    if (order.farmer && order.farmer !== PLACEHOLDER_SELLER_NAME) return order.farmer;
+    return order.sellerName || order.farmer || '—';
+  }, [usersById]);
+
   const filteredOrders = useMemo(() => orders.filter(o => {
     if (statusFilter !== 'all' && o.status !== statusFilter) return false;
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
-      return o.orderNumber?.toLowerCase().includes(q) || o.farmer?.toLowerCase().includes(q);
+      return o.orderNumber?.toLowerCase().includes(q)
+        || o.farmer?.toLowerCase().includes(q)
+        || getOrderSellerName(o).toLowerCase().includes(q);
     }
     return true;
-  }), [orders, statusFilter, searchQuery]);
+  }), [orders, statusFilter, searchQuery, getOrderSellerName]);
 
   const paginatedOrders = useMemo(() => {
     const start = currentPage * pageSize;
@@ -2208,14 +2396,53 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
     marginValue: products.reduce((s,p) => s + computeAdminMargin(pricingByProduct[p.id!] ?? inferBasePrice(p.price || 0)) * (p.stock || 0), 0),
   }), [products, pricingByProduct]);
 
+  // ── VARIATIONS RÉELLES DES KPIs ──────────────────────────────
+  // ⚠️ FIX : les 6 pourcentages affichés sur les cartes KPI (+12.4%,
+  // +8.2%, -2.3%...) étaient des constantes codées en dur — toujours les
+  // mêmes, quelle que soit l'activité réelle. Un admin voyait "+12.4%" sur
+  // le chiffre d'affaires même un mois catastrophique. Remplacé par un
+  // vrai calcul glissant 30 jours vs 30 jours précédents (plutôt qu'un
+  // simple "mois civil en cours", qui biaiserait fortement en début de
+  // mois). Retourne `undefined` (pas de badge, plutôt qu'un pourcentage
+  // inventé) quand la période précédente est vide : une division par zéro
+  // ne raconte rien d'utile.
+  function periodChangePercent<T extends { createdAt?: Timestamp }>(
+    items: T[],
+    valueOf: (item: T) => number,
+    days = 30
+  ): number | undefined {
+    const now = Date.now();
+    const msDay = 24 * 60 * 60 * 1000;
+    const curStart = now - days * msDay;
+    const prevStart = now - 2 * days * msDay;
+    let cur = 0, prev = 0;
+    for (const item of items) {
+      const t = item.createdAt?.toMillis?.();
+      if (!t) continue;
+      if (t >= curStart) cur += valueOf(item);
+      else if (t >= prevStart) prev += valueOf(item);
+    }
+    if (prev === 0) return cur > 0 ? undefined : 0;
+    return Math.round(((cur - prev) / prev) * 1000) / 10;
+  }
+
+  const revenueChange = useMemo(
+    () => periodChangePercent<Order>(orders.filter(o => o.status === 'livre'), o => o.amount ?? 0),
+    [orders]
+  );
+  const ordersChange = useMemo(() => periodChangePercent<Order>(orders, () => 1), [orders]);
+  const loansChange = useMemo(() => periodChangePercent<Loan>(loans, l => l.amount ?? 0), [loans]);
+  const usersChange = useMemo(() => periodChangePercent<UserProfile>(users, () => 1), [users]);
+  const deliverersChange = useMemo(() => periodChangePercent<UserProfile>(deliveryPersons, () => 1), [deliveryPersons]);
+
   // ── KPIs ──────────────────────────────────────────────────
   const kpis = [
-    { label:"Chiffre d'affaires",  value:totalRevenue,    change:12.4, icon:<TrendingUp size={20} color="#06b6d4"/>,  color:'#06b6d4' },
-    { label:"Revenus plateforme",  value:platformRevenue, change:12.4, icon:<Banknote size={20} color="#10b981"/>,    color:'#10b981' },
-    { label:"Commandes",           value:orders.length,   change:8.2,  icon:<Package size={20} color="#8b5cf6"/>,    color:'#8b5cf6' },
-    { label:"Financements (FCFA)", value:totalLoanVolume, change:-2.3, icon:<Wallet size={20} color="#f59e0b"/>,     color:'#f59e0b' },
-    { label:"Utilisateurs",        value:users.length,    change:15.7, icon:<Users size={20} color="#ec4899"/>,      color:'#ec4899' },
-    { label:"Livreurs actifs",     value:deliveryPersons.length, change:5.3, icon:<Truck size={20} color="#06b6d4"/>,color:'#06b6d4' },
+    { label:"Chiffre d'affaires",  value:totalRevenue,    change:revenueChange,    icon:<TrendingUp size={20} color="#06b6d4"/>,  color:'#06b6d4' },
+    { label:"Revenus plateforme",  value:platformRevenue, change:revenueChange,    icon:<Banknote size={20} color="#10b981"/>,    color:'#10b981' },
+    { label:"Commandes",           value:orders.length,   change:ordersChange,     icon:<Package size={20} color="#8b5cf6"/>,    color:'#8b5cf6' },
+    { label:"Financements (FCFA)", value:totalLoanVolume, change:loansChange,      icon:<Wallet size={20} color="#f59e0b"/>,     color:'#f59e0b' },
+    { label:"Utilisateurs",        value:users.length,    change:usersChange,      icon:<Users size={20} color="#ec4899"/>,      color:'#ec4899' },
+    { label:"Livreurs actifs",     value:deliveryPersons.length, change:deliverersChange, icon:<Truck size={20} color="#06b6d4"/>,color:'#06b6d4' },
   ];
 
   // ── NAV ───────────────────────────────────────────────────
@@ -2347,51 +2574,97 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
           {/* ── Content ───────────────────────────────────────── */}
           <div style={{ padding:24 }}>
 
-            {/* ═══ DASHBOARD ══════════════════════════════════ */}
+            {/* ═══ DASHBOARD — DIVIN ══════════════════════════ */}
             {activeTab === 'dashboard' && (
               <div className="animate-fadeIn">
+
+                {/* ── Hero cosmique ── */}
+                <div className="divine-hero" style={{
+                  position:'relative', overflow:'hidden', borderRadius:24, padding:'30px 26px', marginBottom:24,
+                  background:'radial-gradient(ellipse 130% 90% at 15% -15%,rgba(16,185,129,0.16),transparent 55%), radial-gradient(ellipse 100% 80% at 100% 100%,rgba(139,92,246,0.14),transparent 55%), linear-gradient(135deg,#070b09 0%,#0f1720 50%,#0a0f0d 100%)',
+                  border:'1px solid rgba(16,185,129,0.35)', boxShadow:'0 20px 60px rgba(0,0,0,0.35)',
+                }}>
+                  <div style={{ position:'absolute', top:-100, right:-70, width:280, height:280, pointerEvents:'none' }}>
+                    <div className="divine-halo" style={{ width:'100%', height:'100%', borderRadius:'50%', background:'conic-gradient(from 0deg,rgba(16,185,129,0.3),transparent 30%,transparent 60%,rgba(139,92,246,0.28),transparent 90%)' }}/>
+                  </div>
+                  {[
+                    { top:'18%', left:'70%', size:3, delay:'0s' },
+                    { top:'60%', left:'82%', size:2, delay:'.9s' },
+                    { top:'35%', left:'92%', size:4, delay:'1.6s' },
+                    { top:'75%', left:'62%', size:2, delay:'2.3s' },
+                  ].map((p,i)=>(
+                    <span key={i} className="divine-sparkle" style={{ top:p.top, left:p.left, width:p.size, height:p.size, background:'#6ee7b7', boxShadow:'0 0 8px 2px rgba(110,231,183,0.8)', animationDelay:p.delay }}/>
+                  ))}
+                  <div style={{ display:'flex', alignItems:'center', gap:16, position:'relative', zIndex:1 }}>
+                    <div style={{ position:'relative', width:56, height:56, flexShrink:0 }}>
+                      <div style={{ position:'absolute', inset:0, borderRadius:16, animation:'ringExpand 2.4s ease-out infinite', border:'1px solid rgba(16,185,129,0.5)' }}/>
+                      <div style={{ width:56, height:56, borderRadius:16, display:'flex', alignItems:'center', justifyContent:'center', background:'linear-gradient(135deg,#10b981,#34d399,#059669)', boxShadow:'0 8px 28px rgba(16,185,129,0.5), inset 0 1px 2px rgba(255,255,255,0.5)' }}>
+                        <LayoutDashboard size={26} color="#052e18"/>
+                      </div>
+                    </div>
+                    <div>
+                      <h2 className="divine-shimmer-text" style={{
+                        fontSize:26, fontWeight:800, letterSpacing:0.3, margin:0,
+                        backgroundImage:'linear-gradient(110deg,#059669 10%,#6ee7b7 35%,#fff 50%,#6ee7b7 65%,#059669 90%)',
+                        WebkitBackgroundClip:'text', backgroundClip:'text', color:'transparent',
+                      }}>
+                        Tableau de bord
+                      </h2>
+                      <p style={{ fontSize:11, color:'rgba(255,255,255,0.5)', marginTop:4, letterSpacing:1.6, textTransform:'uppercase', display:'flex', alignItems:'center', gap:6 }}>
+                        <Star size={10} color="#10b981" fill="#10b981"/> Vue d'ensemble · AgriMarché · Temps réel
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
                 <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(260px,1fr))', gap:16, marginBottom:24 }}>
                   {kpis.map((kpi,i) => <StatCard key={i} {...kpi}/>)}
                 </div>
                 <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:24, marginBottom:24 }}>
-                  <div className="glass-card" style={{ padding:20 }}>
-                    <h3 style={{ fontSize:15, fontWeight:600, marginBottom:16 }}>📈 Revenus mensuels</h3>
+                  <div className="divine-card" style={{ padding:20, borderRadius:20, background:'linear-gradient(160deg,rgba(16,185,129,0.05),rgba(10,12,16,.98))', border:'1px solid rgba(16,185,129,0.2)' }}>
+                    <h3 style={{ fontSize:15, fontWeight:700, marginBottom:16, display:'flex', alignItems:'center', gap:8 }}>
+                      <TrendingUp size={16} color="#10b981"/> Revenus mensuels
+                    </h3>
                     <div style={{ height:280 }}>
                       <ResponsiveContainer width="100%" height="100%">
                         <AreaChart data={monthlyRevenue}>
                           <defs>
                             <linearGradient id="revGrad" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="5%"  stopColor="#10b981" stopOpacity={0.3}/>
+                              <stop offset="5%"  stopColor="#10b981" stopOpacity={0.45}/>
                               <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
                             </linearGradient>
                           </defs>
                           <CartesianGrid strokeDasharray="3 3" stroke="#1f2127"/>
                           <XAxis dataKey="month" stroke="#6b7280" fontSize={11}/>
                           <YAxis stroke="#6b7280" fontSize={11} tickFormatter={v=>`${(v/1000).toFixed(0)}k`}/>
-                          <Tooltip contentStyle={{ background:'#111317', border:'1px solid #1f2127', borderRadius:8 }} formatter={(v:any)=>`${Number(v).toLocaleString()} FCFA`}/>
-                          <Area type="monotone" dataKey="revenue" stroke="#10b981" fill="url(#revGrad)" strokeWidth={2}/>
+                          <Tooltip contentStyle={{ background:'#111317', border:'1px solid rgba(16,185,129,0.3)', borderRadius:10, boxShadow:'0 10px 30px rgba(0,0,0,0.5)' }} formatter={(v:any)=>`${Number(v).toLocaleString()} FCFA`}/>
+                          <Area type="monotone" dataKey="revenue" stroke="#10b981" fill="url(#revGrad)" strokeWidth={2.5}/>
                         </AreaChart>
                       </ResponsiveContainer>
                     </div>
                   </div>
-                  <div className="glass-card" style={{ padding:20 }}>
-                    <h3 style={{ fontSize:15, fontWeight:600, marginBottom:16 }}>🥧 Catégories</h3>
+                  <div className="divine-card" style={{ padding:20, borderRadius:20, background:'linear-gradient(160deg,rgba(139,92,246,0.05),rgba(10,12,16,.98))', border:'1px solid rgba(139,92,246,0.2)' }}>
+                    <h3 style={{ fontSize:15, fontWeight:700, marginBottom:16, display:'flex', alignItems:'center', gap:8 }}>
+                      <Sparkles size={16} color="#8b5cf6"/> Catégories
+                    </h3>
                     <div style={{ height:280 }}>
                       <ResponsiveContainer width="100%" height="100%">
                         <PieChart>
                           <Pie data={categoryData} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={55} outerRadius={95} label={({name,percent})=>`${name} ${((percent ?? 0)*100).toFixed(0)}%`}>
                             {categoryData.map((_,i) => <Cell key={i} fill={['#10b981','#06b6d4','#8b5cf6','#f59e0b','#ef4444'][i%5]}/>)}
                           </Pie>
-                          <Tooltip/>
+                          <Tooltip contentStyle={{ background:'#111317', border:'1px solid rgba(139,92,246,0.3)', borderRadius:10, boxShadow:'0 10px 30px rgba(0,0,0,0.5)' }}/>
                         </PieChart>
                       </ResponsiveContainer>
                     </div>
                   </div>
                 </div>
                 {/* Recent orders */}
-                <div className="glass-card" style={{ padding:20 }}>
+                <div className="divine-card" style={{ padding:20, borderRadius:20, background:'linear-gradient(160deg,rgba(6,182,212,0.05),rgba(10,12,16,.98))', border:'1px solid rgba(6,182,212,0.2)' }}>
                   <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
-                    <h3 style={{ fontSize:15, fontWeight:600 }}>🛒 Dernières commandes</h3>
+                    <h3 style={{ fontSize:15, fontWeight:700, display:'flex', alignItems:'center', gap:8 }}>
+                      <Package size={16} color="#06b6d4"/> Dernières commandes
+                    </h3>
                     <button onClick={()=>setActiveTab('orders')} className="btn-secondary" style={{ padding:'6px 12px', fontSize:12 }}>Voir tout →</button>
                   </div>
                   <div style={{ overflowX:'auto' }}>
@@ -2399,16 +2672,22 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                       <thead>
                         <tr style={{ borderBottom:'1px solid #1f2127' }}>
                           {['N°','Client','Montant','Commission','Statut'].map(h => (
-                            <th key={h} style={{ textAlign:'left', padding:'10px 8px', fontSize:11, color:'#6b7280' }}>{h}</th>
+                            <th key={h} style={{ textAlign:'left', padding:'10px 8px', fontSize:11, color:'#6b7280', letterSpacing:0.8, textTransform:'uppercase' }}>{h}</th>
                           ))}
                         </tr>
                       </thead>
                       <tbody>
                         {orders.slice(0,5).map(o => (
-                          <tr key={o.id} style={{ borderBottom:'1px solid #1a1c22' }}>
+                          <tr key={o.id} style={{ borderBottom:'1px solid #1a1c22', transition:'background .2s' }}>
                             <td style={{ padding:'10px 8px', fontFamily:'monospace', fontSize:12, color:'#10b981' }}>{o.orderNumber}</td>
-                            <td style={{ padding:'10px 8px', fontSize:13 }}>{o.farmer}</td>
-                            <td style={{ padding:'10px 8px', fontWeight:600 }}>{(o.amount ?? 0).toLocaleString()} FCFA</td>
+                            {/* ⚠️ FIX : {o.farmer} est un champ legacy jamais
+                                renseigné par checkout/page.tsx (voir le
+                                commentaire sur l'interface Order) — cette
+                                colonne "Client" était vide pour toute
+                                commande réelle. Même repli que l'onglet
+                                Commandes plus bas (ligne userName ?? farmer). */}
+                            <td style={{ padding:'10px 8px', fontSize:13 }}>{o.userName ?? o.farmer ?? '—'}</td>
+                            <td style={{ padding:'10px 8px', fontWeight:700 }}>{(o.amount ?? 0).toLocaleString()} FCFA</td>
                             <td style={{ padding:'10px 8px', fontSize:12, color:'#f59e0b' }}>{Math.round((o.amount ?? 0)*COMMISSION_RATE).toLocaleString()} FCFA</td>
                             <td style={{ padding:'10px 8px' }}><StatusBadge status={o.status}/></td>
                           </tr>
@@ -2475,7 +2754,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                               </div>
                             ) : (order.category ?? '—')}
                           </td>
-                          <td style={{ padding:'10px 8px', fontSize:12 }}>{order.sellerName ?? order.farmer ?? '—'}</td>
+                          <td style={{ padding:'10px 8px', fontSize:12 }}>{getOrderSellerName(order)}</td>
                           <td style={{ padding:'10px 8px', fontSize:12 }}>{order.sellerRegion ?? order.region ?? '—'}</td>
                           <td style={{ padding:'10px 8px', fontWeight:600 }}>{(order.amount ?? 0).toLocaleString()} FCFA</td>
                           <td style={{ padding:'10px 8px', color:'#f59e0b', fontSize:12 }}>{Math.round((order.amount ?? 0)*COMMISSION_RATE).toLocaleString()} FCFA</td>
@@ -2529,62 +2808,149 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
 
             {/* ═══ UTILISATEURS ═══════════════════════════════ */}
             {activeTab === 'users' && (
-              <div className="glass-card animate-fadeIn" style={{ padding:20 }}>
-                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:20 }}>
-                  <div>
-                    <h2 style={{ fontSize:18, fontWeight:700 }}>👥 Utilisateurs</h2>
-                    <p style={{ fontSize:12, color:'#6b7280', marginTop:4 }}>{users.length} comptes</p>
-                  </div>
-                  <select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)} style={{ width:'auto' }}>
-                    <option value="all">Tous les rôles</option>
-                    <option value="client">Clients</option>
-                    <option value="seller">Vendeurs</option>
-                    <option value="delivery">Livreurs</option>
-                    <option value="admin">Admins</option>
-                  </select>
+              <div className="animate-fadeIn">
+                {/* Stats par rôle */}
+                <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))', gap:14, marginBottom:20 }}>
+                  {[
+                    { label:'Total',    value:userStatsByRole.total,    color:'#e5e7eb', role:'all' },
+                    { label:'Clients',  value:userStatsByRole.client,   color:'#10b981', role:'client' },
+                    { label:'Vendeurs', value:userStatsByRole.seller,   color:'#06b6d4', role:'seller' },
+                    { label:'Livreurs', value:userStatsByRole.delivery, color:'#f59e0b', role:'delivery' },
+                    { label:'Admins',   value:userStatsByRole.admin,    color:'#8b5cf6', role:'admin' },
+                  ].map(s => (
+                    <button
+                      key={s.label}
+                      onClick={()=>setUserRoleFilter(s.role)}
+                      className="glass-card"
+                      style={{ padding:14, textAlign:'left', cursor:'pointer', border: userRoleFilter===s.role ? `1px solid ${s.color}` : '1px solid transparent' }}
+                    >
+                      <div style={{ fontSize:22, fontWeight:700, color:s.color }}>{s.value}</div>
+                      <div style={{ fontSize:11, color:'#6b7280', marginTop:2 }}>{s.label}</div>
+                    </button>
+                  ))}
                 </div>
-                <div style={{ overflowX:'auto' }}>
-                  <table style={{ width:'100%', borderCollapse:'collapse' }}>
-                    <thead>
-                      <tr style={{ borderBottom:'1px solid #1f2127' }}>
-                        {['Utilisateur','Email','Téléphone','Rôle','Inscription','Actions'].map(h=>(
-                          <th key={h} style={{ textAlign:'left', padding:'10px 8px', fontSize:11, color:'#6b7280' }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {users.filter(u => statusFilter==='all' || u.role===statusFilter).map(user => (
-                        <tr key={user.id} style={{ borderBottom:'1px solid #1a1c22' }}>
-                          <td style={{ padding:'10px 8px' }}>
-                            <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-                              <div style={{ width:32, height:32, borderRadius:'50%', background:'rgba(16,185,129,.1)', display:'flex', alignItems:'center', justifyContent:'center', fontWeight:600, flexShrink:0 }}>
-                                {user.displayName?.charAt(0) ?? '?'}
-                              </div>
-                              <span style={{ fontSize:13 }}>{user.displayName}</span>
-                            </div>
-                          </td>
-                          <td style={{ padding:'10px 8px', fontSize:12, color:'#9ca3af' }}>{user.email}</td>
-                          <td style={{ padding:'10px 8px', fontSize:12 }}>{user.phone || '—'}</td>
-                          <td style={{ padding:'10px 8px' }}>
-                            <select value={user.role} onChange={e=>updateUserRole(user.id!,e.target.value)} style={{ width:'auto', padding:'5px 8px', fontSize:11 }}>
-                              <option value="client">Client</option>
-                              <option value="seller">Vendeur</option>
-                              <option value="delivery">Livreur</option>
-                              <option value="admin">Admin</option>
-                            </select>
-                          </td>
-                          <td style={{ padding:'10px 8px', fontSize:12, color:'#6b7280' }}>{user.createdAt?.toDate?.().toLocaleDateString?.() ?? '—'}</td>
-                          <td style={{ padding:'10px 8px' }}>
-                            <button onClick={()=>setSelectedUser(user)} className="btn-secondary" style={{ padding:'5px 10px', fontSize:11, marginRight:6 }}><Eye size={11}/> Voir</button>
-                            <button onClick={()=>deleteUser(user.id!)} className="btn-secondary" style={{ padding:'5px 10px', fontSize:11, color:'#ef4444', borderColor:'#ef4444' }}><X size={11}/> Suppr.</button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+
+                <div className="glass-card animate-fadeIn" style={{ padding:20 }}>
+                  <div style={{ display:'flex', flexWrap:'wrap', justifyContent:'space-between', alignItems:'center', gap:12, marginBottom:20 }}>
+                    <div>
+                      <h2 style={{ fontSize:18, fontWeight:700 }}>👥 Utilisateurs</h2>
+                      <p style={{ fontSize:12, color:'#6b7280', marginTop:4 }}>
+                        {filteredUsers.length} compte{filteredUsers.length>1?'s':''}
+                        {filteredUsers.length !== users.length && ` (sur ${users.length})`}
+                      </p>
+                    </div>
+                    <div style={{ display:'flex', flexWrap:'wrap', gap:10 }}>
+                      <div style={{ position:'relative' }}>
+                        <Search size={14} style={{ position:'absolute', left:10, top:'50%', transform:'translateY(-50%)', color:'#6b7280' }}/>
+                        <input
+                          value={userSearch}
+                          onChange={e=>setUserSearch(e.target.value)}
+                          placeholder="Nom, email, téléphone…"
+                          style={{ paddingLeft:30, width:220 }}
+                        />
+                      </div>
+                      <select value={userRoleFilter} onChange={e=>setUserRoleFilter(e.target.value)} style={{ width:'auto' }}>
+                        <option value="all">Tous les rôles</option>
+                        <option value="client">Clients</option>
+                        <option value="seller">Vendeurs</option>
+                        <option value="delivery">Livreurs</option>
+                        <option value="admin">Admins</option>
+                      </select>
+                      <select value={userSort} onChange={e=>setUserSort(e.target.value as any)} style={{ width:'auto' }}>
+                        <option value="recent">Plus récents</option>
+                        <option value="name">Nom (A-Z)</option>
+                        <option value="role">Rôle</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {filteredUsers.length === 0 ? (
+                    <div style={{ padding:'40px 0', textAlign:'center', color:'#6b7280', fontSize:13 }}>
+                      Aucun utilisateur ne correspond à cette recherche.
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{ overflowX:'auto' }}>
+                        <table style={{ width:'100%', borderCollapse:'collapse' }}>
+                          <thead>
+                            <tr style={{ borderBottom:'1px solid #1f2127' }}>
+                              {['Utilisateur','Email','Téléphone','Rôle','Inscription','Actions'].map(h=>(
+                                <th key={h} style={{ textAlign:'left', padding:'10px 8px', fontSize:11, color:'#6b7280' }}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {paginatedUsers.map(user => {
+                              const productCount = user.role === 'seller' ? (sellerProductCounts.get(user.id!) || 0) : null;
+                              const roleColors: Record<string,string> = { client:'#10b981', seller:'#06b6d4', delivery:'#f59e0b', admin:'#8b5cf6' };
+                              return (
+                                <tr key={user.id} style={{ borderBottom:'1px solid #1a1c22' }}>
+                                  <td style={{ padding:'10px 8px' }}>
+                                    <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                                      {user.avatar ? (
+                                        <img src={user.avatar} alt="" style={{ width:32, height:32, borderRadius:'50%', objectFit:'cover', flexShrink:0 }}/>
+                                      ) : (
+                                        <div style={{ width:32, height:32, borderRadius:'50%', background:'rgba(16,185,129,.1)', display:'flex', alignItems:'center', justifyContent:'center', fontWeight:600, flexShrink:0 }}>
+                                          {user.displayName?.charAt(0) ?? '?'}
+                                        </div>
+                                      )}
+                                      <div>
+                                        <div style={{ fontSize:13 }}>{user.displayName || '—'}</div>
+                                        {productCount !== null && (
+                                          <div style={{ fontSize:10, color:'#6b7280' }}>{productCount} produit{productCount>1?'s':''}</div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </td>
+                                  <td style={{ padding:'10px 8px', fontSize:12, color:'#9ca3af' }}>{user.email}</td>
+                                  <td style={{ padding:'10px 8px', fontSize:12 }}>{user.phone || '—'}</td>
+                                  <td style={{ padding:'10px 8px' }}>
+                                    <select
+                                      value={user.role}
+                                      onChange={e=>{
+                                        const nextRole = e.target.value;
+                                        if (nextRole === 'admin' && !confirm(`Donner les droits ADMIN à ${user.displayName || user.email} ? Cette personne aura un accès complet au panneau d'administration.`)) return;
+                                        updateUserRole(user.id!, nextRole);
+                                      }}
+                                      style={{ width:'auto', padding:'5px 8px', fontSize:11, color:roleColors[user.role], borderColor:roleColors[user.role] }}
+                                    >
+                                      <option value="client">Client</option>
+                                      <option value="seller">Vendeur</option>
+                                      <option value="delivery">Livreur</option>
+                                      <option value="admin">Admin</option>
+                                    </select>
+                                  </td>
+                                  <td style={{ padding:'10px 8px', fontSize:12, color:'#6b7280' }}>{user.createdAt?.toDate?.().toLocaleDateString?.() ?? '—'}</td>
+                                  <td style={{ padding:'10px 8px', whiteSpace:'nowrap' }}>
+                                    <button onClick={()=>setSelectedUser(user)} className="btn-secondary" style={{ padding:'5px 10px', fontSize:11, marginRight:6 }}><Eye size={11}/> Voir</button>
+                                    <button
+                                      onClick={()=>deleteUser(user.id!)}
+                                      className="btn-secondary"
+                                      style={{ padding:'5px 10px', fontSize:11, color:'#ef4444', borderColor:'#ef4444' }}
+                                    >
+                                      <X size={11}/> Suppr.
+                                    </button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {userTotalPages > 1 && (
+                        <div style={{ display:'flex', justifyContent:'center', alignItems:'center', gap:10, marginTop:20 }}>
+                          <button disabled={userPage===0} onClick={()=>setUserPage(p=>p-1)} className="btn-secondary" style={{ padding:'7px 14px' }}>← Préc.</button>
+                          <span style={{ padding:'7px 14px', color:'#6b7280', fontSize:13 }}>Page {userPage+1}/{userTotalPages}</span>
+                          <button disabled={userPage>=userTotalPages-1} onClick={()=>setUserPage(p=>p+1)} className="btn-secondary" style={{ padding:'7px 14px' }}>Suiv. →</button>
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
               </div>
             )}
+
 
             {/* ═══ PRODUITS ═══════════════════════════════════ */}
             {activeTab === 'products' && (
@@ -3480,64 +3846,189 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
             {/* ═══ RÉGIONS ════════════════════════════════════ */}
             {activeTab === 'regions' && (
               <div className="animate-fadeIn">
+                {/* ⚠️ Revenu orphelin : commandes livrées dont sellerRegion ne
+                    matche aucune des 14 régions officielles. Sans cette alerte,
+                    ce montant restait invisible tout en faussant les % ci-dessous. */}
+                {unassignedRegionStats.orders > 0 && (
+                  <div className="glass-card" style={{ padding:16, marginBottom:16, borderLeft:'3px solid #f59e0b', display:'flex', alignItems:'center', gap:12 }}>
+                    <AlertTriangle size={20} color="#f59e0b" style={{ flexShrink:0 }}/>
+                    <div style={{ fontSize:12.5, color:'#e5e7eb' }}>
+                      <strong>{unassignedRegionStats.orders} commande{unassignedRegionStats.orders>1?'s':''} livrée{unassignedRegionStats.orders>1?'s':''}</strong>
+                      {' '}({unassignedRegionStats.revenue.toLocaleString()} FCFA) {unassignedRegionStats.orders>1?'ont':'a'} une région vendeur qui ne correspond à aucune des 14 régions officielles
+                      (texte libre, faute de frappe, ancienne donnée…). Ce montant compte dans le total ci-dessous mais n'apparaît sur aucune carte région.
+                    </div>
+                  </div>
+                )}
+
                 {/* Header stats */}
                 <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))', gap:14, marginBottom:24 }}>
                   {[
-                    { label:'Régions actives',     value:regionStats.filter(r=>r.revenue>0).length, color:'#10b981' },
+                    { label:'Régions actives',     value:regionStats.filter(r=>r.isActive).length, total: SENEGAL_REGIONS.length, color:'#10b981' },
                     { label:'Total commandes',      value:orders.length,                              color:'#06b6d4' },
                     { label:'Utilisateurs géocodés',value:users.filter(u=>u.region).length,          color:'#8b5cf6' },
                     { label:'Produits référencés',  value:products.filter(p=>p.region).length,       color:'#f59e0b' },
                   ].map((s,i)=>(
                     <div key={i} className="glass-card" style={{ padding:16 }}>
-                      <div style={{ fontSize:24, fontWeight:700, color:s.color }}>{s.value}</div>
+                      <div style={{ fontSize:24, fontWeight:700, color:s.color }}>
+                        {s.value}{s.total !== undefined && <span style={{ fontSize:13, color:'#6b7280', fontWeight:600 }}> / {s.total}</span>}
+                      </div>
                       <div style={{ fontSize:12, color:'#6b7280', marginTop:4 }}>{s.label}</div>
                     </div>
                   ))}
                 </div>
 
-                {/* Region cards */}
-                <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(340px,1fr))', gap:16, marginBottom:24 }}>
-                  {regionStats.map(r => (
-                    <div key={r.region} className="glass-card" style={{ padding:20, borderLeft:`3px solid ${r.color}` }}>
-                      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:14 }}>
-                        <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-                          <span style={{ fontSize:28 }}>{r.emoji}</span>
-                          <div>
-                            <h3 style={{ fontWeight:700, fontSize:16 }}>{r.region}</h3>
-                            <p style={{ fontSize:11, color:'#6b7280', marginTop:2 }}>{r.description}</p>
+                {/* Toolbar : recherche, tri, export */}
+                <div style={{ display:'flex', flexWrap:'wrap', gap:10, alignItems:'center', marginBottom:20 }}>
+                  <div style={{ position:'relative', flex:'1 1 220px', minWidth:200 }}>
+                    <Search size={15} style={{ position:'absolute', left:12, top:'50%', transform:'translateY(-50%)', color:'#6b7280' }}/>
+                    <input
+                      value={regionSearch}
+                      onChange={e=>setRegionSearch(e.target.value)}
+                      placeholder="Rechercher une région…"
+                      style={{ width:'100%', paddingLeft:34 }}
+                    />
+                  </div>
+                  <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+                    <ArrowUpDown size={14} style={{ color:'#6b7280' }}/>
+                    <select value={regionSort} onChange={e=>setRegionSort(e.target.value as any)} style={{ minWidth:170 }}>
+                      <option value="revenue">Trier par revenu</option>
+                      <option value="orders">Trier par commandes</option>
+                      <option value="users">Trier par utilisateurs</option>
+                      <option value="products">Trier par produits</option>
+                      <option value="name">Trier par nom (A-Z)</option>
+                    </select>
+                  </div>
+                  <button
+                    onClick={()=>{
+                      const ws = XLSX.utils.json_to_sheet(regionStats.map(r => ({
+                        Région: r.region, Commandes: r.orders, Utilisateurs: r.users,
+                        Produits: r.products, 'Revenu (FCFA)': r.revenue,
+                        'Panier moyen (FCFA)': Math.round(r.avgOrderValue),
+                      })));
+                      const wb = XLSX.utils.book_new();
+                      XLSX.utils.book_append_sheet(wb, ws, 'Régions');
+                      XLSX.writeFile(wb, `regions_${Date.now()}.xlsx`);
+                      toast.success('Export OK');
+                    }}
+                    className="btn-secondary"
+                    style={{ display:'inline-flex', alignItems:'center', gap:6 }}
+                  >
+                    <Download size={14}/> Exporter
+                  </button>
+                </div>
+
+                {/* Region cards (régions actives) */}
+                {activeRegionStats.length === 0 ? (
+                  <div className="glass-card" style={{ padding:32, textAlign:'center', color:'#6b7280', marginBottom:24 }}>
+                    Aucune région active ne correspond à « {regionSearch} ».
+                  </div>
+                ) : (
+                  <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(340px,1fr))', gap:16, marginBottom:24 }}>
+                    {activeRegionStats.map(r => {
+                      const rank = regionRankByRevenue.get(r.region) ?? 0;
+                      const medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : null;
+                      return (
+                        <div key={r.region} className="glass-card" style={{ padding:20, borderLeft:`3px solid ${r.color}`, position:'relative' }}>
+                          {medal && (
+                            <div style={{ position:'absolute', top:14, right:16, fontSize:18 }} title={`#${rank} au classement revenu`}>{medal}</div>
+                          )}
+                          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:14 }}>
+                            <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                              <span style={{ fontSize:28 }}>{r.emoji}</span>
+                              <div>
+                                <h3 style={{ fontWeight:700, fontSize:16 }}>{r.region}</h3>
+                                <p style={{ fontSize:11, color:'#6b7280', marginTop:2 }}>{r.description}</p>
+                              </div>
+                            </div>
+                            <div style={{ textAlign:'right' }}>
+                              <div style={{ fontSize:18, fontWeight:700, color:r.color }}>{r.revenue.toLocaleString()}</div>
+                              <div style={{ fontSize:10, color:'#6b7280' }}>FCFA</div>
+                            </div>
                           </div>
+                          <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:8 }}>
+                            {[
+                              { label:'Commandes', val:r.orders,   icon:'📦' },
+                              { label:'Utilisateurs', val:r.users, icon:'👥' },
+                              { label:'Produits', val:r.products,  icon:'🌿' },
+                            ].map(({ label,val,icon })=>(
+                              <div key={label} style={{ background:'#1f2127', borderRadius:10, padding:'10px 8px', textAlign:'center' }}>
+                                <div style={{ fontSize:16 }}>{icon}</div>
+                                <div style={{ fontSize:18, fontWeight:700, marginTop:4 }}>{val}</div>
+                                <div style={{ fontSize:10, color:'#6b7280' }}>{label}</div>
+                              </div>
+                            ))}
+                          </div>
+                          {r.orders > 0 && (
+                            <div style={{ marginTop:10, fontSize:11, color:'#6b7280' }}>
+                              Panier moyen : <span style={{ color:'#e5e7eb', fontWeight:600 }}>{Math.round(r.avgOrderValue).toLocaleString()} FCFA</span>
+                            </div>
+                          )}
+                          {/* Progress bar */}
+                          <div style={{ marginTop:14 }}>
+                            <div style={{ display:'flex', justifyContent:'space-between', fontSize:11, color:'#6b7280', marginBottom:4 }}>
+                              <span>Part du revenu total</span>
+                              <span>{totalRevenue>0?(r.revenue/totalRevenue*100).toFixed(1):0}%</span>
+                            </div>
+                            <div style={{ height:4, background:'#1f2127', borderRadius:2 }}>
+                              <div style={{ width:`${totalRevenue>0?(r.revenue/totalRevenue*100):0}%`, height:'100%', background:r.color, borderRadius:2, transition:'width .5s' }}/>
+                            </div>
+                          </div>
+                          {/* Action rapide */}
+                          <button
+                            onClick={()=>{
+                              setBroadcastMode('filter');
+                              setBroadcastForm(f => ({ ...f, targetRegion: r.region, targetRole: 'all' }));
+                              setActiveTab('broadcast');
+                            }}
+                            style={{ marginTop:14, width:'100%', display:'inline-flex', alignItems:'center', justifyContent:'center', gap:6, padding:'8px 0', borderRadius:10, border:'1px solid rgba(255,255,255,.08)', background:'transparent', color:'#9ca3af', fontSize:12, fontWeight:600, cursor:'pointer' }}
+                          >
+                            <Send size={13}/> Notifier cette région
+                          </button>
                         </div>
-                        <div style={{ textAlign:'right' }}>
-                          <div style={{ fontSize:18, fontWeight:700, color:r.color }}>{r.revenue.toLocaleString()}</div>
-                          <div style={{ fontSize:10, color:'#6b7280' }}>FCFA</div>
-                        </div>
-                      </div>
-                      <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:8 }}>
-                        {[
-                          { label:'Commandes', val:r.orders,   icon:'📦' },
-                          { label:'Utilisateurs', val:r.users, icon:'👥' },
-                          { label:'Produits', val:r.products,  icon:'🌿' },
-                        ].map(({ label,val,icon })=>(
-                          <div key={label} style={{ background:'#1f2127', borderRadius:10, padding:'10px 8px', textAlign:'center' }}>
-                            <div style={{ fontSize:16 }}>{icon}</div>
-                            <div style={{ fontSize:18, fontWeight:700, marginTop:4 }}>{val}</div>
-                            <div style={{ fontSize:10, color:'#6b7280' }}>{label}</div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Régions sans activité — à développer */}
+                {inactiveRegionStats.length > 0 && (
+                  <div className="glass-card" style={{ padding:0, marginBottom:24, overflow:'hidden' }}>
+                    <button
+                      onClick={()=>setShowInactiveRegions(v=>!v)}
+                      style={{ width:'100%', display:'flex', justifyContent:'space-between', alignItems:'center', padding:'16px 20px', background:'transparent', border:'none', cursor:'pointer', color:'#e5e7eb' }}
+                    >
+                      <span style={{ fontSize:14, fontWeight:600 }}>
+                        🌱 Régions à développer <span style={{ color:'#6b7280', fontWeight:400 }}>({inactiveRegionStats.length} sans activité)</span>
+                      </span>
+                      <ChevronRight size={16} style={{ transform: showInactiveRegions ? 'rotate(90deg)' : 'none', transition:'transform .2s', color:'#6b7280' }}/>
+                    </button>
+                    {showInactiveRegions && (
+                      <div style={{ borderTop:'1px solid rgba(255,255,255,.06)' }}>
+                        {inactiveRegionStats.map(r => (
+                          <div key={r.region} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'12px 20px', borderBottom:'1px solid rgba(255,255,255,.04)' }}>
+                            <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                              <span style={{ fontSize:18, opacity:.6 }}>{r.emoji}</span>
+                              <div>
+                                <div style={{ fontSize:13, fontWeight:600 }}>{r.region}</div>
+                                <div style={{ fontSize:11, color:'#6b7280' }}>{r.description} · aucune commande, utilisateur ou produit</div>
+                              </div>
+                            </div>
+                            <button
+                              onClick={()=>{
+                                setBroadcastMode('filter');
+                                setBroadcastForm(f => ({ ...f, targetRegion: r.region, targetRole: 'all' }));
+                                setActiveTab('broadcast');
+                              }}
+                              style={{ display:'inline-flex', alignItems:'center', gap:6, padding:'6px 12px', borderRadius:8, border:'1px solid rgba(255,255,255,.08)', background:'transparent', color:'#9ca3af', fontSize:11, fontWeight:600, cursor:'pointer', whiteSpace:'nowrap' }}
+                            >
+                              <Send size={12}/> Cibler
+                            </button>
                           </div>
                         ))}
                       </div>
-                      {/* Progress bar */}
-                      <div style={{ marginTop:14 }}>
-                        <div style={{ display:'flex', justifyContent:'space-between', fontSize:11, color:'#6b7280', marginBottom:4 }}>
-                          <span>Part du revenu total</span>
-                          <span>{totalRevenue>0?(r.revenue/totalRevenue*100).toFixed(1):0}%</span>
-                        </div>
-                        <div style={{ height:4, background:'#1f2127', borderRadius:2 }}>
-                          <div style={{ width:`${totalRevenue>0?(r.revenue/totalRevenue*100):0}%`, height:'100%', background:r.color, borderRadius:2, transition:'width .5s' }}/>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Regional bar chart */}
                 <div className="glass-card" style={{ padding:20 }}>
@@ -4785,54 +5276,79 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
             {activeTab === 'ads' && (
               <div className="animate-fadeIn" style={{ display:'grid', gap:24 }}>
 
-                {/* ── Header hero doré ── */}
-                <div style={{
-                  position:'relative', overflow:'hidden', borderRadius:20, padding:'28px 24px',
-                  background:'linear-gradient(135deg,#0a0f0d 0%,#16241c 55%,#0a0f0d 100%)',
-                  border:'1px solid rgba(212,175,55,0.35)', boxShadow:'0 20px 60px rgba(0,0,0,0.35)'
+                {/* ── Header hero doré — divin ── */}
+                <div className="divine-hero" style={{
+                  position:'relative', overflow:'hidden', borderRadius:24, padding:'32px 26px',
+                  background:'radial-gradient(ellipse 120% 80% at 20% -10%,rgba(212,175,55,0.16),transparent 60%), linear-gradient(135deg,#070b09 0%,#151f18 45%,#0a120d 100%)',
+                  border:'1px solid rgba(212,175,55,0.4)', boxShadow:'0 20px 60px rgba(0,0,0,0.35)'
                 }}>
-                  <div style={{ position:'absolute', top:-60, right:-60, width:220, height:220, borderRadius:'50%', background:'radial-gradient(circle,rgba(212,175,55,0.22),transparent 70%)', pointerEvents:'none' }}/>
-                  <div style={{ display:'flex', alignItems:'center', gap:14, position:'relative', zIndex:1 }}>
-                    <div style={{ width:52, height:52, borderRadius:15, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, background:'linear-gradient(135deg,#D4AF37,#F5E1A4,#B8860B)', boxShadow:'0 8px 24px rgba(212,175,55,0.45)' }}>
-                      <Megaphone size={26} color="#111"/>
+                  {/* Halo tournant derrière l'icône */}
+                  <div style={{ position:'absolute', top:-90, right:-90, width:280, height:280, pointerEvents:'none' }}>
+                    <div className="divine-halo" style={{ width:'100%', height:'100%', borderRadius:'50%', background:'conic-gradient(from 0deg,rgba(212,175,55,0.35),transparent 30%,transparent 60%,rgba(245,225,164,0.3),transparent 90%)' }}/>
+                  </div>
+                  <div style={{ position:'absolute', bottom:-70, left:-40, width:180, height:180, borderRadius:'50%', background:'radial-gradient(circle,rgba(212,175,55,0.14),transparent 70%)', pointerEvents:'none' }}/>
+
+                  {/* Particules scintillantes */}
+                  {[
+                    { top:'14%', left:'62%', size:3, delay:'0s' },
+                    { top:'55%', left:'74%', size:4, delay:'.7s' },
+                    { top:'30%', left:'86%', size:2, delay:'1.4s' },
+                    { top:'70%', left:'55%', size:3, delay:'2.1s' },
+                    { top:'20%', left:'40%', size:2, delay:'1.8s' },
+                  ].map((p,i)=>(
+                    <span key={i} className="divine-sparkle" style={{ top:p.top, left:p.left, width:p.size, height:p.size, background:'#F5E1A4', boxShadow:'0 0 8px 2px rgba(245,225,164,0.8)', animationDelay:p.delay }}/>
+                  ))}
+
+                  <div style={{ display:'flex', alignItems:'center', gap:16, position:'relative', zIndex:1 }}>
+                    <div style={{ position:'relative', width:58, height:58, flexShrink:0 }}>
+                      <div style={{ position:'absolute', inset:-8, borderRadius:'50%', border:'1px solid rgba(212,175,55,0.35)' }}/>
+                      <div style={{ position:'absolute', inset:0, borderRadius:16, animation:'ringExpand 2.4s ease-out infinite', border:'1px solid rgba(212,175,55,0.5)' }}/>
+                      <div style={{ width:58, height:58, borderRadius:16, display:'flex', alignItems:'center', justifyContent:'center', background:'linear-gradient(135deg,#D4AF37,#F5E1A4,#B8860B)', boxShadow:'0 8px 28px rgba(212,175,55,0.55), inset 0 1px 2px rgba(255,255,255,0.5)' }}>
+                        <Megaphone size={28} color="#151108"/>
+                      </div>
                     </div>
                     <div>
-                      <h2 style={{ fontSize:24, fontWeight:700, letterSpacing:0.4, margin:0, background:'linear-gradient(135deg,#F5E1A4 0%,#D4AF37 50%,#B8860B 100%)', WebkitBackgroundClip:'text', backgroundClip:'text', color:'transparent' }}>
+                      <h2 className="divine-shimmer-text" style={{
+                        fontSize:27, fontWeight:800, letterSpacing:0.4, margin:0,
+                        backgroundImage:'linear-gradient(110deg,#B8860B 10%,#F5E1A4 35%,#fff 50%,#F5E1A4 65%,#B8860B 90%)',
+                        WebkitBackgroundClip:'text', backgroundClip:'text', color:'transparent',
+                      }}>
                         Promotions &amp; Publicités
                       </h2>
-                      <p style={{ fontSize:11, color:'rgba(255,255,255,0.45)', marginTop:3, letterSpacing:1.2, textTransform:'uppercase' }}>
-                        Sacré Terroir · Visibilité Premium · AgriMarché
+                      <p style={{ fontSize:11, color:'rgba(255,255,255,0.5)', marginTop:4, letterSpacing:1.6, textTransform:'uppercase', display:'flex', alignItems:'center', gap:6 }}>
+                        <Star size={10} color="#D4AF37" fill="#D4AF37"/> Sacré Terroir · Visibilité Premium · AgriMarché
                       </p>
                     </div>
                   </div>
-                  <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:10, marginTop:22, position:'relative', zIndex:1 }}>
+                  <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:12, marginTop:24, position:'relative', zIndex:1 }}>
                     {[
                       { label:'Promos actives',  value: ads.filter(a=>a.active&&a.type==='promotion').length,  icon:<Sparkles size={14}/>, color:'#D4AF37' },
                       { label:'Pubs actives',    value: ads.filter(a=>a.active&&a.type==='publicite').length,  icon:<Gift size={14}/>,     color:'#F5E1A4' },
                       { label:'Total créées',    value: ads.length,                                             icon:<Star size={14}/>,     color:'#B8860B' },
                       { label:'En bannière',     value: ads.filter(a=>a.placement==='banner'||a.placement==='both').length, icon:<Award size={14}/>, color:'#10b981' },
                     ].map((s,i)=>(
-                      <div key={i} style={{ background:'rgba(255,255,255,0.04)', border:'1px solid rgba(212,175,55,0.18)', borderRadius:12, padding:'12px 14px', backdropFilter:'blur(6px)' }}>
-                        <div style={{ display:'flex', alignItems:'center', gap:5, color:s.color, marginBottom:6 }}>
+                      <div key={i} className="divine-card" style={{ background:'linear-gradient(160deg,rgba(255,255,255,0.05),rgba(255,255,255,0.015))', border:'1px solid rgba(212,175,55,0.2)', borderRadius:14, padding:'14px 16px', backdropFilter:'blur(6px)' }}>
+                        <div style={{ display:'flex', alignItems:'center', gap:5, color:s.color, marginBottom:7 }}>
                           {s.icon}
-                          <span style={{ fontSize:9, letterSpacing:1.2, textTransform:'uppercase', color:'rgba(255,255,255,0.4)' }}>{s.label}</span>
+                          <span style={{ fontSize:9, letterSpacing:1.2, textTransform:'uppercase', color:'rgba(255,255,255,0.42)' }}>{s.label}</span>
                         </div>
-                        <div style={{ fontSize:26, fontWeight:800, color:'#fff', lineHeight:1 }}>{s.value}</div>
+                        <div style={{ fontSize:28, fontWeight:800, color:'#fff', lineHeight:1, textShadow:'0 0 20px rgba(212,175,55,0.25)' }}>{s.value}</div>
                       </div>
                     ))}
                   </div>
                 </div>
 
-                {/* ── Sous-onglets ── */}
-                <div style={{ display:'flex', gap:0, background:'rgba(255,255,255,0.03)', borderRadius:16, padding:5, border:'1px solid rgba(212,175,55,0.15)' }}>
+                {/* ── Sous-onglets — divin ── */}
+                <div style={{ display:'flex', gap:0, background:'rgba(255,255,255,0.03)', borderRadius:18, padding:6, border:'1px solid rgba(212,175,55,0.15)' }}>
                   {([
                     ['promotions', '🏷️ Promotions', 'Prix réduits sur produits existants'],
                     ['publicites', '🖼️ Publicités', 'Bannières partenaires avec image'],
                   ] as const).map(([key, label, sub])=>(
                     <button key={key} onClick={()=>setAdsSubTab(key)}
                       style={{
-                        flex:1, padding:'12px 16px', borderRadius:12, border:'none', cursor:'pointer', transition:'all .2s',
-                        background: adsSubTab===key ? 'linear-gradient(135deg,rgba(212,175,55,0.2),rgba(212,175,55,0.08))' : 'transparent',
+                        flex:1, padding:'13px 16px', borderRadius:13, border:'none', cursor:'pointer', transition:'all .25s ease', position:'relative', overflow:'hidden',
+                        background: adsSubTab===key ? 'linear-gradient(135deg,rgba(212,175,55,0.24),rgba(212,175,55,0.06))' : 'transparent',
+                        boxShadow: adsSubTab===key ? '0 8px 24px rgba(212,175,55,0.18), inset 0 1px 0 rgba(255,255,255,0.06)' : 'none',
                         borderBottom: adsSubTab===key ? '2px solid #D4AF37' : '2px solid transparent',
                       }}>
                       <div style={{ fontWeight:700, fontSize:14, color: adsSubTab===key ? '#F5E1A4' : '#6b7280' }}>{label}</div>
@@ -4853,7 +5369,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                   return (
                     <div style={{ display:'grid', gap:20 }}>
                       {/* Formulaire */}
-                      <div style={{ borderRadius:20, padding:24, background:'linear-gradient(160deg,#0f1a14 0%,#1a2a20 100%)', border:'1px solid rgba(212,175,55,0.22)' }}>
+                      <div className="divine-hero" style={{ borderRadius:20, padding:24, background:'linear-gradient(160deg,#0f1a14 0%,#1a2a20 100%)', border:'1px solid rgba(212,175,55,0.3)' }}>
                         <h3 style={{ fontSize:16, fontWeight:700, color:'#F5E1A4', display:'flex', alignItems:'center', gap:8, margin:0, marginBottom:20 }}>
                           <Sparkles size={17} color="#D4AF37"/> {editingPromoId ? 'Modifier la promotion' : 'Créer une promotion produit'}
                         </h3>
@@ -5065,11 +5581,12 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                         ) : (
                           <div style={{ display:'grid', gap:12 }}>
                             {[...ads].filter(a=>a.type==='promotion'||!a.type).sort((a,b)=>(b.priority||0)-(a.priority||0)).map(ad=>(
-                              <div key={ad.id} style={{
+                              <div key={ad.id} className="divine-card" style={{
                                 display:'grid', gridTemplateColumns:'auto 1fr auto', gap:14, alignItems:'center',
                                 borderRadius:16, padding:14,
                                 background: ad.active ? 'linear-gradient(160deg,#0f1a14,#16241c)' : 'rgba(255,255,255,0.03)',
                                 border: ad.active ? '1px solid rgba(212,175,55,0.25)' : '1px solid rgba(255,255,255,0.07)',
+                                boxShadow: ad.active ? '0 10px 30px rgba(212,175,55,0.08)' : 'none',
                               }}>
                                 {/* Vignette */}
                                 <div style={{ position:'relative', width:90, height:56, borderRadius:10, overflow:'hidden', flexShrink:0, background:'#0a0f0d' }}>
@@ -5142,7 +5659,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                   <div style={{ display:'grid', gap:20 }}>
 
                     {/* Formulaire upload */}
-                    <div style={{ borderRadius:20, padding:24, background:'linear-gradient(160deg,#0f1318 0%,#1a1a2e 100%)', border:'1px solid rgba(139,92,246,0.25)' }}>
+                    <div className="divine-hero" style={{ borderRadius:20, padding:24, background:'linear-gradient(160deg,#0f1318 0%,#1a1a2e 100%)', border:'1px solid rgba(139,92,246,0.3)' }}>
                       <h3 style={{ fontSize:16, fontWeight:700, color:'#c4b5fd', display:'flex', alignItems:'center', gap:8, margin:0, marginBottom:20 }}>
                         <Globe size={17} color="#8b5cf6"/> {editingPubId ? 'Modifier la bannière partenaire' : 'Publier une bannière partenaire'}
                       </h3>
@@ -5396,11 +5913,12 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                       ) : (
                         <div style={{ display:'grid', gap:12 }}>
                           {[...ads].filter(a=>a.type==='publicite').sort((a,b)=>(b.priority||0)-(a.priority||0)).map(ad=>(
-                            <div key={ad.id} style={{
+                            <div key={ad.id} className="divine-card" style={{
                               display:'grid', gridTemplateColumns:'auto 1fr auto', gap:14, alignItems:'center',
                               borderRadius:16, padding:14,
                               background: ad.active ? 'linear-gradient(160deg,#0f1318,#1a1a2e)' : 'rgba(255,255,255,0.03)',
                               border: ad.active ? '1px solid rgba(139,92,246,0.3)' : '1px solid rgba(255,255,255,0.07)',
+                              boxShadow: ad.active ? '0 10px 30px rgba(139,92,246,0.10)' : 'none',
                             }}>
                               {/* Vignette */}
                               <div style={{ width:110, height:62, borderRadius:10, overflow:'hidden', flexShrink:0, background:'#0a0f0d' }}>
@@ -5508,20 +6026,69 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
       {/* Détails utilisateur */}
       {selectedUser && (
         <div onClick={()=>setSelectedUser(null)} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,.8)', backdropFilter:'blur(8px)', zIndex:1000, display:'flex', alignItems:'center', justifyContent:'center' }}>
-          <div onClick={e=>e.stopPropagation()} className="glass-card" style={{ width:440, maxWidth:'90%', padding:24 }}>
+          <div onClick={e=>e.stopPropagation()} className="glass-card" style={{ width:440, maxWidth:'90%', padding:24, maxHeight:'85vh', overflowY:'auto' }}>
             <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
               <h3 style={{ fontSize:17, fontWeight:600 }}>Détails utilisateur</h3>
               <button onClick={()=>setSelectedUser(null)} style={{ background:'none', border:'none', color:'#6b7280', cursor:'pointer' }}><X size={20}/></button>
             </div>
             <div style={{ display:'flex', gap:14, marginBottom:20, alignItems:'center' }}>
-              <div style={{ width:56, height:56, borderRadius:28, background:'rgba(16,185,129,.1)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:26, fontWeight:700 }}>{selectedUser.displayName?.charAt(0)??'?'}</div>
-              <div><div style={{ fontWeight:700, fontSize:17 }}>{selectedUser.displayName}</div><div style={{ fontSize:12, color:'#6b7280' }}>{selectedUser.role}</div></div>
+              {selectedUser.avatar ? (
+                <img src={selectedUser.avatar} alt="" style={{ width:56, height:56, borderRadius:28, objectFit:'cover', flexShrink:0 }}/>
+              ) : (
+                <div style={{ width:56, height:56, borderRadius:28, background:'rgba(16,185,129,.1)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:26, fontWeight:700, flexShrink:0 }}>{selectedUser.displayName?.charAt(0)??'?'}</div>
+              )}
+              <div>
+                <div style={{ fontWeight:700, fontSize:17 }}>{selectedUser.displayName || '—'}</div>
+                <div style={{ fontSize:12, color:'#6b7280', textTransform:'capitalize' }}>{selectedUser.role}</div>
+              </div>
             </div>
+
+            {/* Aperçu activité */}
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8, marginBottom:16 }}>
+              {selectedUser.role === 'seller' ? (
+                <>
+                  <div style={{ background:'#1f2127', borderRadius:10, padding:'10px 8px', textAlign:'center' }}>
+                    <div style={{ fontSize:18, fontWeight:700 }}>{sellerProductCounts.get(selectedUser.id!) || 0}</div>
+                    <div style={{ fontSize:10, color:'#6b7280' }}>Produits</div>
+                  </div>
+                  <div style={{ background:'#1f2127', borderRadius:10, padding:'10px 8px', textAlign:'center' }}>
+                    <div style={{ fontSize:18, fontWeight:700 }}>{orders.filter(o => o.sellerId === selectedUser.id).length}</div>
+                    <div style={{ fontSize:10, color:'#6b7280' }}>Commandes reçues</div>
+                  </div>
+                </>
+              ) : (
+                <div style={{ background:'#1f2127', borderRadius:10, padding:'10px 8px', textAlign:'center', gridColumn:'span 2' }}>
+                  <div style={{ fontSize:18, fontWeight:700 }}>{orders.filter(o => o.userId === selectedUser.id).length}</div>
+                  <div style={{ fontSize:10, color:'#6b7280' }}>Commandes passées</div>
+                </div>
+              )}
+            </div>
+
             {[['Email',selectedUser.email],['Téléphone',selectedUser.phone||'—'],['Région',selectedUser.region||'—'],['Inscription',selectedUser.createdAt?.toDate?.().toLocaleDateString?.()??'—']].map(([k,v])=>(
               <div key={k} style={{ display:'flex', justifyContent:'space-between', padding:'9px 0', borderBottom:'1px solid #1a1c22', fontSize:13 }}>
                 <span style={{ color:'#6b7280' }}>{k}</span><span>{v}</span>
               </div>
             ))}
+
+            <div style={{ display:'flex', gap:8, marginTop:18 }}>
+              {selectedUser.phone && (
+                <a href={`https://wa.me/221${selectedUser.phone.replace(/\D/g,'').replace(/^221/,'')}`} target="_blank" rel="noopener noreferrer" className="btn-secondary" style={{ flex:1, textAlign:'center', textDecoration:'none', display:'inline-flex', alignItems:'center', justifyContent:'center', gap:6 }}>
+                  <MessageSquare size={13}/> WhatsApp
+                </a>
+              )}
+              <button
+                onClick={()=>{
+                  setBroadcastMode('manual');
+                  setSelectedUserIds(new Set([selectedUser.uid ?? selectedUser.id ?? '']));
+                  setActiveTab('broadcast');
+                  setSelectedUser(null);
+                }}
+                className="btn-secondary"
+                style={{ flex:1, display:'inline-flex', alignItems:'center', justifyContent:'center', gap:6 }}
+              >
+                <Send size={13}/> Notifier
+              </button>
+            </div>
           </div>
         </div>
       )}

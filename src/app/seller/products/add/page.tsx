@@ -15,10 +15,14 @@ import {
   Tag, Scale, MapPin, AlignLeft, Layers, Info
 } from 'lucide-react';
 
+// Alignées avec CATEGORIES dans src/app/main/products/page.tsx — un vendeur
+// ne doit jamais pouvoir choisir une catégorie que le filtre acheteur ne
+// connaît pas (le produit resterait invisible dès qu'on filtre par catégorie,
+// visible uniquement sous "Tous"). Les deux listes doivent rester identiques.
 const CATEGORIES = [
   'Fruits', 'Légumes', 'Céréales', 'Tubercules',
   'Machines agricoles', 'Condiments', 'Poissons',
-  'Produits laitiers', 'Légumineuses', 'Engrais', 'Elevage', 'Boissons', 'Produits transformés', 'Semences & Agricole'
+  'Produits laitiers', 'Légumineuses', 'Engrais', 'Elevage'
 ];
 
 const UNITS = ['kg', 'g', 'tonne', 'litre', 'unité', 'sac', 'botte', 'caisse', 'carton', 'panier'];

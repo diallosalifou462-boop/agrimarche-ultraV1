@@ -540,6 +540,20 @@ export default function AccountPage() {
             </Link>
           )}
 
+          {/* Renvoie vers /account/privacy — l'écran de réglages avec les
+              interrupteurs (notifications personnalisées, préférences par
+              catégorie), pas /main/privacy qui n'est que le texte légal
+              statique. Ces interrupteurs sont déjà branchés côté backend
+              (trackInterest.ts) mais restaient inaccessibles : aucune page
+              de compte ne pointait vers eux. */}
+          <Link href="/account/privacy" className="w-full flex items-center justify-between bg-white border border-gray-100 text-gray-700 px-5 py-4 rounded-2xl text-sm font-semibold active:bg-gray-50 transition">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-xl bg-emerald-50 flex items-center justify-center"><Shield size={16} className="text-emerald-600" /></div>
+              Confidentialité
+            </div>
+            <ChevronRight size={18} className="opacity-40" />
+          </Link>
+
           <button onClick={handleLogout} className="w-full flex items-center justify-between bg-white border border-rose-100 text-rose-500 px-5 py-4 rounded-2xl text-sm font-semibold active:bg-rose-50 transition">
             <div className="flex items-center gap-3">
               <div className="w-8 h-8 rounded-xl bg-rose-50 flex items-center justify-center"><LogOut size={16} /></div>

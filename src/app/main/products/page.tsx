@@ -71,6 +71,7 @@ interface ProductData {
   farmerVerified?: boolean;
   images?: string[];
   stock?: number;
+  minOrder?: number;
   exactLocation?: string;
   region?: string;
   lat?: number;
@@ -480,6 +481,14 @@ export default function AgriMarket() {
     // On applique désormais le même filtre de catégorie à chaque rangée.
     const byCat = <T extends { category?: string }>(arr: T[]) =>
       cat === 'Tous' ? arr : arr.filter(p => p.category === cat);
+    // FIX (même bug, cette fois avec `sort`) : le bouton TRIER changeait bien
+    // l'ordre de la grille principale ci-dessous, mais jamais celui de ces
+    // rangées de découverte — d'où l'impression que le bouton "n'avait aucun
+    // effet" en arrivant sur la page, avant même de scroller jusqu'à la grille.
+    const bySort = <T extends { price?: number }>(arr: T[]) =>
+      sort === 'default' ? arr : [...arr].sort((a, b) =>
+        sort === 'asc' ? (a.price ?? 0) - (b.price ?? 0) : (b.price ?? 0) - (a.price ?? 0)
+      );
     const inStock = byCat(products).filter(isBuyerVisible);
     const sections: { key: string; title: string; icon: string; items: ProductData[]; distances?: Map<string, number> }[] = [];
 
@@ -487,17 +496,20 @@ export default function AgriMarket() {
     // de produits déjà chargés dans la page principale.
     const fresh = byCat(freshProducts).filter(isBuyerVisible);
     if (fresh.length >= 3) {
-      sections.push({ key: 'new', title: 'Nouveautés du jour', icon: '✦', items: fresh.slice(0, 10) });
+      sections.push({ key: 'new', title: 'Nouveautés du jour', icon: '✦', items: bySort(fresh.slice(0, 10)) });
     }
 
     if (location?.lat && location?.lng) {
       const distances = new Map<string, number>();
+      // Le tri par distance reste la valeur par défaut de cette rangée (c'est
+      // sa raison d'être) ; bySort ne prend le dessus que si l'utilisateur a
+      // explicitement choisi un tri par prix.
       const nearby = inStock
         .filter(p => p.lat !== undefined && p.lng !== undefined)
         .map(p => { distances.set(p.id, distanceKm(location.lat, location.lng, p.lat!, p.lng!)); return p; })
         .sort((a, b) => (distances.get(a.id) ?? 0) - (distances.get(b.id) ?? 0));
       if (nearby.length >= 3) {
-        sections.push({ key: 'near', title: 'Près de chez vous', icon: '📍', items: nearby.slice(0, 10), distances });
+        sections.push({ key: 'near', title: 'Près de chez vous', icon: '📍', items: bySort(nearby.slice(0, 10)), distances });
       }
     }
 
@@ -505,11 +517,11 @@ export default function AgriMarket() {
     // le plus demandé ne fait pas partie des 40 premiers chargés dans la grille.
     const popular = byCat(popularProducts).filter(p => (p.whatsappClicks ?? 0) > 0 && isBuyerVisible(p));
     if (popular.length >= 3) {
-      sections.push({ key: 'popular', title: 'Les plus demandés', icon: '🔥', items: popular.slice(0, 10) });
+      sections.push({ key: 'popular', title: 'Les plus demandés', icon: '🔥', items: bySort(popular.slice(0, 10)) });
     }
 
     return sections;
-  }, [products, freshProducts, popularProducts, location, search, cat]);
+  }, [products, freshProducts, popularProducts, location, search, cat, sort]);
 
   const recommendationSections = useMemo(() => {
     if (!selected) return [] as { title: string; badge: string; items: ProductData[]; distances?: Map<string, number> }[];
@@ -622,8 +634,12 @@ export default function AgriMarket() {
       // est créée même si le panier contient plusieurs vendeurs distincts.
       sellerId: p.sellerId || '',
       region: p.region || '',
+      // ⚠️ Sans minOrder ici, useCart appliquait un minimum implicite de 1
+      // faute de mieux, et le panier ignorait la commande minimale définie
+      // par le vendeur (product-details/formulaire "Ajouter un produit").
+      minOrder: p.minOrder || 1,
     };
-    addToCart(productForCart as any, 1);
+    addToCart(productForCart as any, p.minOrder || 1);
     setAddedIds(prev => new Set(prev).add(p.id));
     setTimeout(() => setAddedIds(prev => { const s = new Set(prev); s.delete(p.id); return s; }), 2200);
   };
@@ -2004,6 +2020,12 @@ export default function AgriMarket() {
                   <div className="g-meta-row">
                     <div className="g-meta-icon">📦</div>
                     <span className="g-meta-text">Stock disponible : <span>{selected.stock} {selected.unit || 'unités'}</span></span>
+                  </div>
+                )}
+                {(selected.minOrder || 1) > 1 && (
+                  <div className="g-meta-row">
+                    <div className="g-meta-icon">🔢</div>
+                    <span className="g-meta-text">Commande minimale : <span>{selected.minOrder} {selected.unit || 'unités'}</span></span>
                   </div>
                 )}
               </div>

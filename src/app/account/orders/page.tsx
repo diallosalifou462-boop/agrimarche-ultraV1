@@ -13,6 +13,9 @@ import { OrderStatus, ORDER_STATUS_CONFIG, normalizeStatus, statusTint, formatFC
 // `updateOrderStatus` (transaction atomique côté serveur), plus par une
 // écriture Firestore directe — voir src/lib/orderActions.ts pour le détail.
 import { confirmOrderDelivery, cancelClientOrder, OrderActionError } from '@/lib/orderActions';
+// ✅ Le code de livraison appartient au client : cette fonction est la
+// seule façon de le lire, vérifiée côté serveur (order.userId === uid).
+import { getDeliveryCode, DeliveryCodeError } from '@/lib/deliveryCodeActions';
 
 interface Order {
   id: string;
@@ -139,8 +142,34 @@ function OrdersContent() {
   // Avant : canCancel autorisait aussi 'en_preparation', une écriture que la
   // règle Firestore rejette (le client ne peut plus s'auto-annuler une fois
   // la préparation commencée par le vendeur) → clic qui échouait en silence.
+  // ── 🔐 Code de livraison — Règle fondamentale : le code appartient au
+  // client. Récupéré via getDeliveryCode (jamais lu directement en
+  // Firestore : la commande ne stocke que le hash), dès qu'un livreur a
+  // été assigné. Reste disponible tant que la commande n'est pas encore
+  // 'livre' — pas besoin d'avoir vu de notification pour le retrouver.
+  const [deliveryCode, setDeliveryCode] = useState<string | null>(null);
+  const [deliveryCodeLoading, setDeliveryCodeLoading] = useState(false);
+  useEffect(() => {
+    if (!selectedOrder || selectedOrder.status !== 'en_livraison' || !selectedOrder.delivererId) {
+      setDeliveryCode(null);
+      return;
+    }
+    let cancelled = false;
+    setDeliveryCodeLoading(true);
+    getDeliveryCode(selectedOrder.id)
+      .then((code) => { if (!cancelled) setDeliveryCode(code); })
+      .catch((e) => { console.error('Erreur récupération code', e instanceof DeliveryCodeError ? e.message : e); })
+      .finally(() => { if (!cancelled) setDeliveryCodeLoading(false); });
+    return () => { cancelled = true; };
+  }, [selectedOrder?.id, selectedOrder?.status, selectedOrder?.delivererId]);
+
   const canCancel  = selectedOrder ? canClientCancel(selectedOrder.status) : false;
-  const canConfirm = selectedOrder ? canClientConfirmDelivery(selectedOrder.status) : false;
+  // ⚠️ Une fois un livreur assigné, la confirmation de réception passe
+  // OBLIGATOIREMENT par le code (le livreur la saisit côté serveur dans
+  // confirmDeliveryWithCode) — le bouton "Confirmer réception" ne doit
+  // plus être une porte parallèle qui contournerait cette vérification.
+  // Il ne reste utile que pour le cas résiduel sans livreur assigné.
+  const canConfirm = selectedOrder ? canClientConfirmDelivery(selectedOrder.status) && !selectedOrder.delivererId : false;
 
   if (loading || authLoading) return (
     <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#FAFAF8' }}>
@@ -337,6 +366,37 @@ function OrdersContent() {
                               <svg width={15} height={15} viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.149-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.095 3.2 5.076 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 0C5.373 0 0 5.373 0 12c0 2.125.558 4.121 1.531 5.856L.073 23.27a.75.75 0 00.918.882l5.57-1.461A11.944 11.944 0 0012 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 21.75a9.73 9.73 0 01-4.964-1.363l-.355-.212-3.676.965.978-3.576-.232-.368A9.713 9.713 0 012.25 12C2.25 6.615 6.615 2.25 12 2.25S21.75 6.615 21.75 12 17.385 21.75 12 21.75z"/></svg>
                             </a>
                           </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* 🔐 Code de livraison — affiché uniquement au propriétaire
+                        de la commande, jamais par SMS. C'est ce code, et lui
+                        seul, que le livreur doit recevoir de vive voix pour
+                        pouvoir clôturer la livraison. */}
+                    {selectedOrder.status === 'en_livraison' && selectedOrder.delivererId && (
+                      <div style={{
+                        background: 'linear-gradient(135deg, #1A1A1A, #2d2d2d)', borderRadius: 14,
+                        padding: '16px 18px', marginBottom: 16, textAlign: 'center',
+                      }}>
+                        <p style={{ margin: 0, fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', color: '#C9A96E', textTransform: 'uppercase' }}>
+                          🔐 Code de livraison
+                        </p>
+                        {deliveryCodeLoading ? (
+                          <p style={{ margin: '8px 0 0', fontSize: 13, color: '#9A9A9A' }}>Chargement…</p>
+                        ) : deliveryCode ? (
+                          <>
+                            <p style={{ margin: '6px 0 4px', fontSize: 32, fontWeight: 800, letterSpacing: 10, color: '#fff', fontFamily: 'monospace' }}>
+                              {deliveryCode}
+                            </p>
+                            <p style={{ margin: 0, fontSize: 12, color: '#d4d4d4' }}>
+                              Donnez ce code au livreur pour confirmer la réception de votre commande.
+                            </p>
+                          </>
+                        ) : (
+                          <p style={{ margin: '8px 0 0', fontSize: 12, color: '#d4d4d4' }}>
+                            Le code apparaîtra ici dès que le livreur aura pris en charge votre commande.
+                          </p>
                         )}
                       </div>
                     )}

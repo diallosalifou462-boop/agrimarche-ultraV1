@@ -395,7 +395,8 @@ export default function CartPage() {
                     <div className="flex items-center gap-1 bg-gray-50 rounded-full p-1">
                       <button
                         onClick={() => updateQuantity(item.product.id, item.quantity - 1)}
-                        className="w-7 h-7 rounded-full bg-white hover:bg-emerald-500 hover:text-white flex items-center justify-center text-sm transition-all duration-300 shadow-sm"
+                        disabled={item.quantity <= (item.product.minOrder || 1)}
+                        className="w-7 h-7 rounded-full bg-white hover:bg-emerald-500 hover:text-white flex items-center justify-center text-sm transition-all duration-300 shadow-sm disabled:opacity-40"
                       >
                         −
                       </button>
@@ -410,6 +411,11 @@ export default function CartPage() {
                     </div>
                     {item.product.stock && item.product.stock > 0 && item.product.stock <= 10 && (
                       <span className="text-[6px] bg-amber-100 text-amber-600 px-2 py-1 rounded-full">Stock limité</span>
+                    )}
+                    {(item.product.minOrder || 1) > 1 && (
+                      <span className="text-[6px] bg-emerald-50 text-emerald-600 px-2 py-1 rounded-full">
+                        Min. {item.product.minOrder} {item.product.unit || 'unités'}
+                      </span>
                     )}
                   </div>
                 </div>

@@ -231,6 +231,17 @@ service cloud.firestore {
       allow read: if isAdmin();
     }
 
+    // Requête collectionGroup('productPricing') utilisée par l'onglet
+    // Produits de l'admin (app/admin/page.tsx) pour charger en une seule
+    // fois tous les basePrice/marge de tous les produits. Une règle
+    // imbriquée simple (voir plus bas, sous /products/{productId}) régit
+    // les accès document par document (create/update/delete) ; celle-ci,
+    // avec le wildcard récursif {path=**}, est nécessaire en plus pour
+    // que la requête collectionGroup elle-même soit autorisée en lecture.
+    match /{path=**}/productPricing/{doc} {
+      allow read: if isAdmin();
+    }
+
     // =========================================================
     // PRODUITS
     // =========================================================
@@ -259,6 +270,29 @@ service cloud.firestore {
       // (seller/products/page.tsx a un vrai bouton supprimer pour lui) —
       // avant, seul l'admin le pouvait, donc ça échouait silencieusement.
       allow delete: if (isSeller() && resource.data.sellerId == request.auth.uid) || isAdmin();
+
+      // =========================================================
+      // PRIX VENDEUR BRUT (basePrice) — sous-collection privée
+      // Le document public products/{productId} ci-dessus ne contient que
+      // `price` (le prix final affiché = basePrice + 5% de marge
+      // plateforme). basePrice lui-même — et donc la marge qu'il révèle —
+      // ne doit JAMAIS être lisible par le vendeur ni l'acheteur, même via
+      // les outils développeur du navigateur. D'où ce document séparé,
+      // réservé à l'admin en lecture. Voir src/lib/pricing.ts.
+      // =========================================================
+      match /productPricing/{doc} {
+        allow read: if isAdmin();
+
+        // Le vendeur propriétaire du produit peut créer ce document une
+        // seule fois, juste après avoir créé products/{productId} (voir
+        // seller/products/add/page.tsx). Il n'y a pas de page d'édition
+        // vendeur dans l'app — seul l'admin modifie ensuite ce document,
+        // depuis l'onglet Produits.
+        allow create: if isSeller()
+          && get(/databases/$(database)/documents/products/$(productId)).data.sellerId == request.auth.uid;
+
+        allow update, delete: if isAdmin();
+      }
     }
 
     // =========================================================
@@ -276,23 +310,75 @@ service cloud.firestore {
     // =========================================================
     // COMMANDES
     // =========================================================
+    // 🔒 DURCISSEMENT (pas lié au bug d'origine, trouvé pendant l'audit) :
+    // les branches isDeliverer() de `orders`.update ci-dessous n'avaient
+    // AUCUNE restriction de champ — un compte livreur authentifié pouvait
+    // réécrire n'importe quel champ (sellerId, total, userId...) sur une
+    // commande 'en_attente' libre ou déjà assignée à lui. Liste exhaustive
+    // ci-dessous, vérifiée champ par champ contre TOUS les points d'écriture
+    // livreur du code : delivery/dashboard/page.tsx (claimOrder,
+    // markAsDelivered, saveDates, GPS tracking start/stop), admin/page.tsx
+    // et admin/assign-delivery/page.tsx (isAdmin(), pas concernés par cette
+    // fonction). Note : les écritures en dot-notation comme
+    // updateDoc(ref, {'tracking.enabled': false}) apparaissent dans
+    // affectedKeys() sous leur clé de premier niveau ('tracking'), pas sous
+    // le chemin complet — d'où 'tracking' seul dans la liste, pas
+    // 'tracking.enabled'.
+    // ⚠️ Non testé contre l'émulateur Firestore avant déploiement — à
+    // valider avec `firebase emulators:start --only firestore` (ou en
+    // staging) avant de pousser en prod, séparément des fix critiques
+    // ci-dessus : une erreur ici bloquerait TOUS les livreurs, un risque
+    // plus grave que le bug d'origine.
+    function isDelivererOrderUpdate() {
+      return onlyChanges([
+        'delivererId', 'delivererName', 'delivererPhone', 'delivererAssignedAt',
+        'status', 'statusLabel', 'updatedAt', 'deliveredAt', 'tracking',
+        'dateDepart', 'dateArrivee', 'dateRetour', 'dateLivree',
+        'dateProbleme', 'noteProbleme',
+      ]);
+    }
+
+    // 🔐 SUPERSEDED (Cloud Functions claimOrder / confirmDeliveryWithCode,
+    // Admin SDK) : la prise en charge d'une commande et la confirmation de
+    // livraison n'écrivent plus JAMAIS delivererId/status/deliveryCode*
+    // directement depuis le client — ces deux Cloud Functions contournent
+    // de toute façon ces règles. Ce qui reste légitime ici : les mises à
+    // jour de suivi GPS en direct (fréquentes, pas besoin d'un aller-retour
+    // serveur pour chaque position), UNIQUEMENT sur une commande déjà
+    // assignée à l'appelant. isDelivererOrderUpdate() ci-dessus est
+    // conservée définie (au cas où) mais n'est plus référencée : la laisser
+    // active rouvrirait exactement la porte que le code de livraison sert à
+    // fermer (un livreur pourrait s'auto-assigner une commande, ou la faire
+    // passer à 'livre', sans jamais fournir le code que le client lui a
+    // communiqué).
+    function isDelivererTrackingUpdate() {
+      return onlyChanges([
+        'tracking', 'updatedAt', 'dateDepart', 'dateArrivee', 'dateRetour',
+        'dateProbleme', 'noteProbleme',
+      ]);
+    }
+
     match /orders/{orderId} {
       allow read: if isAdmin()
                   || isOwner(resource.data.userId)
                   || (isSeller() && resource.data.sellerId == request.auth.uid)
                   // Un livreur voit les commandes qui lui sont déjà assignées...
                   || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid)
-                  // ...ainsi que celles encore 'en_attente' (jamais assignées à ce stade —
-                  // assignDelivery() ne pose delivererId qu'en même temps que le passage à
-                  // 'en_preparation'), nécessaire pour la liste "commandes disponibles".
-                  // ⚠️ Basé sur `status` (champ du where() de la requête) et non `delivererId`
-                  // (absent du where()) : une requête list() ne peut être autorisée que si
-                  // Firestore peut prouver la règle à partir des seuls champs filtrés par la
-                  // requête elle-même — "les règles ne sont pas des filtres". La version
-                  // précédente (`delivererId == null`) faisait échouer la requête list()
-                  // entière pour tout compte livreur réel (ne fonctionnait que pour un admin,
-                  // dont la règle ne dépend pas de resource.data).
-                  || (isDeliverer() && resource.data.status == 'en_attente');
+                  // ...ainsi que celles pas encore assignées, pour la liste
+                  // "commandes disponibles" — 'en_attente' (le vendeur n'a pas
+                  // encore confirmé, le livreur peut se positionner à l'avance)
+                  // ET 'en_preparation' (déjà confirmée, prête à partir).
+                  // 🔒 FIX RACINE : cette règle ne couvrait auparavant QUE
+                  // 'en_attente'. delivery/dashboard/page.tsx interroge
+                  // `where('status', 'in', ['en_attente', 'en_preparation'])` —
+                  // Firestore ne peut autoriser une requête list() que si la
+                  // règle est prouvable pour TOUTES les valeurs filtrées par la
+                  // requête elle-même. Résultat concret : la requête ENTIÈRE
+                  // (les deux statuts, pas seulement 'en_preparation') échouait
+                  // en permission-denied pour tout compte livreur réel — la file
+                  // "disponibles" restait vide silencieusement, quel que soit le
+                  // statut des commandes en attente.
+                  || (isDeliverer() && resource.data.status in ['en_attente', 'en_preparation']);
 
       // ✅ Assoupli : plus d'exigences sur les champs (items/total/status/
       // livraison...), qui bloquaient le checkout dès qu'un flux envoyait
@@ -324,11 +410,30 @@ service cloud.firestore {
       // immédiate après création), sans rapport avec ce changement.
       allow update: if (isOwner(resource.data.userId) && isOrderCompletionUpdate())
                     || (isSeller() && resource.data.sellerId == request.auth.uid)
-                    || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid)
-                    || (isDeliverer() && resource.data.get('delivererId', null) == null)
+                    // 🔐 Depuis claimOrder/confirmDeliveryWithCode (Cloud
+                    // Functions, Admin SDK) : plus de branche "commande libre,
+                    // le livreur se l'assigne en écrivant directement" — ce
+                    // serait contourner la génération/vérification du code.
+                    // Seule reste la mise à jour de suivi GPS sur une commande
+                    // déjà assignée à l'appelant.
+                    || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid && isDelivererTrackingUpdate())
                     || isAdmin();
 
       allow delete: if false;
+    }
+
+    // 🔐 Code de livraison en clair — écrit et lu UNIQUEMENT par les Cloud
+    // Functions claimOrder / getDeliveryCode / confirmDeliveryWithCode
+    // (Admin SDK, hors de ces règles). Aucun accès client dans aucun sens :
+    // ni le livreur (qui ne doit jamais le voir), ni même le propriétaire
+    // de la commande — lui aussi passe par getDeliveryCode(), qui vérifie
+    // order.userId == uid côté serveur avant de le renvoyer. Une règle
+    // explicite plutôt que de compter sur le "interdit par défaut" en fin
+    // de fichier : si une future règle plus permissive est ajoutée sur
+    // orders/{orderId}/{document=**}, celle-ci reste prioritaire et bloque
+    // toujours l'accès.
+    match /orders/{orderId}/secure/{docId} {
+      allow read, write: if false;
     }
 
     // Miroir de orders côté vendeur (writeBatch sur orders + seller_orders)
@@ -340,10 +445,19 @@ service cloud.firestore {
       // faisait échouer l'annulation/la confirmation dès cette lecture,
       // avant même d'arriver au batch.commit(). On autorise donc la lecture
       // d'un doc absent (elle renverra juste exists()==false côté client).
+      // ⚠️ FIX CRITIQUE : delivery/dashboard/page.tsx (claimOrder ET
+      // markAsDelivered) fait un getDoc() sur ce chemin exact AVANT chaque
+      // écriture, pour savoir s'il faut synchroniser le miroir vendeur.
+      // Sans isDeliverer() ici, ce getDoc() était refusé pour TOUT compte
+      // livreur — l'erreur permission-denied survenait avant même d'arriver
+      // au batch.commit(), ce qui faisait échouer silencieusement
+      // l'acceptation d'une commande ET la confirmation de livraison.
       allow read: if resource == null
                   || isAdmin()
                   || isOwner(resource.data.userId)
-                  || (isSeller() && resource.data.sellerId == request.auth.uid);
+                  || (isSeller() && resource.data.sellerId == request.auth.uid)
+                  || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid)
+                  || (isDeliverer() && resource.data.get('delivererId', null) == null);
 
       // ✅ Assoupli, en miroir de /orders : plus d'exigence de champs à la
       // création, et l'acheteur peut mettre à jour le statut (annuler /
@@ -362,7 +476,24 @@ service cloud.firestore {
       // /orders — l'acheteur n'a plus de branche update ici du tout,
       // isCancelUpdate()/isConfirmDeliveryUpdate() étaient les deux seules
       // raisons pour lesquelles il en avait une.
+      // ⚠️ FIX CRITIQUE : delivery/dashboard/page.tsx écrit TOUJOURS dans
+      // orders ET seller_orders dans le même writeBatch (claimOrder,
+      // markAsDelivered) — checkout crée systématiquement le miroir
+      // seller_orders, donc sellerOrderSnap.exists() est vrai pour
+      // quasiment toutes les commandes. Un writeBatch Firestore est
+      // atomique CÔTÉ RÈGLES : si UNE des écritures du batch est refusée,
+      // le batch ENTIER échoue en permission-denied — y compris
+      // l'écriture sur `orders`, qui aurait pourtant été autorisée seule.
+      // Sans ce correctif, un livreur qui accepte une commande ou confirme
+      // une livraison n'écrivait RIEN NULLE PART, avec juste une alerte
+      // générique côté client masquant l'échec réel. Mêmes clauses
+      // qu'/orders ci-dessus, pour la même raison : soit le livreur déjà
+      // assigné à cette commande, soit une commande encore libre qu'il est
+      // en train de réclamer.
       allow update: if (isSeller() && resource.data.sellerId == request.auth.uid)
+                    // 🔐 Même durcissement que sur /orders ci-dessus : plus de
+                    // branche "commande libre, auto-assignation directe".
+                    || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid && isDelivererTrackingUpdate())
                     || isAdmin();
 
       allow delete: if false;
@@ -548,6 +679,58 @@ service cloud.firestore {
                     && request.resource.data.used == true
                     && request.resource.data.usedBy == request.auth.uid;
       allow delete: if isAdmin();
+    }
+
+    // =========================================================
+    // RÉGLAGES ADMIN (settings/*)
+    // Lus ET écrits directement depuis le client admin (toggles, seuils) :
+    // Promotion IA (aiPromotion), Alerte stock bas (lowStockAlerts),
+    // Relances commandes en attente (pendingOrdersAlerts), Relances
+    // clients inactifs (inactiveClientsAlerts), verrou anti-doublon
+    // (periodicChecksLock). Un seul match générique plutôt qu'un par clé :
+    // ⚠️ avant l'ajout de ce bloc, `settings/*` n'avait AUCUNE règle
+    // explicite (couvert seulement par le catch-all "interdit par
+    // défaut" en fin de fichier) — même la Promotion IA, pourtant déjà
+    // en place depuis avant, échouait donc en permission-denied dès
+    // qu'un admin essayait de lire/modifier ses réglages.
+    // =========================================================
+    match /settings/{settingId} {
+      allow read, write: if isAdmin();
+    }
+
+    // =========================================================
+    // HISTORIQUES DES NOTIFICATIONS AUTOMATIQUES
+    // Écrits UNIQUEMENT par les routes API correspondantes via le SDK
+    // Admin (hors de ces règles) : /api/cron/promote-stale-products,
+    // /api/products/check-stock, /api/system/periodic-checks. L'admin a
+    // seulement besoin de LIRE pour afficher l'historique dans l'UI.
+    // =========================================================
+    match /ai_promotions/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    match /low_stock_alerts/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    match /pending_order_alerts/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    match /inactive_client_alerts/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // =========================================================
+    // RATE-LIMIT ACCÈS INVITÉ (findGuestOrders / claimGuestOrderSession /
+    // startGuestCheckoutSession) — écrit et lu UNIQUEMENT par les Cloud
+    // Functions correspondantes (Admin SDK). Aucun accès client : exposer
+    // ne serait-ce que la lecture permettrait de sonder qui a déjà atteint
+    // la limite, ou de la remettre à zéro depuis le navigateur.
+    // =========================================================
+    match /guestAccessAttempts/{key} {
+      allow read, write: if false;
     }
 
     // =========================================================
