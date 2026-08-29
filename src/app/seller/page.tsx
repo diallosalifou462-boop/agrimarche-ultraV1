@@ -19,6 +19,7 @@ import {
   limit,
   doc,
   getDoc,
+  setDoc,
   onSnapshot,   // ✅ FIX : remplace getDocs — les commandes se mettent à jour en temps réel
 } from 'firebase/firestore';
 
@@ -251,6 +252,19 @@ export default function SellerDashboard() {
       // s'exécutait jamais (permissions manifest absentes jusqu'ici).
       getCurrentPosition({ enableHighAccuracy: true, timeout: 10000 })
         .then(async (pos) => {
+          // 🐛 FIX géoloc vendeur : cette position ne servait jusqu'ici qu'à
+          // l'affichage du message de bienvenue (setSellerLocation ci-dessous)
+          // et n'était JAMAIS enregistrée sur le profil. checkout/page.tsx
+          // retombait donc systématiquement sur le point par défaut (Dakar,
+          // 14.7167/-17.4677) pour le pickup du livreur, quel que soit le
+          // vendeur — aucune page de l'appli n'écrivait latitude/longitude.
+          // On persiste ici les coordonnées déjà récupérées, sans prompt ni
+          // permission supplémentaire.
+          setDoc(doc(db, 'users', user.uid), {
+            latitude: pos.coords.latitude,
+            longitude: pos.coords.longitude,
+          }, { merge: true }).catch((err) => console.error('Maj position vendeur:', err));
+
           try {
             const res = await fetch(
               `https://nominatim.openstreetmap.org/reverse?format=json&lat=${pos.coords.latitude}&lon=${pos.coords.longitude}`

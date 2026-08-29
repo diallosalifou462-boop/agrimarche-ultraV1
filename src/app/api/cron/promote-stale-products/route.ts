@@ -25,7 +25,8 @@
 // Variables d'environnement requises :
 //   CRON_SECRET                  ← secret partagé avec Vercel Cron
 //   DEEPSEEK_API_KEY              ← déjà utilisé par /api/chat
-//   FIREBASE_SERVICE_ACCOUNT_JSON ← déjà utilisé par /api/send-push
+//   FIREBASE_SERVICE_ACCOUNT_JSON, ou à défaut FIREBASE_PROJECT_ID +
+//   FIREBASE_CLIENT_EMAIL + FIREBASE_PRIVATE_KEY (voir /api/send-push)
 
 import { NextRequest, NextResponse } from 'next/server';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
@@ -34,11 +35,42 @@ import { getMessaging } from 'firebase-admin/messaging';
 import { getAuth } from 'firebase-admin/auth';
 import { categoryLink } from '@/lib/categoryLink';
 
+// ============================================================
+// FIREBASE ADMIN — accepte les deux formats de config utilisés dans ce
+// projet (voir /api/send-push/route.ts, qui documentait déjà cet écart) :
+// soit FIREBASE_SERVICE_ACCOUNT_JSON (un seul bloc JSON), soit les 3
+// variables séparées FIREBASE_PROJECT_ID / FIREBASE_CLIENT_EMAIL /
+// FIREBASE_PRIVATE_KEY. Cette route n'acceptait QUE le premier format —
+// sur un .env.local qui n'a que les 3 variables séparées, ça plantait
+// systématiquement en "FIREBASE_SERVICE_ACCOUNT_JSON manquant" alors que
+// send-push, lui, fonctionnait (même symptôme constaté sur periodic-checks).
+// ============================================================
 function getAdminApp() {
   if (getApps().length > 0) return getApps()[0];
+
   const json = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  if (!json || json.trim() === '') throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON manquant');
-  return initializeApp({ credential: cert(JSON.parse(json)) });
+  if (json && json.trim() !== '') {
+    let serviceAccount;
+    try {
+      serviceAccount = JSON.parse(json);
+    } catch {
+      throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON invalide (JSON malformé).');
+    }
+    return initializeApp({ credential: cert(serviceAccount) });
+  }
+
+  const projectId = process.env.FIREBASE_PROJECT_ID;
+  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+  const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
+
+  if (!projectId || !clientEmail || !privateKey) {
+    throw new Error(
+      "Firebase Admin n'est pas configuré : définis soit FIREBASE_SERVICE_ACCOUNT_JSON, " +
+      'soit FIREBASE_PROJECT_ID + FIREBASE_CLIENT_EMAIL + FIREBASE_PRIVATE_KEY dans .env.local.'
+    );
+  }
+
+  return initializeApp({ credential: cert({ projectId, clientEmail, privateKey }) });
 }
 
 // ⚠️ Le projet stocke les tokens FCM tantôt comme ID de document

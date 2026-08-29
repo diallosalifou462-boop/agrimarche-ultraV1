@@ -29,11 +29,42 @@ import { getFirestore, FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
 import { getAuth } from 'firebase-admin/auth';
 
+// ============================================================
+// FIREBASE ADMIN — accepte les deux formats de config utilisés dans ce
+// projet (voir /api/send-push/route.ts, qui documentait déjà cet écart) :
+// soit FIREBASE_SERVICE_ACCOUNT_JSON (un seul bloc JSON), soit les 3
+// variables séparées FIREBASE_PROJECT_ID / FIREBASE_CLIENT_EMAIL /
+// FIREBASE_PRIVATE_KEY. Cette route n'acceptait QUE le premier format —
+// sur un .env.local qui n'a que les 3 variables séparées (le cas ici),
+// ça plantait systématiquement en "FIREBASE_SERVICE_ACCOUNT_JSON manquant"
+// alors que send-push, lui, fonctionnait.
+// ============================================================
 function getAdminApp() {
   if (getApps().length > 0) return getApps()[0];
+
   const json = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  if (!json || json.trim() === '') throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON manquant');
-  return initializeApp({ credential: cert(JSON.parse(json)) });
+  if (json && json.trim() !== '') {
+    let serviceAccount;
+    try {
+      serviceAccount = JSON.parse(json);
+    } catch {
+      throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON invalide (JSON malformé).');
+    }
+    return initializeApp({ credential: cert(serviceAccount) });
+  }
+
+  const projectId = process.env.FIREBASE_PROJECT_ID;
+  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+  const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
+
+  if (!projectId || !clientEmail || !privateKey) {
+    throw new Error(
+      "Firebase Admin n'est pas configuré : définis soit FIREBASE_SERVICE_ACCOUNT_JSON, " +
+      'soit FIREBASE_PROJECT_ID + FIREBASE_CLIENT_EMAIL + FIREBASE_PRIVATE_KEY dans .env.local.'
+    );
+  }
+
+  return initializeApp({ credential: cert({ projectId, clientEmail, privateKey }) });
 }
 
 function extractToken(docSnap: FirebaseFirestore.QueryDocumentSnapshot): string | null {
@@ -81,6 +112,30 @@ interface InactiveClientsSettings {
 }
 const DEFAULT_INACTIVE: InactiveClientsSettings = {
   enabled: false, thresholdDays: 30, cooldownDays: 14, maxPerRun: 100,
+};
+
+// ⚠️ Cas particulier : contrairement aux commandes en attente et aux clients
+// inactifs (qui relancent un COMPTE existant), ici on relance un simple
+// TOKEN FCM anonyme (deviceTokens/{token}, voir useFCMToken.ts +
+// AuthContext.migratePendingFcmToken) — capté avant toute inscription.
+// Deux différences structurelles qui découlent de cette absence d'identité :
+//   1. Pas de "cooldown" périodique : un inconnu qu'on ne réussit pas à
+//      convaincre une fois ne doit JAMAIS être re-sollicité indéfiniment
+//      (reminderSentAt agit comme un plafond à VIE, pas une fenêtre).
+//   2. Une expiration dure (expireAfterDays) : passé ce délai sans
+//      inscription, le token est supprimé plutôt que gardé indéfiniment —
+//      un visiteur qui n'a pas fini son inscription en 2 semaines a très
+//      probablement changé d'appareil ou désinstallé l'app, et chaque
+//      token conservé sans borne est un coût (lecture, quota FCM) pour un
+//      taux de conversion qui tend vers zéro.
+interface PendingSignupSettings {
+  enabled: boolean;
+  thresholdHours: number;
+  expireAfterDays: number;
+  maxPerRun: number;
+}
+const DEFAULT_PENDING_SIGNUP: PendingSignupSettings = {
+  enabled: false, thresholdHours: 2, expireAfterDays: 14, maxPerRun: 200,
 };
 
 const DEFAULT_MIN_INTERVAL_MINUTES = 120; // ne relance le scan complet qu'au plus toutes les 2h
@@ -216,6 +271,93 @@ async function runInactiveClientsCheck(db: FirebaseFirestore.Firestore, app: Ret
   return { checked, notified, pushSuccessCount };
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Relance "inscription non terminée" — visiteurs ayant autorisé les
+// notifs (token FCM capté dans deviceTokens/{token}) mais jamais créé de
+// compte. Voir le commentaire sur PendingSignupSettings ci-dessus pour le
+// raisonnement (pas de cooldown répété, expiration dure).
+// ═══════════════════════════════════════════════════════════════════════
+async function runPendingSignupRemindersCheck(db: FirebaseFirestore.Firestore, app: ReturnType<typeof getAdminApp>) {
+  const settingsSnap = await db.doc('settings/pendingSignupAlerts').get();
+  const settings: PendingSignupSettings = { ...DEFAULT_PENDING_SIGNUP, ...(settingsSnap.exists ? settingsSnap.data() : {}) };
+  if (!settings.enabled) return { skipped: true };
+
+  const now = Date.now();
+  const thresholdMs = settings.thresholdHours * 60 * 60 * 1000;
+  const expireMs = settings.expireAfterDays * 24 * 60 * 60 * 1000;
+
+  // Tri par ancienneté : traite d'abord les tokens les plus vieux, donc à
+  // la fois les candidats à l'expiration ET ceux en attente de relance
+  // depuis le plus longtemps — jamais les mêmes qui passent systématiquement
+  // en tête si la collection dépasse maxPerRun sur un run donné.
+  const snap = await db.collection('deviceTokens').orderBy('createdAt').limit(settings.maxPerRun * 3).get();
+
+  let checked = 0, notified = 0, expired = 0, pushSuccessCount = 0;
+  const batch = db.batch();
+  const candidates: { token: string; ref: FirebaseFirestore.DocumentReference }[] = [];
+
+  for (const docSnap of snap.docs) {
+    if (checked >= settings.maxPerRun) break;
+    const data = docSnap.data();
+    const createdAtMs = data.createdAt?.toMillis?.() ?? 0;
+    if (!createdAtMs) continue;
+    const ageMs = now - createdAtMs;
+
+    if (ageMs >= expireMs) {
+      // Jamais converti après le délai max : on arrête d'essayer et on
+      // libère la place plutôt que de garder un token mort indéfiniment.
+      batch.delete(docSnap.ref);
+      expired++;
+      continue;
+    }
+    if (data.reminderSentAt) continue; // déjà relancé une fois — jamais deux fois un inconnu
+    if (ageMs < thresholdMs) continue; // encore dans la fenêtre de grâce, on laisse la chance de finir seul
+
+    checked++;
+    candidates.push({ token: docSnap.id, ref: docSnap.ref });
+  }
+
+  if (candidates.length > 0) {
+    const title = '🌾 Votre compte AgriMarché vous attend';
+    const body = "Terminez votre inscription pour commander ou vendre en quelques secondes.";
+    try {
+      const resp = await getMessaging(app).sendEachForMulticast({
+        tokens: candidates.map(c => c.token),
+        notification: { title, body },
+        data: { deepLink: '/auth/register', click_action: 'FLUTTER_NOTIFICATION_CLICK' },
+        android: { priority: 'normal', notification: { sound: 'default', channelId: 'agrimarche_default' } },
+        apns: { payload: { aps: { sound: 'default' } } },
+        webpush: { fcmOptions: { link: '/auth/register' } },
+      });
+      pushSuccessCount = resp.successCount;
+      resp.responses.forEach((res, idx) => {
+        const c = candidates[idx];
+        if (res.success) {
+          batch.update(c.ref, { reminderSentAt: FieldValue.serverTimestamp() });
+          notified++;
+        } else if (
+          res.error?.code === 'messaging/invalid-registration-token' ||
+          res.error?.code === 'messaging/registration-token-not-registered'
+        ) {
+          // Token mort (désinstallé/permission révoquée) : inutile de le
+          // garder jusqu'à expireAfterDays, autant libérer la place tout de suite.
+          batch.delete(c.ref);
+        }
+      });
+    } catch (e) {
+      console.warn('[periodic-checks] Échec push relance inscription:', e);
+    }
+  }
+
+  if (notified > 0 || expired > 0) await batch.commit();
+  if (checked > 0 || expired > 0) {
+    await db.collection('pending_signup_reminders').add({
+      createdAt: FieldValue.serverTimestamp(), checked, notified, expired, pushSuccessCount,
+    });
+  }
+  return { checked, notified, expired, pushSuccessCount };
+}
+
 export async function POST(req: NextRequest) {
   try {
     const app = getAdminApp();
@@ -253,12 +395,13 @@ export async function POST(req: NextRequest) {
     // scan en double pendant qu'il tourne.
     await lockRef.set({ lastRunAt: FieldValue.serverTimestamp(), minIntervalMinutes }, { merge: true });
 
-    const [pendingResult, inactiveResult] = await Promise.all([
+    const [pendingResult, inactiveResult, signupResult] = await Promise.all([
       runPendingOrdersCheck(db, app),
       runInactiveClientsCheck(db, app),
+      runPendingSignupRemindersCheck(db, app),
     ]);
 
-    return NextResponse.json({ ran: true, pendingOrders: pendingResult, inactiveClients: inactiveResult });
+    return NextResponse.json({ ran: true, pendingOrders: pendingResult, inactiveClients: inactiveResult, pendingSignups: signupResult });
   } catch (error: any) {
     console.error('[periodic-checks] Erreur:', error?.message ?? error);
     return NextResponse.json({ error: error?.message ?? 'Erreur serveur' }, { status: 500 });

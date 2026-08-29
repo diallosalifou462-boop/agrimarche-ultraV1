@@ -5,8 +5,11 @@ import { useRouter } from 'next/navigation';
 import { auth, db } from '@/lib/firebase/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
-import { ArrowLeft, Loader2, CheckCircle, User, Phone, MapPin } from 'lucide-react';
+import { ArrowLeft, Loader2, CheckCircle, User, Phone, MapPin, LocateFixed, AlertCircle } from 'lucide-react';
 import { ADMIN_MARGIN_RATE } from '@/lib/pricing';
+import { getCurrentPosition } from '@/lib/geolocation';
+import { reverseGeocode } from '@/lib/geo/geocode';
+import LocationPicker from '@/components/LocationPicker';
 
 const REGIONS = [
   'Dakar', 'Thiès', 'Saint-Louis', 'Kaolack', 'Ziguinchor',
@@ -40,6 +43,50 @@ export default function SellerRegisterPage() {
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
 
+  // ── Position GPS de l'exploitation/boutique ──
+  // Auparavant, seule une région/ville choisie dans un menu déroulant était
+  // enregistrée : aucune coordonnée GPS réelle. Résultat, les fonctionnalités
+  // de distance/proximité déjà présentes côté catalogue (main/products) ne
+  // pouvaient jamais s'activer pour un vrai vendeur, faute de lat/lng.
+  const [coords, setCoords] = useState<{ lat: number; lng: number; accuracy?: number } | null>(null);
+  const [locationSource, setLocationSource] = useState<'GPS' | 'MANUAL_PIN' | null>(null);
+  const [gpsStatus, setGpsStatus] = useState<'idle' | 'searching' | 'found' | 'error'>('idle');
+  const [gpsError, setGpsError] = useState<string | null>(null);
+
+  const detectPosition = async () => {
+    setGpsStatus('searching');
+    setGpsError(null);
+    try {
+      const pos = await getCurrentPosition({ enableHighAccuracy: true, timeout: 10000 });
+      const { latitude, longitude, accuracy } = pos.coords;
+      setCoords({ lat: latitude, lng: longitude, accuracy });
+      setLocationSource('GPS');
+      setGpsStatus('found');
+
+      // Géocodage inverse : préremplit région/ville à partir du GPS, sans
+      // écraser une saisie déjà faite manuellement par le vendeur.
+      const reverse = await reverseGeocode(latitude, longitude);
+      if (reverse) {
+        const matchedRegion = REGIONS.find(r =>
+          reverse.region?.toLowerCase().includes(r.toLowerCase()) ||
+          r.toLowerCase().includes((reverse.region || '').toLowerCase())
+        );
+        setForm(f => ({
+          ...f,
+          region: f.region || matchedRegion || f.region,
+          city: f.city || reverse.city || f.city,
+        }));
+      }
+    } catch (err: any) {
+      setGpsStatus('error');
+      setGpsError(
+        err?.code === 1 ? 'Autorisez la localisation pour détecter votre position.' :
+        err?.code === 3 ? 'Délai dépassé — réessayez.' :
+        'Position indisponible pour le moment.'
+      );
+    }
+  };
+
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (!user) {
@@ -58,6 +105,11 @@ export default function SellerRegisterPage() {
             region: data.region || '',
             city: data.city || '',
           });
+          if (typeof data.lat === 'number' && typeof data.lng === 'number') {
+            setCoords({ lat: data.lat, lng: data.lng, accuracy: data.locationAccuracy });
+            setLocationSource(data.locationSource === 'MANUAL_PIN' ? 'MANUAL_PIN' : 'GPS');
+            setGpsStatus('found');
+          }
           setAcceptedTerms(!!data.termsAcceptedAt);
           setIsEditing(true);
         } else {
@@ -117,6 +169,11 @@ export default function SellerRegisterPage() {
         uid?: string;
         termsAcceptedAt: Date;
         termsAcceptedMarginRate: number;
+        lat?: number;
+        lng?: number;
+        locationAccuracy?: number;
+        locationSource?: string;
+        locationUpdatedAt?: Date;
       } = {
         displayName: form.name.trim(),
         phone: form.phone.trim(),
@@ -131,6 +188,17 @@ export default function SellerRegisterPage() {
         termsAcceptedAt: new Date(),
         termsAcceptedMarginRate: ADMIN_MARGIN_RATE,
       };
+
+      // Coordonnées GPS optionnelles — n'écrase jamais avec `undefined`
+      // (Firestore refuse `undefined` dans setDoc), donc on n'ajoute ces
+      // clés que si une position a réellement été détectée/ajustée.
+      if (coords) {
+        dataToSave.lat = coords.lat;
+        dataToSave.lng = coords.lng;
+        if (coords.accuracy !== undefined) dataToSave.locationAccuracy = coords.accuracy;
+        dataToSave.locationSource = locationSource || 'GPS';
+        dataToSave.locationUpdatedAt = new Date();
+      }
 
       if (!exists) {
         dataToSave.createdAt = new Date();
@@ -266,6 +334,56 @@ export default function SellerRegisterPage() {
               </select>
             </div>
           )}
+
+          {/* ── POSITION GPS EXACTE ── */}
+          <div>
+            <label className="block text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider mb-2">
+              Position exacte <span className="font-normal lowercase">(recommandé)</span>
+            </label>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">
+              Permet aux acheteurs de vous trouver "près de chez eux" et de calculer la distance jusqu'à votre exploitation ou boutique.
+            </p>
+
+            {!coords ? (
+              <button
+                type="button"
+                onClick={detectPosition}
+                disabled={gpsStatus === 'searching'}
+                className="w-full py-3 border-2 border-dashed border-emerald-300 dark:border-emerald-700 rounded-xl flex items-center justify-center gap-2 text-emerald-700 dark:text-emerald-400 font-semibold text-sm hover:bg-emerald-50 dark:hover:bg-emerald-900/20 transition disabled:opacity-60"
+              >
+                {gpsStatus === 'searching' ? (
+                  <><Loader2 size={16} className="animate-spin" /> Localisation en cours…</>
+                ) : (
+                  <><LocateFixed size={16} /> Détecter ma position</>
+                )}
+              </button>
+            ) : (
+              <div className="space-y-2">
+                <LocationPicker
+                  lat={coords.lat}
+                  lng={coords.lng}
+                  onChange={(lat, lng) => { setCoords({ lat, lng }); setLocationSource('MANUAL_PIN'); }}
+                />
+                <p className="text-[11px] text-gray-400 dark:text-gray-500 text-center">
+                  Déplacez le marqueur pour corriger la position si nécessaire.
+                  {coords.accuracy !== undefined && ` Précision GPS : ~${Math.round(coords.accuracy)} m.`}
+                </p>
+                <button
+                  type="button"
+                  onClick={detectPosition}
+                  className="w-full py-2 text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline flex items-center justify-center gap-1"
+                >
+                  <LocateFixed size={12} /> Redétecter ma position GPS
+                </button>
+              </div>
+            )}
+
+            {gpsStatus === 'error' && gpsError && (
+              <p className="mt-2 text-xs text-rose-500 flex items-center gap-1">
+                <AlertCircle size={12} /> {gpsError}
+              </p>
+            )}
+          </div>
 
           <div className="flex items-start gap-3 pt-1">
             <input

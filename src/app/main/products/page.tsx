@@ -10,6 +10,7 @@ import { analytics } from '@/lib/firebase/firebase';
 import { useCart } from '@/hooks/useCart';
 import { useAuth } from '@/hooks/useAuth';
 import { Network } from '@capacitor/network';
+import { distanceKm, nearbySorted, formatDistance, SEARCH_RADII_KM } from '@/lib/geo/distance';
 
 const CATEGORIES = [
   { label: 'Tous',              icon: '✦',  color: '#C9A84C' },
@@ -79,6 +80,8 @@ interface ProductData {
   sellerId?: string;
   createdAt?: any;
   whatsappClicks?: number;
+  harvestDate?: string;
+  availability?: 'disponible' | 'sur_commande' | 'a_venir';
   // 'inactive' = masqué par le vendeur (bouton œil dans seller/products/page.tsx).
   // Absent = ancien produit créé avant l'ajout de ce champ → toujours actif.
   status?: 'active' | 'inactive';
@@ -416,6 +419,28 @@ export default function AgriMarket() {
     return list;
   }, [ads, search, cat, sort, products]);
 
+  // ── PROMOTIONS PAR PRODUIT ──
+  // Jusqu'ici, une promo créée par l'admin (réduction de prix sur un produit
+  // précis) n'apparaissait QUE dans le bandeau d'annonces ci-dessus — jamais
+  // sur la fiche du produit lui-même (carte catalogue ou fiche détail), ce
+  // qui la rendait quasi invisible pour l'acheteur qui parcourt le
+  // catalogue. On indexe ici les promos actives par productId pour pouvoir
+  // afficher, comme chez Jumia, le prix barré + le badge de réduction
+  // directement sur chaque produit concerné.
+  const promoByProduct = useMemo(() => {
+    const map = new Map<string, { discountedPrice: number; originalPrice: number; discountPercent: number }>();
+    ads.forEach((a: any) => {
+      if (a.type === 'promotion' && a.active && a.productId && typeof a.discountedPrice === 'number') {
+        map.set(a.productId, {
+          discountedPrice: a.discountedPrice,
+          originalPrice: a.originalPrice ?? 0,
+          discountPercent: a.discountPercent ?? 0,
+        });
+      }
+    });
+    return map;
+  }, [ads]);
+
   useEffect(() => { setAdIdx(0); }, [filteredAds.length, search]);
 
   useEffect(() => {
@@ -453,12 +478,13 @@ export default function AgriMarket() {
   //    (Math.random() pour la note, liste figée pour la saison) qui n'apportaient
   //    aucune valeur réelle et pouvaient induire l'utilisateur en erreur.
   // ============================================================
-  const distanceKm = (lat1: number, lng1: number, lat2: number, lng2: number) => {
-    const R = 6371, toRad = (d: number) => d * Math.PI / 180;
-    const dLat = toRad(lat2 - lat1), dLng = toRad(lng2 - lng1);
-    const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLng/2)**2;
-    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-  };
+  // ============================================================
+  //   RANGÉE "PRÈS DE CHEZ VOUS" — RAYON DE RECHERCHE
+  //   Point 13 de la spec géolocalisation : proposer des rayons (500m → 100km)
+  //   plutôt qu'une simple liste des 10/24 produits les plus proches sans
+  //   limite déclarée. `null` = pas de limite (comportement précédent).
+  // ============================================================
+  const [nearbyRadiusKm, setNearbyRadiusKm] = useState<number | null>(null);
 
   // ============================================================
   //   SECTIONS DYNAMIQUES DE L'ACCUEIL (point 14 du brief)
@@ -469,6 +495,29 @@ export default function AgriMarket() {
   //   Une section n'apparaît que si elle a au moins 3 produits réels
   //   à montrer — jamais de rangée à moitié vide ou de donnée simulée.
   // ============================================================
+  // ============================================================
+  //   RANGÉES HORIZONTALES LIMITÉES À 8 PRODUITS
+  //   Avant, une rangée pouvait contenir jusqu'à 10 (voire plus) produits
+  //   dans un seul scroll horizontal sans fin. On segmente maintenant
+  //   chaque rangée en blocs de 8 produits maximum : au-delà de 8, on
+  //   redescend automatiquement sur une nouvelle rangée (même titre),
+  //   elle aussi limitée à 8, et ainsi de suite.
+  // ============================================================
+  const ROW_MAX = 8;
+  const chunkIntoRows = <T,>(
+    base: { key: string; title: string; icon: string },
+    items: T[],
+    maxTotal = 24,
+    distances?: Map<string, number>
+  ): { key: string; title: string; icon: string; items: T[]; distances?: Map<string, number> }[] => {
+    const capped = items.slice(0, maxTotal);
+    const rows: { key: string; title: string; icon: string; items: T[]; distances?: Map<string, number> }[] = [];
+    for (let i = 0; i < capped.length; i += ROW_MAX) {
+      rows.push({ ...base, key: `${base.key}-${i / ROW_MAX}`, items: capped.slice(i, i + ROW_MAX), distances });
+    }
+    return rows;
+  };
+
   const homeSections = useMemo(() => {
     // Pendant une recherche, ces rangées de découverte ("Nouveautés", "Près de
     // chez vous", "Les plus demandés") n'ont plus lieu d'être : elles ne
@@ -496,20 +545,23 @@ export default function AgriMarket() {
     // de produits déjà chargés dans la page principale.
     const fresh = byCat(freshProducts).filter(isBuyerVisible);
     if (fresh.length >= 3) {
-      sections.push({ key: 'new', title: 'Nouveautés du jour', icon: '✦', items: bySort(fresh.slice(0, 10)) });
+      sections.push(...chunkIntoRows({ key: 'new', title: 'Nouveautés du jour', icon: '✦' }, bySort(fresh)));
     }
 
     if (location?.lat && location?.lng) {
-      const distances = new Map<string, number>();
       // Le tri par distance reste la valeur par défaut de cette rangée (c'est
       // sa raison d'être) ; bySort ne prend le dessus que si l'utilisateur a
-      // explicitement choisi un tri par prix.
-      const nearby = inStock
-        .filter(p => p.lat !== undefined && p.lng !== undefined)
-        .map(p => { distances.set(p.id, distanceKm(location.lat, location.lng, p.lat!, p.lng!)); return p; })
-        .sort((a, b) => (distances.get(a.id) ?? 0) - (distances.get(b.id) ?? 0));
-      if (nearby.length >= 3) {
-        sections.push({ key: 'near', title: 'Près de chez vous', icon: '📍', items: bySort(nearby.slice(0, 10)), distances });
+      // explicitement choisi un tri par prix. `nearbySorted` filtre déjà les
+      // produits sans coordonnées valides et applique le rayon choisi.
+      const nearbyWithDist = nearbySorted(inStock, { lat: location.lat, lng: location.lng }, nearbyRadiusKm ?? undefined);
+      const distances = new Map<string, number>(nearbyWithDist.map(p => [p.id, p.distanceKm]));
+      const nearby = nearbyWithDist;
+      // Le minimum de 3 résultats évite une rangée quasi-vide en mode
+      // "découverte" (rayon = Tout). Mais si l'acheteur a explicitement
+      // choisi un rayon serré, mieux vaut lui montrer les 1-2 résultats
+      // trouvés que de faire disparaître la rangée sans explication.
+      if (nearby.length >= 3 || (nearbyRadiusKm !== null && nearby.length > 0)) {
+        sections.push(...chunkIntoRows({ key: 'near', title: 'Près de chez vous', icon: '📍' }, bySort(nearby), 24, distances));
       }
     }
 
@@ -517,11 +569,11 @@ export default function AgriMarket() {
     // le plus demandé ne fait pas partie des 40 premiers chargés dans la grille.
     const popular = byCat(popularProducts).filter(p => (p.whatsappClicks ?? 0) > 0 && isBuyerVisible(p));
     if (popular.length >= 3) {
-      sections.push({ key: 'popular', title: 'Les plus demandés', icon: '🔥', items: bySort(popular.slice(0, 10)) });
+      sections.push(...chunkIntoRows({ key: 'popular', title: 'Les plus demandés', icon: '🔥' }, bySort(popular)));
     }
 
     return sections;
-  }, [products, freshProducts, popularProducts, location, search, cat, sort]);
+  }, [products, freshProducts, popularProducts, location, search, cat, sort, nearbyRadiusKm]);
 
   const recommendationSections = useMemo(() => {
     if (!selected) return [] as { title: string; badge: string; items: ProductData[]; distances?: Map<string, number> }[];
@@ -1026,6 +1078,19 @@ export default function AgriMarket() {
         .g-hcard-price { font-size:12.5px; font-weight:800; color:var(--jade); }
         .g-hcard-price span { font-size:10px; font-weight:600; color:var(--sage); }
         .g-hcard-dist { font-size:10.5px; font-weight:600; color:var(--sage); margin-top:1px; }
+        .g-radius-row {
+          display:flex; align-items:center; gap:6px; overflow-x:auto;
+          padding:0 14px 10px; scrollbar-width:none;
+        }
+        .g-radius-row::-webkit-scrollbar { display:none; }
+        .g-radius-label { font-size:10.5px; color:var(--dtext); flex-shrink:0; }
+        .g-radius-chip {
+          flex-shrink:0; padding:4px 11px; border-radius:100px; border:1px solid rgba(13,74,31,0.15);
+          background:#fff; color:var(--ink); font-size:10.5px; font-weight:600; cursor:pointer;
+          transition:all .2s ease;
+        }
+        .g-radius-chip.on { background:var(--jade); border-color:var(--jade); color:#fff; }
+        .g-radius-empty { padding:2px 16px 14px; font-size:11.5px; color:var(--dtext); }
 
         .g-card {
           background:var(--snow);
@@ -1123,6 +1188,19 @@ export default function AgriMarket() {
         .g-price-u {
           font-size:7px; color:rgba(255,255,255,0.7);
           margin-bottom:1px; font-weight:500; letter-spacing:0.04em;
+        }
+        .g-price-old {
+          font-size:9px; color:rgba(255,255,255,0.65);
+          text-decoration:line-through; line-height:1.3;
+        }
+        .g-promo-badge {
+          display:inline-block;
+          background:#ef4444; color:#fff;
+          font-family:'DM Sans', sans-serif;
+          font-size:9px; font-weight:800;
+          letter-spacing:0.02em; padding:2px 6px;
+          border-radius:100px;
+          box-shadow:0 2px 8px rgba(239,68,68,0.45);
         }
 
         .g-verified {
@@ -1621,6 +1699,35 @@ export default function AgriMarket() {
         </div>
       </div>
 
+      {/* Sélecteur de rayon pour "Près de chez vous" — rendu indépendamment
+          des rangées de résultats : s'il disparaissait avec la rangée (par
+          exemple si le rayon choisi donne moins de 3 résultats), l'acheteur
+          n'aurait plus aucun moyen de l'élargir à nouveau. */}
+      {!search.trim() && location?.lat && location?.lng && (
+        <div className="g-radius-row">
+          <span className="g-radius-label">📍 Rayon :</span>
+          <button
+            className={`g-radius-chip ${nearbyRadiusKm === null ? 'on' : ''}`}
+            onClick={() => setNearbyRadiusKm(null)}
+          >
+            Tout
+          </button>
+          {SEARCH_RADII_KM.map(r => (
+            <button
+              key={r}
+              className={`g-radius-chip ${nearbyRadiusKm === r ? 'on' : ''}`}
+              onClick={() => setNearbyRadiusKm(r)}
+            >
+              {r < 1 ? `${r * 1000} m` : `${r} km`}
+            </button>
+          ))}
+        </div>
+      )}
+      {!search.trim() && location?.lat && location?.lng && nearbyRadiusKm !== null &&
+        !homeSections.some(s => s.key.startsWith('near')) && (
+        <p className="g-radius-empty">Aucun produit dans ce rayon — essayez de l'élargir.</p>
+      )}
+
       {homeSections.map((section, sIdx) => (
         <div key={section.key} className="g-hsec">
           <div className="g-hsec-head">
@@ -1654,7 +1761,7 @@ export default function AgriMarket() {
                     {p.price?.toLocaleString()} <span>FCFA/{p.unit || 'kg'}</span>
                   </div>
                   {dist !== undefined && (
-                    <div className="g-hcard-dist">{dist.toFixed(1)} km</div>
+                    <div className="g-hcard-dist">{formatDistance(dist)}</div>
                   )}
                 </div>
               );
@@ -1827,7 +1934,17 @@ export default function AgriMarket() {
                           )}
                           <div className="g-card-price">
                             <div>
-                              <div className="g-price-n">{p.price?.toLocaleString()}</div>
+                              {promoByProduct.get(p.id) ? (
+                                <>
+                                  <div className="g-price-old">{promoByProduct.get(p.id)!.originalPrice.toLocaleString()} FCFA</div>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                                    <div className="g-price-n">{promoByProduct.get(p.id)!.discountedPrice.toLocaleString()}</div>
+                                    <span className="g-promo-badge">-{promoByProduct.get(p.id)!.discountPercent}%</span>
+                                  </div>
+                                </>
+                              ) : (
+                                <div className="g-price-n">{p.price?.toLocaleString()}</div>
+                              )}
                               <div className="g-price-u">FCFA / {p.unit || 'kg'}</div>
                             </div>
                           </div>
@@ -1844,6 +1961,25 @@ export default function AgriMarket() {
                     <h3 className="g-card-name">{p.name}</h3>
                     {p.description && (
                       <p className="g-card-desc">{p.description}</p>
+                    )}
+                    {(p.harvestDate || (p.availability && p.availability !== 'disponible')) && (
+                      <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginTop: 2, marginBottom: 4 }}>
+                        {p.harvestDate && (
+                          <span style={{ fontSize: 8.5, fontWeight: 600, color: '#8b6914', background: 'rgba(139,105,20,0.1)', padding: '2px 7px', borderRadius: 20 }}>
+                            🗓️ Récolte {new Date(p.harvestDate).toLocaleDateString('fr-FR')}
+                          </span>
+                        )}
+                        {p.availability === 'sur_commande' && (
+                          <span style={{ fontSize: 8.5, fontWeight: 600, color: '#f59e0b', background: 'rgba(245,158,11,0.1)', padding: '2px 7px', borderRadius: 20 }}>
+                            ⏳ Sur commande
+                          </span>
+                        )}
+                        {p.availability === 'a_venir' && (
+                          <span style={{ fontSize: 8.5, fontWeight: 600, color: '#8b5cf6', background: 'rgba(139,92,246,0.1)', padding: '2px 7px', borderRadius: 20 }}>
+                            📅 Bientôt disponible
+                          </span>
+                        )}
+                      </div>
                     )}
                     <div className="g-card-farmer">
                       <div className="g-farmer-avatar">🌱</div>
@@ -1999,8 +2135,21 @@ export default function AgriMarket() {
             <div className="g-dc">
               <h2 className="g-dc-name">{selected.name}</h2>
               <div className="g-dc-price-row">
-                <span className="g-dc-price">{selected.price?.toLocaleString()}</span>
-                <span className="g-dc-unit">FCFA / {selected.unit || 'kg'}</span>
+                {promoByProduct.get(selected.id) ? (
+                  <>
+                    <span className="g-dc-price">{promoByProduct.get(selected.id)!.discountedPrice.toLocaleString()}</span>
+                    <span className="g-dc-unit">FCFA / {selected.unit || 'kg'}</span>
+                    <span style={{ fontSize: 14, color: '#9ca3af', textDecoration: 'line-through', marginLeft: 4 }}>
+                      {promoByProduct.get(selected.id)!.originalPrice.toLocaleString()} FCFA
+                    </span>
+                    <span className="g-promo-badge">-{promoByProduct.get(selected.id)!.discountPercent}%</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="g-dc-price">{selected.price?.toLocaleString()}</span>
+                    <span className="g-dc-unit">FCFA / {selected.unit || 'kg'}</span>
+                  </>
+                )}
               </div>
               {selected.description && <p className="g-dc-desc">{selected.description}</p>}
 
@@ -2016,6 +2165,24 @@ export default function AgriMarket() {
                     {/* numéro masqué — visible uniquement via WhatsApp */}
                   </span>
                 </div>
+                {selected.harvestDate && (
+                  <div className="g-meta-row">
+                    <div className="g-meta-icon">🗓️</div>
+                    <span className="g-meta-text">Récolté le : <span>{new Date(selected.harvestDate).toLocaleDateString('fr-FR')}</span></span>
+                  </div>
+                )}
+                {selected.availability && (
+                  <div className="g-meta-row">
+                    <div className="g-meta-icon">
+                      {selected.availability === 'disponible' ? '✅' : selected.availability === 'sur_commande' ? '⏳' : '📅'}
+                    </div>
+                    <span className="g-meta-text">
+                      {selected.availability === 'disponible' ? 'Disponible immédiatement'
+                        : selected.availability === 'sur_commande' ? 'Disponible sur commande'
+                        : 'Bientôt disponible'}
+                    </span>
+                  </div>
+                )}
                 {selected.stock !== undefined && (
                   <div className="g-meta-row">
                     <div className="g-meta-icon">📦</div>

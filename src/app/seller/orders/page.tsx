@@ -4,7 +4,7 @@ import React, { useMemo, useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   ShoppingBag, Search, CheckCircle, XCircle,
-  Truck, Package, Clock, UserX, ChevronRight,
+  Truck, Package, Clock, UserX, ChevronRight, MapPin,
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import {
@@ -47,6 +47,10 @@ interface Order {
   delivererId?: string;
   delivererName?: string;
   delivererPhone?: string;
+  // ✅ NOUVEAU — jamais lu ici avant, alors que checkout écrit ce champ sur
+  // CHAQUE commande depuis le début. Le vendeur ne pouvait pas voir où
+  // livrer un client, contrairement à l'admin et au livreur.
+  customerLocation?: { address?: string; lat?: number; lng?: number; isDefault?: boolean };
 }
 
 // L'icône de chaque statut (couleur/libellé viennent de @/lib/orderStatus)
@@ -120,6 +124,7 @@ export default function SellerOrdersPage() {
           delivererId:    dd.delivererId,
           delivererName:  dd.delivererName,
           delivererPhone: dd.delivererPhone,
+          customerLocation: dd.customerLocation,
         } as Order;
       });
 
@@ -333,6 +338,25 @@ export default function SellerOrdersPage() {
                     {/* ✅ FIX : le vendeur ne doit voir que le nom du client,
                         jamais son numéro de téléphone (confidentialité). */}
                     <p className="font-semibold text-gray-800">{order.customerName}</p>
+                    {/* ✅ NOUVEAU — zone de livraison, jamais affichée au vendeur
+                        jusqu'ici alors que checkout écrit ce champ sur chaque
+                        commande (voir customerLocation dans le type Order).
+                        Volontairement PAS de carte/pin exact ici : comme pour
+                        le téléphone plus haut, le vendeur n'a pas besoin de la
+                        position GPS précise du client — livrer est le rôle du
+                        livreur (voir delivery/dashboard, qui lui montre le
+                        pin exact). L'adresse recopiée par checkout est déjà
+                        à l'échelle ville/quartier ("Keur Massar, Dakar"), pas
+                        une adresse postale précise. */}
+                    {order.customerLocation?.address && (
+                      <p className="text-sm text-gray-500 flex items-center gap-1 mt-1">
+                        <MapPin size={13} className="text-gray-400 shrink-0" />
+                        Livraison : {order.customerLocation.address}
+                        {order.customerLocation.isDefault && (
+                          <span className="text-xs text-amber-600 italic">(approximative)</span>
+                        )}
+                      </p>
+                    )}
                     {order.delivererId && (
                       <p className="text-sm text-blue-600 flex items-center gap-1 mt-1">
                         🚴 Livreur : {order.delivererName || '—'}{order.delivererPhone ? ` · ${order.delivererPhone}` : ''}

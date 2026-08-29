@@ -28,6 +28,9 @@ import {
   checkLocationPermission,
   type UnifiedPosition,
 } from '@/lib/geolocation';
+import { useAuth } from '@/hooks/useAuth';
+import { db } from '@/lib/firebase/firebase';
+import { doc, updateDoc, Timestamp } from 'firebase/firestore';
 
 interface LocationData {
   lat: number;
@@ -82,6 +85,7 @@ interface BigDataCloudResponse {
 }
 
 export function LiveLocation() {
+  const { user } = useAuth();
   const [location, setLocation] = useState<LocationData | null>(null);
   const [watchId, setWatchId] = useState<string | number | null>(null);
   const [isWatching, setIsWatching] = useState(false);
@@ -90,13 +94,29 @@ export function LiveLocation() {
   const [permissionState, setPermissionState] = useState<'prompt' | 'granted' | 'denied'>('prompt');
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [locationHistory, setLocationHistory] = useState<LocationData[]>([]);
+  // ✅ NOUVEAU — throttle de l'écriture Firestore : watchPosition peut
+  // déclencher updateLocation plusieurs fois par minute (mode suivi
+  // continu). Sans throttle, chaque tick GPS écrirait sur users/{uid},
+  // pour un bénéfice nul (personne ne regarde une carte "à la seconde
+  // près"). 60s suffit largement pour que l'admin voie une position
+  // à jour, sans spammer Firestore.
+  const lastPersistRef = useRef<number>(0);
   const [isLocating, setIsLocating] = useState(false);
   const watchIdRef = useRef<string | number | null>(null);
   const historyMax = 10;
 
   // Vérifier la permission initiale (natif : @capacitor/geolocation ; web : Permissions API)
   useEffect(() => {
-    checkLocationPermission().then(setPermissionState);
+    checkLocationPermission().then((state) => {
+      setPermissionState(state);
+      // ✅ Aucune permission requise pour afficher une position : si le GPS
+      // n'est pas déjà autorisé, on affiche immédiatement une position
+      // approximative par IP au lieu de laisser l'écran bloqué sur "En
+      // attente de localisation" tant que l'utilisateur n'a pas cliqué.
+      if (state !== 'granted') {
+        locateViaIP();
+      }
+    });
 
     // Web uniquement : réagit en direct si la permission change (ex : via
     // l'icône de cadenas du navigateur) sans attendre un nouveau check. Pas
@@ -242,6 +262,82 @@ export function LiveLocation() {
   };
 
   // ============================================================
+  // BIGDATACLOUD - Localisation par IP (sans permission navigateur)
+  // ============================================================
+  // Le même endpoint que getAddressFromBigDataCloud, mais appelé SANS
+  // latitude/longitude : BigDataCloud détecte alors la position à partir de
+  // l'IP de la requête (précision ville/région, pas GPS). Ça permet d'avoir
+  // une position par défaut même si l'utilisateur refuse — ou n'a jamais
+  // encore répondu à — la demande de permission de géolocalisation.
+  const getLocationFromIP = async (): Promise<LocationData | null> => {
+    try {
+      const url = new URL('https://api.bigdatacloud.net/data/reverse-geocode-client');
+      url.searchParams.set('localityLanguage', 'fr');
+
+      const response = await fetch(url.toString(), {
+        headers: { 'Accept': 'application/json' },
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+      const data: BigDataCloudResponse = await response.json();
+      if (typeof data.latitude !== 'number' || typeof data.longitude !== 'number') {
+        return null;
+      }
+
+      const address = await getAddressFromBigDataCloud(data.latitude, data.longitude);
+
+      return {
+        lat: data.latitude,
+        lng: data.longitude,
+        // Précision par IP : de l'ordre de la ville, jamais du GPS — on
+        // affiche une valeur volontairement large (5km) pour ne pas laisser
+        // croire à une précision qu'on n'a pas.
+        accuracy: 5000,
+        altitude: null,
+        speed: null,
+        heading: null,
+        timestamp: Date.now(),
+        address,
+        status: 'found',
+        source: 'ip',
+      };
+    } catch (error) {
+      console.error('Erreur localisation IP:', error);
+      return null;
+    }
+  };
+
+  // Localise via IP et met à jour l'état + Firestore, sans jamais demander
+  // de permission au navigateur. Utilisé automatiquement au chargement et
+  // en repli si le GPS est refusé/indisponible.
+  const locateViaIP = useCallback(async () => {
+    setStatus('searching');
+    const locationData = await getLocationFromIP();
+    if (!locationData) {
+      setStatus('error');
+      setErrorMessage('Position indisponible pour le moment. Réessayez.');
+      return;
+    }
+
+    setLocation(locationData);
+    setStatus('found');
+    setLastUpdate(new Date());
+    setLocationHistory(prev => [locationData, ...prev].slice(0, historyMax));
+
+    if (user?.uid && Date.now() - lastPersistRef.current > 60_000) {
+      lastPersistRef.current = Date.now();
+      updateDoc(doc(db, 'users', user.uid), {
+        lat: locationData.lat,
+        lng: locationData.lng,
+        locationAccuracy: locationData.accuracy,
+        locationAddress: locationData.address.full,
+        locationSource: 'IP_FALLBACK',
+        locationUpdatedAt: Timestamp.now(),
+      }).catch(() => {});
+    }
+  }, [user?.uid]);
+
+  // ============================================================
   // Fonction principale de localisation
   // ============================================================
   const updateLocation = useCallback(async (position: UnifiedPosition, source: 'gps' | 'ip' = 'gps') => {
@@ -266,17 +362,38 @@ export function LiveLocation() {
     setStatus('found');
     setLastUpdate(new Date());
 
+    // ✅ NOUVEAU — recopie sur users/{uid}, comme checkout/page.tsx : cette
+    // page (/main/location) est justement l'endroit où l'utilisateur détecte
+    // sa position explicitement, donc c'est la source la plus fiable pour
+    // alimenter la carte admin "Tous les utilisateurs". Throttle 60s,
+    // best-effort (ne doit jamais casser l'affichage de la position si
+    // l'écriture échoue), et seulement pour un compte connecté (pas de
+    // profil à mettre à jour pour un visiteur non authentifié).
+    if (user?.uid && Date.now() - lastPersistRef.current > 60_000) {
+      lastPersistRef.current = Date.now();
+      updateDoc(doc(db, 'users', user.uid), {
+        lat: latitude,
+        lng: longitude,
+        locationAccuracy: accuracy ?? undefined,
+        locationAddress: address.full || `${address.city || ''}${address.region ? ', ' + address.region : ''}`.trim() || undefined,
+        locationSource: source === 'gps' ? 'GPS' : 'IP_FALLBACK',
+        locationUpdatedAt: Timestamp.now(),
+      }).catch(() => {});
+    }
+
     // Ajouter à l'historique
     setLocationHistory(prev => {
       const newHistory = [locationData, ...prev];
       return newHistory.slice(0, historyMax);
     });
-  }, []);
+  }, [user?.uid]);
 
   const startLocationTracking = useCallback(async () => {
     if (permissionState === 'denied') {
-      setStatus('error');
-      setErrorMessage('Activez votre position pour voir les produits proches de chez vous. Vous pouvez continuer sans la localisation.');
+      // Le suivi en direct nécessite le GPS, mais l'absence de permission
+      // ne doit jamais bloquer l'utilisateur : on affiche une position
+      // approximative par IP à la place.
+      locateViaIP();
       return;
     }
 
@@ -308,6 +425,21 @@ export function LiveLocation() {
               : 'Erreur de localisation.'
           );
           setIsLocating(false);
+
+          // Le watch ne produira plus rien après une erreur de permission —
+          // on l'arrête et on reflète l'état réel (sinon l'UI reste bloquée
+          // sur "En attente" / "EN DIRECT" alors que la permission est bel
+          // et bien refusée côté OS).
+          if (error.code === 1) {
+            setPermissionState('denied');
+            clearWatch(watchIdRef.current);
+            watchIdRef.current = null;
+            setWatchId(null);
+            setIsWatching(false);
+            // Aucune permission → repli automatique sur la position IP,
+            // plutôt que de laisser l'utilisateur sans aucune position.
+            locateViaIP();
+          }
           return;
         }
         if (position) {
@@ -320,7 +452,7 @@ export function LiveLocation() {
     watchIdRef.current = id;
     setWatchId(id);
     setIsWatching(true);
-  }, [permissionState, updateLocation]);
+  }, [permissionState, updateLocation, locateViaIP]);
 
   // Ouvre directement l'écran des paramètres de l'application (permission localisation)
   const openAppSettings = useCallback(async () => {
@@ -381,12 +513,25 @@ export function LiveLocation() {
       await updateLocation(position, 'gps');
       setIsLocating(false);
     } catch (error) {
+      const err = error as { code?: 1 | 2 | 3; message?: string };
       setStatus('error');
-      setErrorMessage('Impossible d\'obtenir la position.');
+      setErrorMessage(
+        err.code === 1
+          ? 'Activez votre position pour voir les produits proches de chez vous. Vous pouvez continuer sans la localisation.'
+          : err.code === 3
+          ? 'Délai de localisation dépassé. Réessayez.'
+          : 'Position non disponible. Assurez-vous d\'avoir un signal GPS.'
+      );
+      if (err.code === 1) {
+        setPermissionState('denied');
+        // Aucune permission → repli automatique sur la position IP,
+        // plutôt que de laisser l'utilisateur sans aucune position.
+        locateViaIP();
+      }
       console.error(error);
       setIsLocating(false);
     }
-  }, [updateLocation]);
+  }, [updateLocation, locateViaIP]);
 
   // ============================================================
   // Formateurs
@@ -522,22 +667,18 @@ export function LiveLocation() {
             </div>
           </div>
           <div className="flex gap-2 flex-wrap">
-            {permissionState === 'denied' ? (
-              <button
-                onClick={openAppSettings}
-                className="px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-xl text-sm font-medium flex items-center gap-2 hover:shadow-lg hover:shadow-emerald-500/25 transition-all"
-              >
-                <LocateFixed size={16} />
-                Activer
-              </button>
-            ) : !isWatching ? (
+            {/* Le GPS reste optionnel : ces boutons tentent une position
+               précise, mais s'ils échouent (permission refusée/indisponible),
+               locateViaIP() prend automatiquement le relais — aucun bouton
+               "obligatoire" à cliquer avant de voir une position. */}
+            {!isWatching ? (
               <button
                 onClick={startLocationTracking}
                 disabled={isLocating}
                 className="px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-xl text-sm font-medium flex items-center gap-2 hover:shadow-lg hover:shadow-emerald-500/25 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isLocating ? <Loader2 size={16} className="animate-spin" /> : <LocateFixed size={16} />}
-                Suivre en direct
+                {permissionState === 'denied' ? 'Position précise (GPS)' : 'Suivre en direct'}
               </button>
             ) : (
               <button
@@ -547,16 +688,14 @@ export function LiveLocation() {
                 Arrêter
               </button>
             )}
-            {permissionState !== 'denied' && (
-              <button
-                onClick={getSingleLocation}
-                disabled={isLocating}
-                className="px-5 py-2.5 bg-gray-100 text-gray-700 rounded-xl text-sm font-medium flex items-center gap-2 hover:bg-gray-200 transition disabled:opacity-50"
-              >
-                <RefreshCw size={16} className={isLocating ? 'animate-spin' : ''} />
-                {isLocating ? 'Recherche...' : 'Une fois'}
-              </button>
-            )}
+            <button
+              onClick={getSingleLocation}
+              disabled={isLocating}
+              className="px-5 py-2.5 bg-gray-100 text-gray-700 rounded-xl text-sm font-medium flex items-center gap-2 hover:bg-gray-200 transition disabled:opacity-50"
+            >
+              <RefreshCw size={16} className={isLocating ? 'animate-spin' : ''} />
+              {isLocating ? 'Recherche...' : 'Une fois'}
+            </button>
           </div>
         </div>
 

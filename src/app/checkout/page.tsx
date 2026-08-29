@@ -6,6 +6,9 @@ import { useRouter } from 'next/navigation';
 import { useCart } from '@/hooks/useCart';
 import { useAuth } from '@/hooks/useAuth';
 import { useUserLocation } from '@/hooks/useUserLocation';
+import LocationPicker from '@/components/LocationPicker';
+import { reverseGeocode, searchPlaces } from '@/lib/geo/geocode';
+import type { GeocodeResult } from '@/lib/geo/types';
 import {
   collection, addDoc, Timestamp, doc, updateDoc, getDoc, setDoc, runTransaction,
 } from 'firebase/firestore';
@@ -482,6 +485,82 @@ export default function CheckoutPage() {
   const { user, profile } = useAuth();
   const { cart, clearCart } = useCart() as { cart: { items: any[]; total: number; itemCount: number }; clearCart: () => void };
   const { location, loading: locationLoading, detectLocation } = useUserLocation();
+  // ✅ NOUVEAU — quand la position détectée n'est pas fiable (isDefault:
+  // repli IP ou Dakar par défaut), le client doit pouvoir la corriger
+  // lui-même en plaçant un point sur la carte (point 5 de la spec géoloc :
+  // "marqueur déplaçable"), au lieu de se contenter d'un message
+  // d'avertissement passif comme avant. `manualLocation` prévaut alors sur
+  // `location` (le hook GPS/IP) pour tout le reste du flux de commande.
+  const [showLocationPicker, setShowLocationPicker] = useState(false);
+  const [manualLocation, setManualLocation] = useState<{ lat: number; lng: number; address: string; source: 'MANUAL_PIN' | 'MAP_SEARCH' } | null>(null);
+  const [manualLocationLoading, setManualLocationLoading] = useState(false);
+  const [manualPin, setManualPin] = useState<{ lat: number; lng: number } | null>(null);
+  // ✅ NOUVEAU — recherche de lieu nommé ("Ecobank UCAD", "Marché Sandaga"…)
+  // au lieu d'obliger le client à repérer l'endroit sur la carte à l'œil.
+  // C'est le point 9 de la spec géoloc ("recherche de lieux façon Yango") :
+  // le pin manuel seul ne suffit pas pour un point de repère précis que le
+  // client connaît par son nom mais pas par ses coordonnées GPS.
+  const [placeQuery, setPlaceQuery] = useState('');
+  const [placeResults, setPlaceResults] = useState<GeocodeResult[]>([]);
+  const [placeSearching, setPlaceSearching] = useState(false);
+
+  const effectiveLocation = manualLocation
+    ? { ...manualLocation, city: manualLocation.address, region: '', country: 'Sénégal', detected: true, isDefault: false }
+    : location;
+
+  // Dès qu'une position détectée non fiable arrive, on prépare le pin
+  // manuel centré dessus (plutôt que sur Dakar par défaut) pour que le
+  // client n'ait qu'à l'affiner, pas à chercher sa position de zéro.
+  useEffect(() => {
+    if (location?.isDefault && location.lat && location.lng && !manualPin) {
+      setManualPin({ lat: location.lat, lng: location.lng });
+    }
+  }, [location, manualPin]);
+
+  // Recherche de lieu nommé, débouncée (300ms) pour ne pas spammer Nominatim
+  // à chaque frappe (voir la politique d'usage documentée dans geocode.ts).
+  useEffect(() => {
+    const q = placeQuery.trim();
+    if (q.length < 3) { setPlaceResults([]); return; }
+    setPlaceSearching(true);
+    const t = setTimeout(() => {
+      searchPlaces(q, 5)
+        .then(setPlaceResults)
+        .finally(() => setPlaceSearching(false));
+    }, 300);
+    return () => clearTimeout(t);
+  }, [placeQuery]);
+
+  const pickSearchedPlace = useCallback((r: GeocodeResult) => {
+    setManualPin({ lat: r.latitude, lng: r.longitude });
+    setManualLocation({
+      lat: r.latitude,
+      lng: r.longitude,
+      address: [r.address, r.city].filter(Boolean).join(', ') || r.displayName,
+      source: 'MAP_SEARCH',
+    });
+    setPlaceQuery('');
+    setPlaceResults([]);
+    setShowLocationPicker(false);
+  }, []);
+
+  const confirmManualLocation = useCallback(async () => {
+    if (!manualPin) return;
+    setManualLocationLoading(true);
+    try {
+      const reverse = await reverseGeocode(manualPin.lat, manualPin.lng);
+      const address = reverse
+        ? [reverse.neighborhood, reverse.city || reverse.region].filter(Boolean).join(', ') || reverse.displayName
+        : `${manualPin.lat.toFixed(5)}, ${manualPin.lng.toFixed(5)}`;
+      setManualLocation({ lat: manualPin.lat, lng: manualPin.lng, address, source: 'MANUAL_PIN' });
+      setShowLocationPicker(false);
+    } catch {
+      setManualLocation({ lat: manualPin.lat, lng: manualPin.lng, address: `${manualPin.lat.toFixed(5)}, ${manualPin.lng.toFixed(5)}`, source: 'MANUAL_PIN' });
+      setShowLocationPicker(false);
+    } finally {
+      setManualLocationLoading(false);
+    }
+  }, [manualPin]);
 
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -522,13 +601,13 @@ export default function CheckoutPage() {
 
   const deliveryFee = useMemo(() => {
     if (isFreeDelivery) return 0;
-    if (!location?.lat || !location?.lng) return 1000;
-    const dist = Math.sqrt(Math.pow(location.lat - 14.7167, 2) + Math.pow(location.lng + 17.4677, 2)) * 111;
+    if (!effectiveLocation?.lat || !effectiveLocation?.lng) return 1000;
+    const dist = Math.sqrt(Math.pow(effectiveLocation.lat - 14.7167, 2) + Math.pow(effectiveLocation.lng + 17.4677, 2)) * 111;
     if (dist <= 10) return 1000;
     if (dist <= 30) return 1000;
     if (dist <= 100) return 1500;
     return 2000;
-  }, [location, isFreeDelivery]);
+  }, [effectiveLocation, isFreeDelivery]);
 
   const total = subtotal + deliveryFee;
   const depositAmount = Math.round(total * DEPOSIT_RATE * DEPOSIT_SURCHARGE);
@@ -536,13 +615,13 @@ export default function CheckoutPage() {
 
   const estimatedDelivery = useMemo(() => {
     if (isFreeDelivery) return '24 – 48 h (Express)';
-    if (!location?.lat || !location?.lng) return 'À confirmer';
-    const dist = Math.sqrt(Math.pow(location.lat - 14.7167, 2) + Math.pow(location.lng + 17.4677, 2)) * 111;
+    if (!effectiveLocation?.lat || !effectiveLocation?.lng) return 'À confirmer';
+    const dist = Math.sqrt(Math.pow(effectiveLocation.lat - 14.7167, 2) + Math.pow(effectiveLocation.lng + 17.4677, 2)) * 111;
     if (dist <= 10) return '24 h';
     if (dist <= 30) return '24 – 48 h';
     if (dist <= 100) return '48 – 72 h';
     return '3 – 5 jours';
-  }, [location, isFreeDelivery]);
+  }, [effectiveLocation, isFreeDelivery]);
 
   const generateOrderNumber = useCallback(() => {
     const d = new Date();
@@ -677,6 +756,11 @@ export default function CheckoutPage() {
         const safeSellerPhone = firstItem?.product?.sellerPhone || '221779747073';
         const safeSellerRegion = firstItem?.product?.region || 'Dakar';
         let sellerLat = 14.7167; let sellerLng = -17.4677; let sellerAddress = 'Dakar, Sénégal';
+        // 🐛 FIX : jusqu'ici rien ne distinguait "vraie position vendeur" de
+        // "on ne sait pas, voici Dakar par défaut" — le livreur n'avait aucun
+        // moyen de savoir si le pickup affiché était fiable. isDefault reste
+        // true tant qu'aucune coordonnée réelle n'est trouvée sur le profil.
+        let sellerLocationIsDefault = true;
         if (safeSellerId && safeSellerId !== 'agrimarche-official') {
           try {
             const sellerDoc = await getDoc(doc(db, 'users', safeSellerId));
@@ -685,6 +769,7 @@ export default function CheckoutPage() {
               sellerLat = d?.latitude || d?.lat || 14.7167;
               sellerLng = d?.longitude || d?.lng || -17.4677;
               sellerAddress = d?.address || d?.city || 'Dakar, Sénégal';
+              sellerLocationIsDefault = !(d?.latitude || d?.lat);
             }
           } catch {}
         }
@@ -731,8 +816,12 @@ export default function CheckoutPage() {
           // de retrouver cette commande par téléphone sans compte ni SMS. Vide
           // pour un compte normal (non nécessaire, userId suffit déjà).
           ...(((profile as any)?.isGuest || (guestPhone && !profile)) ? { guestPhone: guestPhone.replace(/[^\d+]/g, '') } : {}),
-          sellerLocation: { lat: sellerLat, lng: sellerLng, address: sellerAddress },
-          customerLocation: { lat: location?.lat || null, lng: location?.lng || null, address: location?.address || location?.city || 'Adresse non détectée' },
+          sellerLocation: { lat: sellerLat, lng: sellerLng, address: sellerAddress, isDefault: sellerLocationIsDefault },
+          // 🐛 FIX : isDefault (posé par useUserLocation.ts) est propagé ici —
+          // avant, on écrivait lat/lng sans jamais dire si c'était une vraie
+          // position ou le repli Dakar, donc impossible de le savoir plus tard
+          // côté livreur.
+          customerLocation: { lat: effectiveLocation?.lat || null, lng: effectiveLocation?.lng || null, address: effectiveLocation?.address || effectiveLocation?.city || 'Adresse non détectée', isDefault: effectiveLocation?.isDefault ?? true },
           date: new Date().toLocaleDateString('fr-FR', { day:'numeric', month:'long', year:'numeric', hour:'2-digit', minute:'2-digit' }),
           timestamp: new Date().toISOString(), status: 'en_attente', statusLabel: "En attente de validation - Acompte à vérifier",
           orderGroupId, isMultiVendorGroup: isMultiVendor,
@@ -801,6 +890,23 @@ export default function CheckoutPage() {
         // début de fonction) — rien à refaire ici.
 
         createdOrders.push({ docRefId: docRef.id, orderNumber, deliveryFee: sellerDeliveryFee, remainingAmount: sellerRemainingAmount });
+      }
+
+      // ✅ NOUVEAU : recopie la position de livraison sur le profil du client
+      // (users/{uid}.lat/lng), en plus de celle déjà stockée sur chaque
+      // commande. Avant, un client n'était géolocalisable QUE via une
+      // commande active — invisible sur la carte admin "Tous les
+      // utilisateurs" en dehors de ça. Best-effort : ne doit jamais faire
+      // échouer le checkout si l'écriture échoue (compte invité, règles
+      // Firestore, etc.).
+      if (user?.uid && !(profile as any)?.isGuest && effectiveLocation?.lat && effectiveLocation?.lng) {
+        updateDoc(doc(db, 'users', user.uid), {
+          lat: effectiveLocation.lat,
+          lng: effectiveLocation.lng,
+          locationAddress: effectiveLocation.address || effectiveLocation.city || undefined,
+          locationSource: manualLocation ? manualLocation.source : (effectiveLocation.isDefault ? 'IP_FALLBACK' : 'GPS'),
+          locationUpdatedAt: Timestamp.now(),
+        }).catch(() => {});
       }
 
       // ✅ Relances "commandes en attente" + "clients inactifs" : pas de
@@ -1015,11 +1121,95 @@ export default function CheckoutPage() {
                     </div>
                     <ChevronRight size={16} style={{ color:'var(--gold)', flexShrink:0 }} />
                   </button>
-                  {location?.address && (
+                  {manualLocation?.address ? (
+                    <div style={{ marginTop:12, padding:'12px 16px', background:'rgba(16,185,129,.08)', borderRadius:10, border:'1px solid rgba(16,185,129,.3)', display:'flex', alignItems:'center', gap:8 }}>
+                      <MapPin size={14} style={{ color:'#059669', flexShrink:0 }} />
+                      <span style={{ fontSize:13, color:'var(--ink-md)' }}>{manualLocation.address} <span style={{ color:'#059669', fontWeight:600 }}>(position corrigée)</span></span>
+                    </div>
+                  ) : location?.address && (
                     <div style={{ marginTop:12, padding:'12px 16px', background:'var(--ivory)', borderRadius:10, border:'1px solid var(--border)', display:'flex', alignItems:'center', gap:8 }}>
                       <MapPin size={14} style={{ color:'var(--gold)', flexShrink:0 }} />
                       <span style={{ fontSize:13, color:'var(--ink-md)' }}>{location.address}</span>
                     </div>
+                  )}
+                  {/* 🐛 FIX : avant, une position de repli (GPS/IP indisponible)
+                      s'affichait avec le même style qu'une vraie position détectée
+                      — le client n'avait aucun signal fort que le livreur risquait
+                      de ne pas savoir où aller. */}
+                  {/* ✅ NOUVEAU : quand la position n'est pas fiable, le client
+                      peut désormais la corriger lui-même en plaçant un point sur
+                      la carte (spec géoloc, point 5 : marqueur déplaçable), au
+                      lieu de se contenter d'un avertissement passif. Une fois
+                      corrigée (manualLocation posé), ce bloc d'avertissement
+                      disparaît — la position corrigée fait foi. */}
+                  {location?.isDefault && !locationLoading && !manualLocation && (
+                    <div style={{ marginTop:12, padding:'12px 16px', background:'rgba(217,119,6,.08)', borderRadius:10, border:'1px solid rgba(217,119,6,.25)' }}>
+                      <div style={{ display:'flex', alignItems:'flex-start', gap:8 }}>
+                        <AlertCircle size={14} style={{ color:'#b45309', flexShrink:0, marginTop:1 }} />
+                        <span style={{ fontSize:12, color:'#b45309', lineHeight:1.4 }}>Position approximative — le livreur pourrait ne pas trouver l'adresse exacte. Réessayez la détection GPS, ou placez vous-même le point sur la carte ci-dessous.</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowLocationPicker(v => !v)}
+                        style={{ marginTop:10, fontSize:12, fontWeight:600, color:'#b45309', background:'rgba(217,119,6,.12)', border:'1px solid rgba(217,119,6,.35)', borderRadius:8, padding:'7px 12px', cursor:'pointer' }}
+                      >
+                        {showLocationPicker ? 'Masquer la carte' : '📍 Corriger ma position sur la carte'}
+                      </button>
+                      {showLocationPicker && manualPin && (
+                        <div style={{ marginTop:12 }}>
+                          <div style={{ position:'relative', marginBottom:10 }}>
+                            <input
+                              type="text"
+                              value={placeQuery}
+                              onChange={e => setPlaceQuery(e.target.value)}
+                              placeholder="Rechercher un lieu (ex : Ecobank UCAD, Marché Sandaga…)"
+                              style={{ width:'100%', fontSize:13, padding:'9px 12px', borderRadius:8, border:'1px solid var(--border)', outline:'none' }}
+                            />
+                            {placeSearching && (
+                              <div style={{ position:'absolute', right:10, top:'50%', transform:'translateY(-50%)', width:14, height:14, border:'2px solid #10b981', borderTopColor:'transparent', borderRadius:'50%', animation:'spin 0.8s linear infinite' }} />
+                            )}
+                            {placeResults.length > 0 && (
+                              <div style={{ marginTop:4, background:'#fff', border:'1px solid var(--border)', borderRadius:8, overflow:'hidden', boxShadow:'0 4px 14px rgba(0,0,0,.08)' }}>
+                                {placeResults.map((r, i) => (
+                                  <button
+                                    key={i}
+                                    type="button"
+                                    onClick={() => pickSearchedPlace(r)}
+                                    style={{ display:'block', width:'100%', textAlign:'left', padding:'9px 12px', fontSize:12, color:'var(--ink-md)', background:'none', border:'none', borderTop: i>0 ? '1px solid var(--border)' : 'none', cursor:'pointer' }}
+                                  >
+                                    {r.displayName}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                          <p style={{ fontSize:11, color:'var(--ink-lt)', marginBottom:6 }}>Ou déplacez directement le point sur la carte :</p>
+                          <LocationPicker
+                            lat={manualPin.lat}
+                            lng={manualPin.lng}
+                            onChange={(lat, lng) => setManualPin({ lat, lng })}
+                          />
+                          <p style={{ fontSize:11, color:'var(--ink-lt)', marginTop:6 }}>Déplacez le point exactement à l'endroit où vous voulez être livré.</p>
+                          <button
+                            type="button"
+                            onClick={confirmManualLocation}
+                            disabled={manualLocationLoading}
+                            style={{ marginTop:8, width:'100%', fontSize:13, fontWeight:600, color:'#04140d', background:'#10b981', border:'none', borderRadius:8, padding:'10px 12px', cursor: manualLocationLoading ? 'default' : 'pointer', opacity: manualLocationLoading ? 0.7 : 1 }}
+                          >
+                            {manualLocationLoading ? 'Confirmation…' : 'Confirmer cette localisation'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {manualLocation && (
+                    <button
+                      type="button"
+                      onClick={() => { setManualLocation(null); setShowLocationPicker(true); }}
+                      style={{ marginTop:8, fontSize:11, color:'var(--ink-lt)', background:'none', border:'none', textDecoration:'underline', cursor:'pointer', padding:0 }}
+                    >
+                      Modifier la position corrigée
+                    </button>
                   )}
                 </div>
               </div>

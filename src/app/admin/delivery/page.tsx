@@ -10,7 +10,7 @@ import {
   TrendingUp, MapPin, AlertCircle, Eye, Wifi,
   Navigation, Phone, MessageCircle, User, X,
   RefreshCw, Bell, Search, Filter, ArrowRight,
-  Award, Zap, Shield, Star, Crown, Target
+  Award, Zap, Shield, Star, Crown, Target, AlertTriangle
 } from 'lucide-react';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -43,6 +43,12 @@ interface Order {
   totalAmount?: number;
   createdAt?: any;
   deliveredAt?: any;
+  // ✅ NOUVEAU — signalement de problème posé par le livreur depuis
+  // delivery/dashboard/page.tsx (bouton "Problème"). Rien ne l'affichait
+  // encore côté admin jusqu'ici : ces signalements étaient écrits sur la
+  // commande mais invisibles nulle part pour l'équipe AgriMarché.
+  dateProbleme?: string;
+  noteProbleme?: string;
 }
 
 // ─── Color palette for multiple drivers ──────────────────────────────────────
@@ -345,8 +351,10 @@ export default function AdminDeliveryDashboard() {
   const [recentDelivered, setRecentDelivered] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
-  const [tab, setTab] = useState<'map' | 'list'>('map');
+  const [tab, setTab] = useState<'map' | 'list' | 'problems'>('map');
   const [searchTerm, setSearchTerm] = useState('');
+  // ✅ NOUVEAU — commandes avec un problème signalé par le livreur.
+  const [problemOrders, setProblemOrders] = useState<Order[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
 
@@ -379,6 +387,23 @@ export default function AdminDeliveryDashboard() {
         .sort((a, b) => (b.deliveredAt?.seconds || 0) - (a.deliveredAt?.seconds || 0))
         .slice(0, 10);
       setRecentDelivered(data);
+    });
+    return () => unsub();
+  }, [user]);
+
+  // ✅ NOUVEAU — écoute toutes les commandes portant un signalement de
+  // problème (noteProbleme posé par le livreur), quel que soit leur statut
+  // ('en_livraison' au moment du signalement, mais reste lisible même une
+  // fois la commande livrée ensuite). Tri le plus récent en premier côté
+  // client pour éviter d'exiger un index composite Firestore.
+  useEffect(() => {
+    if (!user) return;
+    const q = query(collection(db, 'orders'), where('noteProbleme', '!=', null));
+    const unsub = onSnapshot(q, (snap) => {
+      const data = snap.docs
+        .map(d => ({ ...d.data(), id: d.id } as Order))
+        .sort((a, b) => (b.dateProbleme || '').localeCompare(a.dateProbleme || ''));
+      setProblemOrders(data);
     });
     return () => unsub();
   }, [user]);
@@ -568,13 +593,18 @@ export default function AdminDeliveryDashboard() {
         {/* Tab Navigation */}
         <div className="flex items-center justify-between mb-5">
           <div className="flex gap-2 bg-gray-100 p-1 rounded-xl">
-            {(['map', 'list'] as const).map(t => (
+            {(['map', 'list', 'problems'] as const).map(t => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
-                className={`px-5 py-2 rounded-lg text-sm font-medium transition-all ${tab === t ? 'bg-white text-emerald-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                className={`relative px-5 py-2 rounded-lg text-sm font-medium transition-all ${tab === t ? 'bg-white text-emerald-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
               >
-                {t === 'map' ? '🗺️ Vue carte' : '📋 Vue liste'}
+                {t === 'map' ? '🗺️ Vue carte' : t === 'list' ? '📋 Vue liste' : '🚨 Problèmes'}
+                {t === 'problems' && problemOrders.length > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 bg-red-500 text-white text-[10px] font-bold rounded-full w-5 h-5 flex items-center justify-center">
+                    {problemOrders.length}
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -593,6 +623,7 @@ export default function AdminDeliveryDashboard() {
         </div>
 
         {/* Main Content */}
+        {tab !== 'problems' && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Left Panel - Orders List */}
           <div className="lg:col-span-1 space-y-3 max-h-[600px] overflow-y-auto pr-2">
@@ -727,6 +758,79 @@ export default function AdminDeliveryDashboard() {
             )}
           </div>
         </div>
+        )}
+
+        {/* ✅ NOUVEAU — Panneau "Problèmes signalés" : liste tous les
+            signalements des livreurs (dateProbleme/noteProbleme), le plus
+            récent en premier. Avant cette page, ces signalements étaient
+            écrits sur la commande mais invisibles nulle part côté admin. */}
+        {tab === 'problems' && (
+          <div className="space-y-3 max-h-[600px] overflow-y-auto pr-2">
+            {problemOrders.length === 0 ? (
+              <div className="bg-white rounded-xl p-8 text-center border border-gray-100">
+                <AlertTriangle size={40} className="text-gray-300 mx-auto mb-3" />
+                <p className="text-gray-500">Aucun problème signalé pour le moment</p>
+              </div>
+            ) : (
+              problemOrders.map(order => (
+                <div key={order.id} className="bg-white rounded-xl p-5 border border-red-100 shadow-sm">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-11 h-11 rounded-xl bg-red-50 flex items-center justify-center flex-shrink-0">
+                        <AlertTriangle size={18} className="text-red-500" />
+                      </div>
+                      <div>
+                        <p className="font-bold text-gray-800">#{order.orderNumber || order.id.slice(-6).toUpperCase()}</p>
+                        <p className="text-sm text-gray-600">{order.userName}</p>
+                        {order.delivererName ? (
+                          <p className="text-xs font-medium text-gray-500">🚴 {order.delivererName}</p>
+                        ) : (
+                          <p className="text-xs text-gray-400 italic">Aucun livreur assigné</p>
+                        )}
+                      </div>
+                    </div>
+                    <span className="text-xs text-gray-400 whitespace-nowrap flex-shrink-0">
+                      {order.dateProbleme ? new Date(order.dateProbleme).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}
+                    </span>
+                  </div>
+
+                  <div className="mt-3 p-3 bg-red-50 rounded-lg">
+                    <p className="text-sm text-red-700">{order.noteProbleme}</p>
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <span className="text-xs px-2 py-1 bg-gray-100 text-gray-500 rounded-full">
+                      Statut commande : {order.status}
+                    </span>
+                  </div>
+
+                  <div className="mt-3 flex gap-2 pt-3 border-t border-gray-100">
+                    {order.delivererPhone && (
+                      <>
+                        <a href={`tel:${order.delivererPhone}`} className="flex-1 flex items-center justify-center gap-1 py-2 bg-blue-50 text-blue-600 rounded-lg text-xs hover:bg-blue-100">
+                          <Phone size={12} /> Livreur
+                        </a>
+                        <a href={`https://wa.me/${order.delivererPhone.replace(/\D/g, '')}`} target="_blank" rel="noopener noreferrer" className="flex-1 flex items-center justify-center gap-1 py-2 bg-green-50 text-green-600 rounded-lg text-xs hover:bg-green-100">
+                          <MessageCircle size={12} /> Livreur
+                        </a>
+                      </>
+                    )}
+                    {order.userPhone && (
+                      <>
+                        <a href={`tel:${order.userPhone}`} className="flex-1 flex items-center justify-center gap-1 py-2 bg-gray-100 rounded-lg text-xs text-gray-600 hover:bg-gray-200">
+                          <Phone size={12} /> Client
+                        </a>
+                        <a href={`https://wa.me/${order.userPhone.replace(/\D/g, '')}`} target="_blank" rel="noopener noreferrer" className="flex-1 flex items-center justify-center gap-1 py-2 bg-gray-100 rounded-lg text-xs text-gray-600 hover:bg-gray-200">
+                          <MessageCircle size={12} /> Client
+                        </a>
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
 
         {/* Selected order detail overlay (for map view) */}
         {tab === 'map' && selectedOrder && (

@@ -116,7 +116,12 @@ export function useUserLocation() {
               console.log(`📍 Localisation détectée par IP (repli) : ${city}`);
               setError('📍 Position approximative (IP) - activez la localisation GPS pour plus de précision');
               setLocation(newLocation);
-              localStorage.setItem('user_location', JSON.stringify(newLocation));
+              // 🐛 FIX : ne PAS mettre en cache une position isDefault:true.
+              // Avant, cette position IP (précision à l'échelle de la ville,
+              // parfois à plusieurs km du vrai point) était sauvegardée comme
+              // si elle était fiable, puis relue telle quelle à CHAQUE commande
+              // suivante (voir l'effet plus bas) — sans jamais retenter le GPS,
+              // même si le client changeait de quartier entre deux commandes.
               setLoading(false);
               return newLocation;
             }

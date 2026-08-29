@@ -12,7 +12,7 @@ import {
   EmailAuthProvider,
   linkWithCredential,
 } from 'firebase/auth';
-import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, deleteDoc, serverTimestamp, increment } from 'firebase/firestore';
 import { getMessaging, getToken, onMessage, isSupported } from 'firebase/messaging';
 import { Capacitor } from '@capacitor/core';
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
@@ -113,6 +113,113 @@ async function registerNotificationToken(uid: string) {
     }
   } catch (error) {
     console.error('[FCM] Erreur rafraîchissement token:', error);
+  }
+}
+
+// ─── Suivi "dernière activité" + "fréquence de retour" (onglet Admin) ─────
+//
+// Complète trackActivityTick (qui alimente activityHistogram, pour les
+// heures de silence des notifs) sans le remplacer : ici on écrit
+// users/{uid}.lastActiveAt (horodatage serveur, à chaque session),
+// users/{uid}.sessionCount (compteur total de visites) et
+// users/{uid}.recentVisits (les N dernières dates de visite en ms epoch,
+// la plus récente en premier), qui permet de calculer côté admin l'écart
+// moyen entre deux visites et de repérer un utilisateur en train de
+// décrocher (retard anormal par rapport à son propre rythme).
+//
+// Choix volontaire : PAS de durée de session. Sans fermeture propre d'app
+// mobile (Capacitor peut être tué par l'OS sans signal), toute mesure de
+// durée serait soit fausse soit exigerait un heartbeat régulier — un coût
+// d'écriture Firestore récurrent pour un signal peu actionnable sur une
+// marketplace. La fréquence de retour, elle, est fiable et actionnable
+// (relance ciblée avant qu'un vendeur/client ne devienne inactif).
+const LOGIN_TICK_THROTTLE_MS = 12 * 60 * 60 * 1000; // 12h — une "visite" par demi-journée max/appareil
+const MAX_RECENT_VISITS = 20; // borne volontaire : assez pour une moyenne fiable, coût de stockage négligeable
+
+function loginTickStorageKey(uid: string): string {
+  return `agrimarche_login_tick_${uid}`;
+}
+
+async function trackLoginActivity(uid: string | undefined | null): Promise<void> {
+  if (!uid || typeof window === 'undefined') return;
+  try {
+    const key = loginTickStorageKey(uid);
+    const lastTickMs = Number(window.localStorage.getItem(key) ?? 0);
+    const nowMs = Date.now();
+    const isNewSession = nowMs - lastTickMs >= LOGIN_TICK_THROTTLE_MS;
+    const userRef = doc(db, 'users', uid);
+
+    const updateData: Record<string, unknown> = { lastActiveAt: serverTimestamp() };
+
+    if (isNewSession) {
+      // Lecture nécessaire uniquement ici (throttlée à 1x/12h/appareil) pour
+      // pouvoir tronquer nous-mêmes le tableau — arrayUnion ne borne pas la
+      // taille, et un histogramme illimité finirait par coûter cher en
+      // lecture/bande passante sur les comptes très actifs.
+      const snap = await getDoc(userRef).catch(() => null);
+      const existingRaw = snap?.data()?.recentVisits;
+      const existing: number[] = Array.isArray(existingRaw) ? existingRaw : [];
+      updateData.recentVisits = [nowMs, ...existing].slice(0, MAX_RECENT_VISITS);
+      updateData.sessionCount = increment(1);
+    }
+
+    await setDoc(userRef, updateData, { merge: true });
+    if (isNewSession) window.localStorage.setItem(key, String(nowMs));
+  } catch (err) {
+    // Best-effort — même philosophie que trackActivityTick : ne jamais
+    // gêner l'utilisateur pour un point d'activité manqué.
+    console.warn('[trackLoginActivity] échec silencieux:', err);
+  }
+
+}
+
+// ─── Migration du token FCM pré-inscription (deviceTokens/{token}) ────────
+//
+// useFCMToken.ts peut désormais obtenir un token FCM AVANT la connexion
+// (token lié à l'appareil, pas au compte) et le pose dans deviceTokens/
+// {token} + une trace en localStorage. Dès qu'un utilisateur se connecte
+// (ou s'inscrit) sur CET appareil, on rattache ce token à son compte dans
+// users/{uid}/tokens/{token} — l'endroit que lisent toutes les routes
+// d'envoi de notifs — puis on nettoie le doc anonyme.
+const PENDING_FCM_TOKEN_KEY = 'agrimarche_pending_fcm_token';
+
+async function migratePendingFcmToken(uid: string | undefined | null): Promise<void> {
+  if (!uid || typeof window === 'undefined') return;
+  try {
+    const raw = window.localStorage.getItem(PENDING_FCM_TOKEN_KEY);
+    if (!raw) return;
+
+    const parsed = JSON.parse(raw) as { token?: string; platform?: string };
+    const pendingToken = parsed?.token;
+    if (!pendingToken) {
+      window.localStorage.removeItem(PENDING_FCM_TOKEN_KEY);
+      return;
+    }
+
+    const anonRef = doc(db, 'deviceTokens', pendingToken);
+    const snap = await getDoc(anonRef).catch(() => null);
+
+    if (snap?.exists()) {
+      const data = snap.data() as { platform?: string; createdAt?: unknown; userAgent?: string };
+      await setDoc(
+        doc(db, 'users', uid, 'tokens', pendingToken),
+        {
+          token: pendingToken,
+          platform: data.platform ?? parsed.platform ?? 'web',
+          createdAt: data.createdAt ?? new Date(),
+          ...(data.userAgent ? { userAgent: data.userAgent } : {}),
+        },
+        { merge: true },
+      );
+      // Best-effort : autorisé par la règle deviceTokens (allow delete: if
+      // isAuth()) — un échec ici ne doit pas empêcher la migration d'avoir
+      // eu lieu, le doc orphelin sera simplement ignoré ensuite.
+      await deleteDoc(anonRef).catch(() => {});
+    }
+
+    window.localStorage.removeItem(PENDING_FCM_TOKEN_KEY);
+  } catch (err) {
+    console.warn('[migratePendingFcmToken] échec silencieux:', err);
   }
 }
 
@@ -224,6 +331,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
         registerNotificationToken(firebaseUser.uid); // fire-and-forget, ne bloque pas le chargement
         trackActivityTick(firebaseUser.uid); // fire-and-forget, throttlé en interne (voir trackActivity.ts)
+        trackLoginActivity(firebaseUser.uid); // fire-and-forget, throttlé en interne (lastActiveAt + sessionCount)
+        migratePendingFcmToken(firebaseUser.uid); // fire-and-forget, no-op si aucun token en attente
       } else {
         setProfile(null);
       }
@@ -253,6 +362,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             // le seul point où capter qu'un utilisateur déjà connecté
             // vient d'ouvrir l'app à CETTE heure-ci.
             trackActivityTick(auth.currentUser?.uid);
+            trackLoginActivity(auth.currentUser?.uid);
           }
         }).then((handle) => {
           removeResumeListener = () => handle.remove();
@@ -298,6 +408,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const email = emailOrPhone.includes('@') ? emailOrPhone : phoneToEmail(emailOrPhone);
     const result = await signInWithEmailAndPassword(auth, email, password);
     await fetchUserProfile(result.user.uid, result.user.email);
+    trackLoginActivity(result.user.uid); // fire-and-forget
+    migratePendingFcmToken(result.user.uid); // fire-and-forget
     return result;
   };
 
@@ -347,6 +459,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       setProfile(userProfile);
+      migratePendingFcmToken(firebaseUser.uid); // fire-and-forget — le cas d'usage visé : token capté avant l'inscription
       return { user: firebaseUser };
     } finally {
       suppressAutoProfileRef.current = false;

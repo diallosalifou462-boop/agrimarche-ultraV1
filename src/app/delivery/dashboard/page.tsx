@@ -24,6 +24,8 @@ import { apiUrl } from '@/lib/api-config';
 // markAsDelivered) par des Cloud Functions qui génèrent/vérifient le
 // code côté serveur — le livreur ne le voit jamais.
 import { claimOrder as claimOrderSecure, confirmDeliveryWithCode, DeliveryCodeError } from '@/lib/deliveryCodeActions';
+import FleetMap, { type FleetPoint } from '@/components/FleetMap';
+import { isValidCoordinate, formatDistance } from '@/lib/geo/distance';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -35,11 +37,11 @@ interface Order {
   userName?: string;
   userPhone?: string;
   status: string;
-  customerLocation?: { address?: string; lat?: number; lng?: number };
+  customerLocation?: { address?: string; lat?: number; lng?: number; isDefault?: boolean };
   sellerId?: string;
   sellerName?: string;
   sellerPhone?: string;
-  sellerLocation?: { address?: string; lat?: number; lng?: number };
+  sellerLocation?: { address?: string; lat?: number; lng?: number; isDefault?: boolean };
   delivererId?: string;
   delivererName?: string;
   delivererPhone?: string;
@@ -104,9 +106,9 @@ function haversineKm(a: Location, b: Location): number {
   const s = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
 }
-function formatDistance(km: number): string {
-  return km < 1 ? `${Math.round(km * 1000)} m` : `${km.toFixed(1)} km`;
-}
+// formatDistance() est déjà importée depuis @/lib/geo/distance (ligne 28) —
+// la définition locale en double a été retirée (elle provoquait une erreur
+// de build "the name `formatDistance` is defined multiple times").
 // Lien universel Google Maps (fonctionne en navigation web ET en ouvrant
 // l'appli Google Maps si installée sur le téléphone du livreur).
 function navigateUrl(dest: Location): string {
@@ -307,6 +309,12 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
     ? { lat: order.customerLocation.lat, lng: order.customerLocation.lng } : undefined;
   const distanceKm = currentLocation && dest ? haversineKm(currentLocation, dest) : null;
   const items = order.items || [];
+  // ✅ NOUVEAU — commande assignée à ce livreur mais pas encore confirmée
+  // par le vendeur (voir fix ci-dessus sur la requête "En cours"). Le
+  // livreur peut déjà voir/appeler tout le monde, mais la course n'a pas
+  // vraiment commencé : pas de "Livré" tant que le statut n'est pas
+  // 'en_livraison'.
+  const isPendingSellerConfirm = order.status === 'en_attente' || order.status === 'en_preparation';
 
   const saveDates = async () => {
     setSaving(true);
@@ -423,6 +431,42 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
         {/* Timeline */}
         <TimelineBadge order={order} />
 
+        {/* ✅ NOUVEAU — bandeau "en attente du vendeur" : sans ça, une
+            commande assignée mais pas encore confirmée par le vendeur
+            apparaissait comme une livraison normale, sans expliquer
+            pourquoi "Livré" ne sert à rien pour l'instant. */}
+        {isPendingSellerConfirm && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '9px 12px', marginBottom: '12px', background: '#fef3c7', borderRadius: '12px' }}>
+            <AlertCircle size={14} style={{ color: '#b45309', flexShrink: 0 }} />
+            <span style={{ color: '#92400e', fontSize: '12px', fontWeight: 500 }}>
+              En attente de confirmation du vendeur — la course démarre automatiquement dès qu'il valide.
+            </span>
+          </div>
+        )}
+
+        {/* ✅ NOUVEAU — numéros client ET vendeur affichés systématiquement
+            en haut de chaque livraison, quel que soit le vendeur ou le
+            client concerné (avant : seul le numéro client était visible ici,
+            le vendeur n'apparaissait que dans l'onglet "Disponibles"). */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '12px', padding: '10px 12px', background: '#f8fafc', borderRadius: '12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '9px' }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: '7px', color: '#334155', fontSize: '12px' }}>
+              <User size={12} style={{ color: '#3b82f6', flexShrink: 0 }} /> Client : {order.userName || '—'}
+            </span>
+            <a href={order.userPhone ? `tel:${order.userPhone}` : undefined} style={{ color: order.userPhone ? '#2563eb' : '#94a3b8', fontSize: '12px', fontWeight: 600, textDecoration: 'none' }}>
+              {order.userPhone || 'Pas de téléphone'}
+            </a>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '9px' }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: '7px', color: '#334155', fontSize: '12px' }}>
+              <Package size={12} style={{ color: '#f97316', flexShrink: 0 }} /> Vendeur : {order.sellerName || '—'}
+            </span>
+            <a href={order.sellerPhone ? `tel:${order.sellerPhone}` : undefined} style={{ color: order.sellerPhone ? '#2563eb' : '#94a3b8', fontSize: '12px', fontWeight: 600, textDecoration: 'none' }}>
+              {order.sellerPhone || 'Pas de téléphone'}
+            </a>
+          </div>
+        </div>
+
         {/* Info */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '7px', marginBottom: '14px' }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: '9px' }}>
@@ -436,10 +480,15 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
               </span>
             )}
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '9px' }}>
-            <Phone size={13} style={{ color: '#3b82f6', flexShrink: 0 }} />
-            <span style={{ color: '#334155', fontSize: '13px' }}>{order.userPhone || 'Pas de téléphone'}</span>
-          </div>
+          {/* 🐛 FIX : order.customerLocation.isDefault (posé au checkout) signale
+              une position de repli, pas la vraie adresse du client — jusqu'ici
+              rien ne le distinguait d'une position GPS fiable côté livreur. */}
+          {order.customerLocation?.isDefault && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '9px' }}>
+              <AlertCircle size={13} style={{ color: '#b45309', flexShrink: 0 }} />
+              <span style={{ color: '#b45309', fontSize: '12px' }}>Position approximative — appelez le client avant de vous fier à l'itinéraire</span>
+            </div>
+          )}
         </div>
 
         {/* ✅ Itinéraire GPS — bouton prioritaire, plein largeur : lance la
@@ -479,7 +528,13 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
           <a href={`https://wa.me/${order.userPhone?.replace(/\D/g, '')}`} target="_blank" rel="noopener noreferrer" style={btnStyle('#dcfce7', '#059669')}>
             💬 WhatsApp
           </a>
-          <button onClick={() => onMarkDelivered(order.id)} style={btnStyleBtn('#10b981', '#fff')}>
+          {/* Désactivé tant que le vendeur n'a pas confirmé : marquer
+              "Livré" avant même 'en_livraison' n'a pas de sens. */}
+          <button
+            onClick={() => onMarkDelivered(order.id)}
+            disabled={isPendingSellerConfirm}
+            style={{ ...btnStyleBtn(isPendingSellerConfirm ? '#a7f3d0' : '#10b981', '#fff'), cursor: isPendingSellerConfirm ? 'default' : 'pointer' }}
+          >
             <CheckCircle size={13} /> Livré
           </button>
         </div>
@@ -889,7 +944,7 @@ export default function DeliveryDashboard() {
   const [watchId, setWatchId] = useState<string | null>(null);
   const [locationError, setLocationError] = useState<string | null>(null);
   const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
-  const [activeTab, setActiveTab] = useState<'disponibles' | 'encours' | 'terminees'>('encours');
+  const [activeTab, setActiveTab] = useState<'disponibles' | 'encours' | 'terminees' | 'carte'>('encours');
   const [autoTabSet, setAutoTabSet] = useState(false);
   const [showEarnings, setShowEarnings] = useState(false);
   // ✅ NOUVEAU — modal de vérification du code de livraison (preuve de
@@ -962,12 +1017,23 @@ export default function DeliveryDashboard() {
   // vrai compte livreur, et aurait sinon montré les livraisons de TOUS les
   // livreurs à chacun. Nécessite un index composite (delivererId, status) —
   // Firebase le proposera automatiquement au premier lancement.
+  // 🐛 FIX : `status in ['en_livraison', 'livre']` excluait 'en_attente' et
+  // 'en_preparation'. Or claimOrder (Cloud Function) pose `delivererId` SANS
+  // changer `status` quand le livreur prend une commande encore 'en_attente'
+  // (le vendeur n'a pas confirmé) — voir le commentaire plus bas sur
+  // `availableOrders`. Résultat : une commande assignée à ce livreur
+  // devenait invisible PARTOUT — filtrée hors de "Disponibles" (elle a
+  // désormais un delivererId) mais absente de "En cours" (statut pas encore
+  // 'en_livraison'). D'où "je me suis assigné 2 commandes mais je n'en vois
+  // qu'une". On inclut donc aussi 'en_attente'/'en_preparation' ici, et
+  // OrderCard affiche un bandeau "en attente de confirmation vendeur" pour
+  // ces cas (voir isPendingSellerConfirm dans OrderCard).
   useEffect(() => {
     if (!user) return;
     const q = query(
       collection(db, 'orders'),
       where('delivererId', '==', user.uid),
-      where('status', 'in', ['en_livraison', 'livre'])
+      where('status', 'in', ['en_attente', 'en_preparation', 'en_livraison', 'livre'])
     );
     const unsub = onSnapshot(q, (snap) => {
       setOrders(snap.docs.map(d => ({ ...d.data(), id: d.id } as Order))); // FIX: id apres le spread (voir checkout/page.tsx)
@@ -1167,6 +1233,22 @@ export default function DeliveryDashboard() {
           ? `Livraison confirmée ! +${formatFCFA(order.deliveryFee)} ajoutés à votre solde`
           : 'Livraison confirmée !'
       );
+      // ✅ NOUVEAU — petit boost de motivation, sans rien de lourd à
+      // maintenir : un second toast qui compte les livraisons du jour, avec
+      // un palier "en feu 🔥" à partir de 5. deliveredTodayCount est déjà
+      // calculé plus bas à partir de `orders`, mais cet effet se déclenche
+      // avant que Firestore ait renvoyé la mise à jour ; on recompte donc
+      // localement ici plutôt que d'attendre le prochain rendu.
+      const todayStr = new Date().toDateString();
+      const doneToday = ordersRef.current.filter(o => {
+        if (o.status !== 'livre' || o.id === orderId) return false;
+        const ts = o.deliveredAt?.toDate?.();
+        return ts && ts.toDateString() === todayStr;
+      }).length + 1;
+      setTimeout(() => {
+        if (doneToday >= 5) toast(`🔥 ${doneToday}ᵉ livraison du jour — en feu !`);
+        else if (doneToday > 1) toast(`${doneToday}ᵉ livraison du jour 💪`);
+      }, 600);
 
       // Notifications acheteur/vendeur : notifyOrderStatusStep côté
       // serveur, déclenché par le passage à 'livre' ci-dessus.
@@ -1202,7 +1284,7 @@ export default function DeliveryDashboard() {
   // jamais reprendre la main sur un choix manuel du livreur ensuite.
   useEffect(() => {
     if (autoTabSet || loading) return;
-    const hasActive = orders.some(o => o.status === 'en_livraison');
+    const hasActive = orders.some(o => o.delivererId && o.status !== 'livre');
     const hasAvailable = isAvailable && availableOrders.length > 0;
     if (hasActive) setActiveTab('encours');
     else if (hasAvailable) setActiveTab('disponibles');
@@ -1222,7 +1304,11 @@ export default function DeliveryDashboard() {
 
   if (!user || profile?.role !== 'delivery') return null;
 
-  const activeDeliveries = orders.filter(o => o.status === 'en_livraison');
+  // 🐛 FIX : incluait uniquement 'en_livraison' — voir le commentaire sur la
+  // requête Firestore ci-dessus, une commande assignée peut être encore
+  // 'en_attente'/'en_preparation' (vendeur pas encore confirmé) et doit
+  // quand même apparaître dans "En cours" pour ce livreur.
+  const activeDeliveries = orders.filter(o => o.delivererId && o.status !== 'livre');
   const completedDeliveries = orders.filter(o => o.status === 'livre');
 
   // ✅ NOUVEAU : commandes livrées aujourd'hui — statistique la plus
@@ -1269,6 +1355,47 @@ export default function DeliveryDashboard() {
     { key: 'disponibles' as const, label: 'Disponibles', count: sortedAvailable.length },
     { key: 'encours'     as const, label: 'En cours',     count: sortedActive.length },
     { key: 'terminees'   as const, label: 'Terminées',    count: completedDeliveries.length },
+    { key: 'carte'       as const, label: 'Carte',        count: sortedAvailable.length + sortedActive.length },
+  ];
+
+  // ── Carte "vendeurs prêts + clients à livrer" ────────────────────────────
+  // Combine en un seul coup d'œil : les vendeurs dont une commande est prête
+  // à être récupérée (sortedAvailable — pas encore prise par un livreur) et
+  // les clients dont ce livreur doit finaliser la livraison (sortedActive —
+  // déjà assignées à ce livreur). Les points sans coordonnées valides sont
+  // simplement omis (voir isValidCoordinate) plutôt que de planter la carte.
+  const deliveryMapPoints: FleetPoint[] = [
+    ...sortedAvailable
+      .filter(o => isValidCoordinate(o.sellerLocation?.lat, o.sellerLocation?.lng))
+      .map(o => ({
+        id: `pickup-${o.id}`,
+        lat: o.sellerLocation!.lat!,
+        lng: o.sellerLocation!.lng!,
+        label: `🏪 ${o.sellerName || 'Vendeur'} — prêt`,
+        sublabel: `${o.sellerLocation?.address || ''}${currentLocation ? ` · ${formatDistance(haversineKm(currentLocation, { lat: o.sellerLocation!.lat!, lng: o.sellerLocation!.lng! }))}` : ''}`,
+        kind: 'seller' as const,
+        approximate: o.sellerLocation?.isDefault,
+        onClick: () => setActiveTab('disponibles'),
+      })),
+    ...sortedActive
+      .filter(o => isValidCoordinate(o.customerLocation?.lat, o.customerLocation?.lng))
+      .map(o => ({
+        id: `dropoff-${o.id}`,
+        lat: o.customerLocation!.lat!,
+        lng: o.customerLocation!.lng!,
+        label: `🏠 ${o.userName || 'Client'} — à livrer`,
+        sublabel: `${o.customerLocation?.address || ''}${currentLocation ? ` · ${formatDistance(haversineKm(currentLocation, { lat: o.customerLocation!.lat!, lng: o.customerLocation!.lng! }))}` : ''}`,
+        kind: 'client' as const,
+        approximate: o.customerLocation?.isDefault,
+        onClick: () => setActiveTab('encours'),
+      })),
+    ...(currentLocation ? [{
+      id: 'me',
+      lat: currentLocation.lat,
+      lng: currentLocation.lng,
+      label: '📍 Ma position',
+      kind: 'me' as const,
+    }] : []),
   ];
 
   return (
@@ -1506,6 +1633,14 @@ export default function DeliveryDashboard() {
                           {pickupDistanceKm !== null && <span style={{ color: '#2563eb', fontWeight: 700 }}>· {formatDistance(pickupDistanceKm)}</span>}
                         </p>
                       )}
+                      {/* 🐛 FIX : sellerLocation.isDefault signale un point de
+                          pickup générique (le vendeur n'avait pas encore de
+                          position enregistrée), pas sa vraie adresse. */}
+                      {order.sellerLocation?.isDefault && (
+                        <p style={{ color: '#b45309', fontSize: '11px', marginTop: '2px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                          <AlertCircle size={11} /> Position vendeur approximative — appelez avant de partir
+                        </p>
+                      )}
                     </div>
                     {/* ✅ FIX : c'était `order.total` (prix payé par le CLIENT,
                         produits + livraison) affiché ici — trompeur pour un
@@ -1597,6 +1732,30 @@ export default function DeliveryDashboard() {
                   </div>
                 </div>
               ))}
+            </div>
+          )
+        )}
+
+        {activeTab === 'carte' && (
+          deliveryMapPoints.length === 0 ? (
+            <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '20px', padding: '48px 24px', textAlign: 'center' }}>
+              <MapPin size={44} color="#cbd5e1" style={{ marginBottom: '12px' }} />
+              <p style={{ color: '#475569', fontWeight: 500, fontSize: '16px', marginBottom: '4px' }}>Rien à afficher sur la carte</p>
+              <p style={{ color: '#94a3b8', fontSize: '13px' }}>Aucun vendeur prêt ni client à livrer pour le moment</p>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <div style={{ display: 'flex', gap: '14px', fontSize: '11px', color: '#64748b', padding: '0 2px' }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><span style={{ width: 9, height: 9, borderRadius: '50%', background: '#f97316', display: 'inline-block' }} /> Vendeur prêt ({sortedAvailable.length})</span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><span style={{ width: 9, height: 9, borderRadius: '50%', background: '#10b981', display: 'inline-block' }} /> Client à livrer ({sortedActive.length})</span>
+                {currentLocation && <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><span style={{ width: 9, height: 9, borderRadius: '50%', background: '#06b6d4', display: 'inline-block' }} /> Toi</span>}
+              </div>
+              <div style={{ borderRadius: '20px', overflow: 'hidden', border: '1px solid #e2e8f0' }}>
+                <FleetMap points={deliveryMapPoints} height={420} fallbackCenter={currentLocation ?? undefined} />
+              </div>
+              <p style={{ fontSize: '11px', color: '#94a3b8', textAlign: 'center' }}>
+                Touche un point pour ouvrir la liste correspondante (Disponibles / En cours)
+              </p>
             </div>
           )
         )}

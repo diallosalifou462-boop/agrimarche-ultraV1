@@ -225,6 +225,35 @@ service cloud.firestore {
       }
     }
 
+    // =========================================================
+    // JETONS FCM PRÉ-INSCRIPTION (deviceTokens/{token})
+    // Un token FCM est lié à l'APPAREIL, pas au compte — le SDK Firebase
+    // Messaging peut le fournir dès que la permission notif est accordée,
+    // avant toute création de compte. On le stocke ici temporairement ;
+    // à la connexion/inscription, AuthContext le migre vers
+    // users/{uid}/tokens/{token} et supprime le doc ici (voir
+    // migratePendingFcmToken dans AuthContext.tsx).
+    //
+    // Écriture ouverte aux non-authentifiés PAR NÉCESSITÉ (c'est tout
+    // l'intérêt : capter le token avant login) mais bornée strictement :
+    // seuls ces 4 champs, taille raisonnable, et l'id du document doit
+    // être le token lui-même (empêche d'écrire des données arbitraires
+    // sous un id qu'on choisirait librement). Le contenu (un token FCM)
+    // n'est pas une donnée sensible en soi — ce n'est exploitable qu'en
+    // combinaison avec l'accès Admin SDK au serveur d'envoi de notifs.
+    // =========================================================
+    match /deviceTokens/{tokenId} {
+      allow read: if isAdmin();
+      allow create, update: if request.resource.data.token == tokenId
+                    && request.resource.data.keys().hasOnly(['token', 'createdAt', 'platform', 'userAgent'])
+                    && isReasonableSize();
+      // Suppression réservée à un utilisateur authentifié (nettoyage après
+      // migration réussie vers users/{uid}/tokens/{token}) — inutile de
+      // l'ouvrir aux non-authentifiés, et sans intérêt à la restreindre à
+      // l'auteur puisque le doc ne porte aucune trace de propriétaire.
+      allow delete: if isAuth();
+    }
+
     // Requête collectionGroup('tokens') utilisée par le dashboard admin
     // pour diffuser les notifications push à tous les utilisateurs.
     match /{path=**}/tokens/{tokenId} {
@@ -720,6 +749,10 @@ service cloud.firestore {
     match /inactive_client_alerts/{docId} {
       allow read: if isAdmin();
       allow write: if false;
+    }
+    match /pending_signup_reminders/{docId} {
+      allow read: if isAdmin();
+      allow write: if false; // écrit uniquement via Admin SDK (/api/system/periodic-checks)
     }
 
     // =========================================================

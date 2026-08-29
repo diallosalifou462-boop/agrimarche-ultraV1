@@ -17,6 +17,8 @@ function getNativePlatformName(): 'ios' | 'android' | 'web' {
   return ((window as any).Capacitor?.getPlatform?.() as 'ios' | 'android') ?? 'web';
 }
 
+const PENDING_FCM_TOKEN_KEY = 'agrimarche_pending_fcm_token';
+
 export function useFCMToken() {
   const { user } = useAuth();
   const [token, setToken] = useState<string | null>(null);
@@ -96,22 +98,36 @@ export function useFCMToken() {
     checkSupport();
   }, []);
 
-  // Enregistrer le token natif dans Firestore
+  // Enregistrer le token dans Firestore.
+  //
+  // ⚠️ Le token FCM est lié à l'APPAREIL, pas au compte : on peut l'obtenir
+  // avant toute connexion. Sans utilisateur, on l'écrit dans deviceTokens/
+  // {token} (voir firestore.rules) plutôt que d'abandonner — et on note le
+  // token en localStorage pour qu'AuthContext.migratePendingFcmToken()
+  // puisse le rattacher à users/{uid}/tokens/{token} dès la connexion ou
+  // l'inscription qui suit.
   const saveTokenToFirestore = useCallback(
     async (fcmToken: string, platform: string) => {
-      if (!user) {
-        console.log('Token obtenu mais aucun utilisateur connecté.');
-        return;
-      }
-      const tokenRef = doc(db, 'users', user.uid, 'tokens', fcmToken);
-      await setDoc(tokenRef, {
+      const payload = {
         token: fcmToken,
         createdAt: new Date(),
         platform,
         ...(typeof navigator !== 'undefined'
           ? { userAgent: navigator.userAgent }
           : {}),
-      });
+      };
+
+      if (!user) {
+        const anonRef = doc(db, 'deviceTokens', fcmToken);
+        await setDoc(anonRef, payload);
+        if (typeof window !== 'undefined') {
+          window.localStorage.setItem(PENDING_FCM_TOKEN_KEY, JSON.stringify({ token: fcmToken, platform }));
+        }
+        return;
+      }
+
+      const tokenRef = doc(db, 'users', user.uid, 'tokens', fcmToken);
+      await setDoc(tokenRef, payload);
     },
     [user]
   );
@@ -165,13 +181,10 @@ export function useFCMToken() {
     };
   }, [isNative, user, saveTokenToFirestore]);
 
-  // Demander la permission et obtenir le token
+  // Demander la permission et obtenir le token.
+  // ⚠️ Fonctionne désormais SANS utilisateur connecté (token pré-inscription,
+  // voir saveTokenToFirestore ci-dessus) — c'est le but recherché.
   const requestPermission = useCallback(async (): Promise<string | null> => {
-    if (!user) {
-      console.warn('Utilisateur non connecté. Le token sera enregistré plus tard.');
-      return null;
-    }
-
     // --- Branche native (Android/iOS via Capacitor) ---
     if (isNative) {
       try {

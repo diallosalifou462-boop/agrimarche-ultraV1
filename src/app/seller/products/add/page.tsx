@@ -48,6 +48,8 @@ interface FormData {
   category: string;
   stock: string;
   minOrder: string;
+  harvestDate: string;
+  availability: 'disponible' | 'sur_commande' | 'a_venir';
 }
 
 export default function AddProductPage() {
@@ -55,13 +57,14 @@ export default function AddProductPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [userId, setUserId]       = useState<string | null>(null);
-  const [sellerInfo, setSellerInfo] = useState<{ name: string; region: string; city: string; phone: string } | null>(null);
+  const [sellerInfo, setSellerInfo] = useState<{ name: string; region: string; city: string; phone: string; lat?: number; lng?: number } | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
 
   const [photos, setPhotos]       = useState<PhotoItem[]>([]);
   const [form, setForm]           = useState<FormData>({
     name: '', description: '', price: '', unit: 'kg',
     category: '', stock: '', minOrder: '1',
+    harvestDate: '', availability: 'disponible',
   });
   const [submitting, setSubmitting] = useState(false);
   const [toast, setToast]         = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -89,6 +92,13 @@ export default function AddProductPage() {
       setSellerInfo({
         name: d.displayName, region: d.region,
         city: d.city || '', phone: d.phone,
+        // Position GPS renseignée par le vendeur dans son profil (voir
+        // seller/register/page.tsx) — reportée automatiquement sur chaque
+        // produit publié, pour activer les fonctionnalités de proximité
+        // ("près de chez vous") côté acheteur, qui étaient jusqu'ici
+        // inertes faute de coordonnées réelles sur les produits.
+        lat: typeof d.lat === 'number' ? d.lat : undefined,
+        lng: typeof d.lng === 'number' ? d.lng : undefined,
       });
       setAuthLoading(false);
     });
@@ -236,12 +246,22 @@ export default function AddProductPage() {
         // stock: null = illimité (voir placeholder "Laisser vide = illimité")
         stock:         form.stock ? Number(form.stock) : null,
         minOrder:      Number(form.minOrder) || 1,
+        harvestDate:   form.harvestDate || '',
+        availability:  form.availability,
         images:        photoUrls,
         sellerId:      userId,
         farmer:        sellerInfo.name,
         farmerPhone:   sellerInfo.phone,
         region:        sellerInfo.region,
         exactLocation: [sellerInfo.city, sellerInfo.region].filter(Boolean).join(', '),
+        // Coordonnées héritées du profil vendeur — voir commentaire plus
+        // haut. Absentes si le vendeur n'a pas (encore) renseigné sa
+        // position GPS dans son profil ; le produit reste alors invisible
+        // des sections de proximité, mais tout le reste du catalogue
+        // continue de fonctionner normalement.
+        ...(sellerInfo.lat !== undefined && sellerInfo.lng !== undefined
+          ? { lat: sellerInfo.lat, lng: sellerInfo.lng }
+          : {}),
         status:        'active',
         sales:         0,
         createdAt:     serverTimestamp(),
@@ -493,6 +513,36 @@ export default function AddProductPage() {
             />
             <p className="text-right text-[10px] text-gray-400 mt-0.5">{form.description.length}/400</p>
           </div>
+
+          {/* Date de récolte + Disponibilité */}
+          <div className="flex gap-3">
+            <div className="flex-1">
+              <label className="block text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1.5 flex items-center gap-1">
+                <Leaf size={11} /> Date de récolte
+              </label>
+              <input
+                type="date"
+                value={form.harvestDate}
+                onChange={e => setForm(f => ({ ...f, harvestDate: e.target.value }))}
+                max={new Date().toISOString().slice(0, 10)}
+                className="w-full px-3 py-2.5 rounded-xl border border-gray-200 dark:border-gray-600 bg-gray-50 dark:bg-gray-700 text-gray-800 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent transition"
+              />
+            </div>
+            <div className="flex-1">
+              <label className="block text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1.5 flex items-center gap-1">
+                <Info size={11} /> Disponibilité
+              </label>
+              <select
+                value={form.availability}
+                onChange={e => setForm(f => ({ ...f, availability: e.target.value as FormData['availability'] }))}
+                className="w-full px-3 py-2.5 rounded-xl border border-gray-200 dark:border-gray-600 bg-gray-50 dark:bg-gray-700 text-gray-800 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent transition"
+              >
+                <option value="disponible">✅ Disponible</option>
+                <option value="sur_commande">⏳ Sur commande</option>
+                <option value="a_venir">📅 Bientôt disponible</option>
+              </select>
+            </div>
+          </div>
         </div>
 
         {/* ── PRIX & STOCK ── */}
@@ -589,6 +639,21 @@ export default function AddProductPage() {
           <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-0.5">
             Définie depuis votre profil vendeur
           </p>
+          {sellerInfo && sellerInfo.lat === undefined && (
+            <div className="mt-2 flex items-start gap-1.5 text-[11px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-lg px-2.5 py-2">
+              <span>⚠️</span>
+              <span>
+                Position GPS non renseignée — vos produits n'apparaîtront pas dans "Près de chez vous".{' '}
+                <button
+                  type="button"
+                  onClick={() => router.push('/seller/register')}
+                  className="underline font-semibold"
+                >
+                  Ajouter ma position
+                </button>
+              </span>
+            </div>
+          )}
         </div>
 
         {/* ── BOUTON PUBLIER ── */}

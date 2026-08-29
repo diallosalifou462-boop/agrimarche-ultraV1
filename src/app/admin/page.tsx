@@ -36,6 +36,8 @@ import { useFCMToken } from "@/hooks/useFCMToken"; // ⚠️ ajuste ce chemin ve
 import { notifyUser } from "@/lib/notifications/notifyUser";
 import { categoryLink } from "@/lib/categoryLink";
 import { OrderStatus, ORDER_STATUS_CONFIG, normalizeStatus, statusTint } from "@/lib/orderStatus";
+import FleetMap, { type FleetPoint } from "@/components/FleetMap";
+import { distanceKm, formatDistance, isValidCoordinate } from "@/lib/geo/distance";
 import {
   AreaChart, Area, BarChart, Bar, LineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -141,7 +143,18 @@ interface Order {
   // Parcours de suivi hybride (voir functions/src/index.ts et
   // delivery/dashboard/page.tsx) — écrit par assignDelivery ci-dessous et
   // par le livreur lui-même, jusqu'ici jamais déclaré ni affiché côté admin.
-  tracking?: { phase?: 'assigned' | 'en_route' | 'approaching' | 'arrived' };
+  // ⚠️ Les horodatages assignedAt/enRouteAt/approachingAt/arrivedAt existent
+  // déjà dans les documents Firestore (voir /admin/logistics::OrderDoc, qui
+  // les lit) mais n'étaient déclarés ici que via `phase` — ajoutés pour
+  // pouvoir calculer les mêmes métriques de perf par livreur dans l'onglet
+  // "Livreurs" (temps de trajet, réactivité, ponctualité).
+  tracking?: {
+    phase?: 'assigned' | 'en_route' | 'approaching' | 'arrived';
+    assignedAt?: Timestamp;
+    enRouteAt?: Timestamp;
+    approachingAt?: Timestamp;
+    arrivedAt?: Timestamp;
+  };
 }
 
 interface UserProfile {
@@ -159,6 +172,100 @@ interface UserProfile {
   level?: number;
   fcmTokens?: string[];
   avatar?: string;
+  lastActiveAt?: Timestamp;
+  sessionCount?: number;
+  recentVisits?: number[]; // dates de visite en ms epoch, la + récente en premier (borné à 20, voir AuthContext)
+  // ── Localisation (voir src/lib/geo/types.ts) ────────────────────────────
+  // Posée par seller/register (vendeurs, via LocationPicker) et par le
+  // dernier checkout connu pour les clients (customerLocation recopiée sur
+  // le profil). Absente pour les comptes non encore géolocalisés — toujours
+  // vérifier isValidCoordinate avant utilisation, ne jamais supposer 0/0.
+  lat?: number;
+  lng?: number;
+  locationAccuracy?: number;
+  locationAddress?: string;
+  locationSource?: string;
+  locationUpdatedAt?: Timestamp | string;
+}
+
+// ── Lecture de date universelle ──────────────────────────────────────────
+// ⚠️ FIX : selon le chemin de création du compte, `createdAt` est parfois un
+// vrai Firestore Timestamp (comptes créés côté serveur — ex. session
+// invité), parfois une simple chaîne ISO (AuthContext.signUp /
+// ensureUserExists écrivent `new Date().toISOString()`, pas un Timestamp —
+// corrigé pour les nouveaux flux d'activité, mais les comptes existants
+// restent en chaîne). `value.toDate?.()` renvoie silencieusement
+// `undefined` sur une chaîne, d'où "—" à la place de la date d'inscription
+// pour une partie des comptes. Cette fonction accepte les deux formats (et
+// un epoch number, par sécurité) au lieu de supposer un seul type.
+function toDateSafe(value: any): Date | null {
+  if (!value) return null;
+  if (typeof value.toDate === 'function') return value.toDate();
+  if (typeof value.toMillis === 'function') return new Date(value.toMillis());
+  if (value instanceof Date) return value;
+  if (typeof value === 'string' || typeof value === 'number') {
+    const d = new Date(value);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  return null;
+}
+function toMillisSafe(value: any): number | null {
+  const d = toDateSafe(value);
+  return d ? d.getTime() : null;
+}
+function formatDateSafe(value: any, options?: Intl.DateTimeFormatOptions): string {
+  const d = toDateSafe(value);
+  return d ? d.toLocaleDateString('fr-FR', options) : '—';
+}
+
+// Formatte la dernière activité d'un utilisateur en texte relatif + statut/couleur.
+// ⚠️ FIX : `lastActiveAt` n'était écrit NULLE PART dans l'app avant ce
+// correctif (voir trackUserVisit dans src/lib/interests/trackActivity.ts)
+// — TOUS les utilisateurs, y compris ceux connectés hier, s'affichaient
+// "Jamais connecté". Cette fonction ne peut pas reconstituer une activité
+// jamais mesurée, mais elle peut au moins arrêter de mentir : un compte
+// dont on n'a AUCUNE mesure ("no_data") est désormais affiché différemment
+// d'un compte pour lequel on sait, avec certitude, qu'il n'a plus donné
+// signe de vie depuis longtemps ("confirmed").
+function getActivityInfo(lastActiveAt?: Timestamp | string | number): { label: string; color: string; dotColor: string; certainty: 'no_data' | 'confirmed' } {
+  const ms = toMillisSafe(lastActiveAt);
+  if (ms === null) return { label: 'Activité non mesurée', color: '#6b7280', dotColor: '#4b5563', certainty: 'no_data' };
+  const diffMs = Date.now() - ms;
+  const minutes = Math.floor(diffMs / 60000);
+  const hours   = Math.floor(diffMs / 3600000);
+  const days    = Math.floor(diffMs / 86400000);
+  const c = 'confirmed' as const;
+  if (minutes < 5)   return { label: 'En ligne',                color: '#10b981', dotColor: '#10b981', certainty: c };
+  if (minutes < 60)  return { label: `Il y a ${minutes} min`,    color: '#10b981', dotColor: '#10b981', certainty: c };
+  if (hours < 24)     return { label: `Il y a ${hours} h`,        color: '#10b981', dotColor: '#10b981', certainty: c };
+  if (days < 2)        return { label: 'Hier',                    color: '#f59e0b', dotColor: '#f59e0b', certainty: c };
+  if (days < 30)       return { label: `Il y a ${days} j`,         color: '#f59e0b', dotColor: '#f59e0b', certainty: c };
+  return { label: `Il y a ${Math.floor(days / 30)} mois`, color: '#ef4444', dotColor: '#ef4444', certainty: c };
+}
+
+// Calcule le rythme de retour d'un utilisateur à partir de son historique de
+// visites : écart moyen entre deux visites, et si son silence actuel dépasse
+// nettement son propre rythme habituel (signal de décrochage actionnable).
+function getReturnFrequencyInfo(recentVisits?: number[]): { label: string; status: 'unknown' | 'engaged' | 'normal' | 'atRisk'; avgGapDays: number | null } {
+  if (!recentVisits || recentVisits.length < 2) {
+    return { label: 'Pas encore assez de visites pour calculer un rythme', status: 'unknown', avgGapDays: null };
+  }
+  const sorted = [...recentVisits].sort((a, b) => b - a); // plus récent en premier
+  const gapsMs: number[] = [];
+  for (let i = 0; i < sorted.length - 1; i++) gapsMs.push(sorted[i] - sorted[i + 1]);
+  const avgGapDays = gapsMs.reduce((sum, g) => sum + g, 0) / gapsMs.length / 86400000;
+  const daysSinceLastVisit = (Date.now() - sorted[0]) / 86400000;
+
+  const roundedAvg = Math.round(avgGapDays * 10) / 10;
+  const isOverdue = daysSinceLastVisit > Math.max(avgGapDays * 2, avgGapDays + 3);
+
+  if (isOverdue) {
+    return { label: `En retard : revient d'habitude tous les ${roundedAvg} j, silence depuis ${Math.round(daysSinceLastVisit)} j`, status: 'atRisk', avgGapDays: roundedAvg };
+  }
+  if (avgGapDays <= 3) {
+    return { label: `Très engagé : revient tous les ${roundedAvg} j`, status: 'engaged', avgGapDays: roundedAvg };
+  }
+  return { label: `Revient tous les ${roundedAvg} j en moyenne`, status: 'normal', avgGapDays: roundedAvg };
 }
 
 interface Product {
@@ -175,6 +282,8 @@ interface Product {
   description?: string;
   unit?: string;
   minOrder?: number;
+  harvestDate?: string;
+  availability?: 'disponible' | 'sur_commande' | 'a_venir';
 }
 
 interface Loan {
@@ -255,25 +364,35 @@ interface BroadcastForm {
 // ============================================================
 
 class CreditScoringAI {
-  private weights: number[][];
-  private bias: number[];
-
-  constructor() {
-    this.weights = [];
-    this.bias = [];
-    this.initializeWeights();
-  }
-
-  private initializeWeights() {
-    for (let i = 0; i < 12; i++) {
-      this.weights.push(new Array(6).fill(0).map(() => (Math.random() * 2 - 1) * 0.1));
-    }
-    this.bias = new Array(12).fill(0).map(() => (Math.random() * 2 - 1) * 0.1);
-  }
-
-  private sigmoid(x: number): number {
-    return 1 / (1 + Math.exp(-x));
-  }
+  // ⚠️ FIX MAJEUR : cette classe s'appelait "IA" mais initialisait ses poids
+  // avec Math.random() — jamais entraînés sur aucune donnée. Concrètement,
+  // le même vendeur, avec des commandes identiques, pouvait obtenir un
+  // score de 300 un jour et de 800 le lendemain simplement en rechargeant
+  // la page admin (nouvelle instance = nouveaux poids aléatoires). Ce score
+  // détermine pourtant le prêt max (jusqu'à 10M FCFA) et le taux d'intérêt
+  // recommandé à l'admin — un vrai risque si de l'argent réel suit ces
+  // recommandations, pas un simple problème de nom.
+  //
+  // Remplacé par un scorecard pondéré, fixe et documenté : même vendeur,
+  // même score, à chaque fois. C'est aussi ce que font la plupart des
+  // fintechs en phase early-stage — un modèle simple mais explicable et
+  // auditable, plutôt qu'un "réseau de neurones" qui n'en est pas un.
+  //
+  // Pondérations (somme = 100%) :
+  //  - Ponctualité (commandes livrées / total)      35%  → meilleur signal de fiabilité
+  //  - Volume de commandes (jusqu'à 50)              20%  → activité réelle sur la plateforme
+  //  - Revenu mensuel estimé (jusqu'à 1M FCFA)       20%  → capacité de remboursement
+  //  - Ancienneté du compte (jusqu'à 24 mois)        15%  → historique, moins de risque de fraude
+  //  - Taux d'endettement existant (inversé)         5%   → dettes en cours vs revenu
+  //  - Garantie fournie                              5%   → réduit le risque en cas de défaut
+  private static readonly FACTOR_WEIGHTS = {
+    onTimeRate: 0.35,
+    orderVolume: 0.20,
+    income: 0.20,
+    accountAge: 0.15,
+    debtBurden: 0.05, // appliqué inversé : (1 - debtBurden)
+    collateral: 0.05,
+  } as const;
 
   calculateScore(features: {
     monthlyIncome: number;
@@ -283,25 +402,22 @@ class CreditScoringAI {
     accountAgeMonths: number;
     hasCollateral: boolean;
   }): { score: number; rating: string; maxLoan: number; interestRate: number; recommendations: string[] } {
-    const inputs = [
-      Math.min(1, features.monthlyIncome / 1000000),
-      Math.min(1, features.existingDebts / Math.max(1, features.monthlyIncome)),
-      Math.min(1, features.ordersCount / 50),
-      features.onTimePayments / Math.max(1, features.ordersCount),
-      Math.min(1, features.accountAgeMonths / 24),
-      features.hasCollateral ? 1 : 0
-    ];
+    const w = CreditScoringAI.FACTOR_WEIGHTS;
+    const incomeScore    = Math.min(1, features.monthlyIncome / 1_000_000);
+    const debtBurden     = Math.min(1, features.existingDebts / Math.max(1, features.monthlyIncome));
+    const orderScore     = Math.min(1, features.ordersCount / 50);
+    const onTimeRate     = features.ordersCount > 0 ? features.onTimePayments / features.ordersCount : 0;
+    const ageScore        = Math.min(1, features.accountAgeMonths / 24);
+    const collateralScore = features.hasCollateral ? 1 : 0;
 
-    const hiddenOutput: number[] = [];
-    for (let i = 0; i < this.weights.length; i++) {
-      let sum = this.bias[i];
-      for (let j = 0; j < inputs.length; j++) {
-        sum += inputs[j] * this.weights[i][j];
-      }
-      hiddenOutput.push(this.sigmoid(sum));
-    }
+    const rawScore =
+      onTimeRate      * w.onTimeRate +
+      orderScore      * w.orderVolume +
+      incomeScore     * w.income +
+      ageScore        * w.accountAge +
+      (1 - debtBurden) * w.debtBurden +
+      collateralScore * w.collateral;
 
-    const rawScore = hiddenOutput.reduce((a, b) => a + b, 0) / hiddenOutput.length;
     const score = Math.min(1000, Math.max(0, Math.round(rawScore * 1000)));
 
     let rating = '';
@@ -775,8 +891,10 @@ export default function AdminDashboard() {
   // en changeant d'onglet.
   const [userSearch, setUserSearch]         = useState('');
   const [userRoleFilter, setUserRoleFilter] = useState('all');
-  const [userSort, setUserSort]             = useState<'recent' | 'name' | 'role'>('recent');
+  const [userSort, setUserSort]             = useState<'recent' | 'name' | 'role' | 'lastActive'>('recent');
   const [userPage, setUserPage]             = useState(0);
+  const [userViewMode, setUserViewMode]     = useState<'liste' | 'carte'>('liste');
+  const [userMapSelectedId, setUserMapSelectedId] = useState<string | null>(null);
   const userPageSize = 15;
 
   // ── MODALS ────────────────────────────────────────────────
@@ -854,7 +972,7 @@ export default function AdminDashboard() {
   // reçoit) — c'est ce que l'admin édite. Le prix affiché partout ailleurs
   // dans l'app (price = basePrice + marge plateforme) est recalculé
   // automatiquement à l'enregistrement, voir saveProductEdit().
-  const [productEditForm, setProductEditForm] = useState<{ name: string; category: string; basePrice: number; region: string; stock: number }>({ name: '', category: '', basePrice: 0, region: '', stock: 0 });
+  const [productEditForm, setProductEditForm] = useState<{ name: string; category: string; basePrice: number; region: string; stock: number; description: string; harvestDate: string; availability: 'disponible' | 'sur_commande' | 'a_venir' }>({ name: '', category: '', basePrice: 0, region: '', stock: 0, description: '', harvestDate: '', availability: 'disponible' });
   const [productSaving, setProductSaving]   = useState(false);
   const [productSearchQuery, setProductSearchQuery]   = useState('');
   const [productCategoryFilter, setProductCategoryFilter] = useState('all');
@@ -917,6 +1035,13 @@ export default function AdminDashboard() {
   const [inactiveClientsLoading, setInactiveClientsLoading] = useState(true);
   const [inactiveClientsSaving, setInactiveClientsSaving]   = useState(false);
   const [inactiveClientsHistory, setInactiveClientsHistory] = useState<any[]>([]);
+
+  const [pendingSignupSettings, setPendingSignupSettings] = useState({
+    enabled: false, thresholdHours: 2, expireAfterDays: 14, maxPerRun: 200,
+  });
+  const [pendingSignupLoading, setPendingSignupLoading] = useState(true);
+  const [pendingSignupSaving, setPendingSignupSaving]   = useState(false);
+  const [pendingSignupHistory, setPendingSignupHistory] = useState<any[]>([]);
 
   const [periodicChecksRunning, setPeriodicChecksRunning] = useState(false);
 
@@ -1013,6 +1138,49 @@ export default function AdminDashboard() {
     [delivererEarnings]
   );
 
+  // ✅ NOUVEAU — Onglet "Livreurs" : perf par livreur, même logique que
+  // /admin/logistics::delivererStats (temps de trajet en_route→livré, temps
+  // de réaction assigned→en_route, taux de ponctualité sur SLA_TRAJET_MINUTES),
+  // recalculée ici pour être visible directement dans l'onglet sans devoir
+  // ouvrir la page logistique séparée.
+  const SLA_TRAJET_MINUTES = 45;
+  const diffMinutes = (a?: Timestamp, b?: Timestamp): number | null => {
+    if (!a || !b) return null;
+    const ms = b.toMillis() - a.toMillis();
+    return ms > 0 ? ms / 60000 : null;
+  };
+  const average = (values: number[]): number | null =>
+    values.length === 0 ? null : values.reduce((s, v) => s + v, 0) / values.length;
+  const delivererPerf = useMemo(() => {
+    const map: Record<string, { transitTimes: number[]; reactionTimes: number[] }> = {};
+    orders.filter(o => o.status === 'livre' && o.delivererId).forEach(o => {
+      const entry = map[o.delivererId!] ?? { transitTimes: [], reactionTimes: [] };
+      const tt = diffMinutes(o.tracking?.enRouteAt, o.deliveredAt);
+      if (tt !== null) entry.transitTimes.push(tt);
+      const rt = diffMinutes(o.tracking?.assignedAt, o.tracking?.enRouteAt);
+      if (rt !== null) entry.reactionTimes.push(rt);
+      map[o.delivererId!] = entry;
+    });
+    const result: Record<string, { avgTransitMinutes: number | null; avgReactionMinutes: number | null; onTimeRate: number | null; sampleSize: number }> = {};
+    for (const [id, v] of Object.entries(map)) {
+      const onTime = v.transitTimes.filter(t => t <= SLA_TRAJET_MINUTES).length;
+      result[id] = {
+        avgTransitMinutes: average(v.transitTimes),
+        avgReactionMinutes: average(v.reactionTimes),
+        onTimeRate: v.transitTimes.length > 0 ? (onTime / v.transitTimes.length) * 100 : null,
+        sampleSize: v.transitTimes.length,
+      };
+    }
+    return result;
+  }, [orders]);
+  const formatDuration = (minutes: number | null): string => {
+    if (minutes === null) return '—';
+    if (minutes < 60) return `${Math.round(minutes)} min`;
+    const h = Math.floor(minutes / 60);
+    const m = Math.round(minutes % 60);
+    return `${h}h${m > 0 ? ` ${m.toString().padStart(2, '0')}` : ''}`;
+  };
+
   const pendingLoans    = useMemo(() => loans.filter(l => l.status === 'pending').length, [loans]);
   const totalLoanVolume = useMemo(() => loans.reduce((s,l) => s + (l.amount ?? 0), 0), [loans]);
 
@@ -1107,9 +1275,10 @@ export default function AdminDashboard() {
         || u.phone?.toLowerCase().includes(q);
     });
     const sorters: Record<typeof userSort, (a: UserProfile, b: UserProfile) => number> = {
-      recent: (a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0),
-      name:   (a, b) => (a.displayName || '').localeCompare(b.displayName || ''),
-      role:   (a, b) => (a.role || '').localeCompare(b.role || ''),
+      recent:     (a, b) => (toMillisSafe(b.createdAt) ?? 0) - (toMillisSafe(a.createdAt) ?? 0),
+      name:       (a, b) => (a.displayName || '').localeCompare(b.displayName || ''),
+      role:       (a, b) => (a.role || '').localeCompare(b.role || ''),
+      lastActive: (a, b) => (b.lastActiveAt?.toMillis?.() ?? 0) - (a.lastActiveAt?.toMillis?.() ?? 0),
     };
     return [...list].sort(sorters[userSort]);
   }, [users, userSearch, userRoleFilter, userSort]);
@@ -1120,6 +1289,28 @@ export default function AdminDashboard() {
   }, [filteredUsers, userPage]);
 
   const userTotalPages = Math.max(1, Math.ceil(filteredUsers.length / userPageSize));
+
+  // ── Carte "Tous les utilisateurs" ────────────────────────────────────────
+  // Reprend le même filtre (rôle + recherche) que la liste, mais ignore la
+  // pagination : sur une carte, on veut voir tout le monde en un coup d'œil,
+  // pas seulement la page courante.
+  const ROLE_MAP_KIND: Record<string, FleetPoint['kind']> = {
+    client: 'client', seller: 'seller', delivery: 'delivery', admin: 'admin',
+  };
+  const usersMapPoints: FleetPoint[] = useMemo(() => (
+    filteredUsers
+      .filter(u => isValidCoordinate(u.lat, u.lng))
+      .map(u => ({
+        id: u.id!,
+        lat: u.lat!,
+        lng: u.lng!,
+        label: `${u.displayName || 'Sans nom'} (${{ client: 'Client', seller: 'Vendeur', delivery: 'Livreur', admin: 'Admin' }[u.role] || u.role})`,
+        sublabel: u.locationAddress || u.phone || u.email,
+        kind: ROLE_MAP_KIND[u.role] || 'client',
+        onClick: () => setUserMapSelectedId(u.id!),
+      }))
+  ), [filteredUsers]);
+  const usersGeolocatedCount = usersMapPoints.length;
 
   // Revenir à la page 1 dès que la recherche/le filtre change, pour ne
   // jamais se retrouver sur une page vide qui n'existe plus.
@@ -1489,6 +1680,9 @@ export default function AdminDashboard() {
       basePrice: pricingByProduct[product.id!] ?? inferBasePrice(product.price || 0),
       region: product.region || '',
       stock: product.stock || 0,
+      description: product.description || '',
+      harvestDate: product.harvestDate || '',
+      availability: product.availability || 'disponible',
     });
   };
 
@@ -1510,6 +1704,9 @@ export default function AdminDashboard() {
         price: computeDisplayPrice(basePrice),
         region: productEditForm.region.trim(),
         stock: Math.max(0, Number(productEditForm.stock) || 0),
+        description: productEditForm.description.trim(),
+        harvestDate: productEditForm.harvestDate || '',
+        availability: productEditForm.availability,
       });
       // basePrice va dans la sous-collection privée, jamais dans le document public.
       await setDoc(doc(db, 'products', editingProductId, 'productPricing', 'base'), {
@@ -2107,14 +2304,16 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
   useEffect(() => {
     (async () => {
       try {
-        const [poSnap, icSnap] = await Promise.all([
+        const [poSnap, icSnap, psSnap] = await Promise.all([
           getDoc(doc(db, 'settings', 'pendingOrdersAlerts')),
           getDoc(doc(db, 'settings', 'inactiveClientsAlerts')),
+          getDoc(doc(db, 'settings', 'pendingSignupAlerts')),
         ]);
         if (poSnap.exists()) setPendingOrdersSettings(prev => ({ ...prev, ...poSnap.data() }));
         if (icSnap.exists()) setInactiveClientsSettings(prev => ({ ...prev, ...icSnap.data() }));
+        if (psSnap.exists()) setPendingSignupSettings(prev => ({ ...prev, ...psSnap.data() }));
       } catch (e) { console.error('periodic-checks settings load', e); }
-      finally { setPendingOrdersLoading(false); setInactiveClientsLoading(false); }
+      finally { setPendingOrdersLoading(false); setInactiveClientsLoading(false); setPendingSignupLoading(false); }
     })();
 
     const qPending = query(collection(db, 'pending_order_alerts'), orderBy('createdAt', 'desc'), limit(10));
@@ -2127,7 +2326,12 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
       setInactiveClientsHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     }, (e) => console.error('inactive_client_alerts listen', e));
 
-    return () => { unsubPending(); unsubInactive(); };
+    const qSignup = query(collection(db, 'pending_signup_reminders'), orderBy('createdAt', 'desc'), limit(10));
+    const unsubSignup = onSnapshot(qSignup, (snap) => {
+      setPendingSignupHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (e) => console.error('pending_signup_reminders listen', e));
+
+    return () => { unsubPending(); unsubInactive(); unsubSignup(); };
   }, []);
 
   const savePendingOrdersSettings = async (next: typeof pendingOrdersSettings) => {
@@ -2158,6 +2362,20 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
     }
   };
 
+  const savePendingSignupSettings = async (next: typeof pendingSignupSettings) => {
+    setPendingSignupSaving(true);
+    try {
+      await setDoc(doc(db, 'settings', 'pendingSignupAlerts'), next, { merge: true });
+      setPendingSignupSettings(next);
+      toast.success(next.enabled ? 'Relances inscription non terminée activées' : 'Relances inscription non terminée désactivées');
+    } catch (e) {
+      console.error(e);
+      toast.error('Erreur sauvegarde des réglages');
+    } finally {
+      setPendingSignupSaving(false);
+    }
+  };
+
   // Déclenchement manuel immédiat, bypass le verrou de fréquence
   // puisqu'appelé avec le jeton admin (voir dual-auth dans la route).
   const runPeriodicChecksNow = async () => {
@@ -2173,7 +2391,8 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
       if (data?.skipped) { toast.info(data.reason || 'Rien à relancer pour le moment'); return; }
       const poCount = data?.pendingOrders?.notified ?? 0;
       const icCount = data?.inactiveClients?.notified ?? 0;
-      toast.success(`${poCount} commande(s) relancée(s), ${icCount} client(s) relancé(s)`);
+      const psCount = data?.pendingSignups?.notified ?? 0;
+      toast.success(`${poCount} commande(s) relancée(s), ${icCount} client(s) relancé(s), ${psCount} inscription(s) relancée(s)`);
     } catch (e) {
       console.error(e);
       toast.error('Erreur réseau');
@@ -2325,16 +2544,28 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
     return order.sellerName || order.farmer || '—';
   }, [usersById]);
 
+  // ✅ Téléphone du client qui a passé la commande — même logique de repli
+  // que getOrderSellerName : d'abord le compte Firestore réel (order.userId),
+  // puis l'ancien champ legacy `farmerPhone`, sinon rien à afficher.
+  const getOrderCustomerPhone = useCallback((order: Order): string => {
+    const customerAccount = usersById.get(order.userId || '');
+    if (customerAccount?.phone) return customerAccount.phone;
+    if (order.farmerPhone) return order.farmerPhone;
+    return '—';
+  }, [usersById]);
+
   const filteredOrders = useMemo(() => orders.filter(o => {
     if (statusFilter !== 'all' && o.status !== statusFilter) return false;
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
       return o.orderNumber?.toLowerCase().includes(q)
         || o.farmer?.toLowerCase().includes(q)
+        || o.userName?.toLowerCase().includes(q)
+        || getOrderCustomerPhone(o).toLowerCase().includes(q)
         || getOrderSellerName(o).toLowerCase().includes(q);
     }
     return true;
-  }), [orders, statusFilter, searchQuery, getOrderSellerName]);
+  }), [orders, statusFilter, searchQuery, getOrderSellerName, getOrderCustomerPhone]);
 
   const paginatedOrders = useMemo(() => {
     const start = currentPage * pageSize;
@@ -2351,7 +2582,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
     return months.map((month, i) => ({
       month,
       revenue: orders.filter(o => {
-        const d = o.createdAt?.toDate?.();
+        const d = toDateSafe(o.createdAt);
         return d && d.getMonth() === i && d.getFullYear() === year && o.status === 'livre';
       }).reduce((s,o) => s + (o.amount ?? 0), 0)
     }));
@@ -2417,7 +2648,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
     const prevStart = now - 2 * days * msDay;
     let cur = 0, prev = 0;
     for (const item of items) {
-      const t = item.createdAt?.toMillis?.();
+      const t = toMillisSafe((item as any).createdAt);
       if (!t) continue;
       if (t >= curStart) cur += valueOf(item);
       else if (t >= prevStart) prev += valueOf(item);
@@ -2434,6 +2665,64 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
   const loansChange = useMemo(() => periodChangePercent<Loan>(loans, l => l.amount ?? 0), [loans]);
   const usersChange = useMemo(() => periodChangePercent<UserProfile>(users, () => 1), [users]);
   const deliverersChange = useMemo(() => periodChangePercent<UserProfile>(deliveryPersons, () => 1), [deliveryPersons]);
+
+  // ── PIPELINE DES COMMANDES ───────────────────────────────────
+  // Répartition en temps réel de toutes les commandes par statut — vue
+  // opérationnelle absente jusqu'ici : l'admin devait aller dans l'onglet
+  // Commandes et filtrer un par un pour savoir combien étaient bloquées
+  // 'en_attente' vs déjà 'en_livraison'.
+  const orderStatusFunnel = useMemo(() => {
+    const counts: Record<OrderStatus, number> = { en_attente:0, en_preparation:0, en_livraison:0, livre:0, annule:0 };
+    orders.forEach(o => { if (counts[o.status] !== undefined) counts[o.status]++; });
+    const total = orders.length || 1;
+    return (Object.keys(ORDER_STATUS_CONFIG) as OrderStatus[]).map(status => ({
+      status, label: ORDER_STATUS_CONFIG[status].label, icon: ORDER_STATUS_CONFIG[status].icon,
+      color: ORDER_STATUS_CONFIG[status].color, count: counts[status], pct: Math.round((counts[status]/total)*1000)/10,
+    }));
+  }, [orders]);
+
+  // ── TOP VENDEURS ──────────────────────────────────────────────
+  // Classement par chiffre d'affaires livré — réutilise getOrderSellerName
+  // (résolution robuste déjà en place pour l'onglet Commandes) plutôt que
+  // de relire order.farmer, qui n'est jamais renseigné par le checkout.
+  const topSellers = useMemo(() => {
+    const map = new Map<string, { name: string; revenue: number; orders: number }>();
+    orders.forEach(o => {
+      if (o.status !== 'livre') return;
+      const key = o.sellerId || o.farmerId || getOrderSellerName(o);
+      const name = getOrderSellerName(o);
+      const entry = map.get(key) ?? { name, revenue: 0, orders: 0 };
+      entry.revenue += o.amount ?? 0;
+      entry.orders += 1;
+      map.set(key, entry);
+    });
+    return Array.from(map.values()).sort((a,b) => b.revenue - a.revenue).slice(0, 5);
+  }, [orders, getOrderSellerName]);
+  const topSellerMaxRevenue = topSellers[0]?.revenue || 1;
+
+  // ── PERFORMANCE LIVRAISON ────────────────────────────────────
+  // Temps moyen entre prise en charge (delivererAssignedAt) et livraison
+  // confirmée (deliveredAt) sur les 50 dernières livraisons — première
+  // métrique de délai jamais affichée côté admin ; jusqu'ici aucun signal
+  // ne permettait de repérer un ralentissement des livreurs sur le terrain.
+  const deliveryPerformance = useMemo(() => {
+    const delivered = orders
+      .filter(o => o.status === 'livre' && o.delivererAssignedAt && o.deliveredAt)
+      .sort((a,b) => (b.deliveredAt!.toMillis?.() ?? 0) - (a.deliveredAt!.toMillis?.() ?? 0))
+      .slice(0, 50);
+    const durationsMin = delivered.map(o => {
+      const start = o.delivererAssignedAt!.toMillis?.() ?? 0;
+      const end = o.deliveredAt!.toMillis?.() ?? 0;
+      return Math.max(0, (end - start) / 60000);
+    }).filter(m => m > 0 && m < 24 * 60); // écarte les valeurs aberrantes (>24h, corrections manuelles)
+    const avgMinutes = durationsMin.length ? Math.round(durationsMin.reduce((s,m)=>s+m,0) / durationsMin.length) : null;
+    const activeCount = deliveryPersons.filter(d => d.isAvailable).length;
+    return { avgMinutes, sampleSize: durationsMin.length, activeCount, totalCount: deliveryPersons.length };
+  }, [orders, deliveryPersons]);
+
+  // ── TOP RÉGIONS ───────────────────────────────────────────────
+  const topRegions = useMemo(() => regionStats.filter(r => r.isActive).slice(0, 5), [regionStats]);
+  const topRegionMaxRevenue = topRegions[0]?.revenue || 1;
 
   // ── KPIs ──────────────────────────────────────────────────
   const kpis = [
@@ -2659,6 +2948,148 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                     </div>
                   </div>
                 </div>
+
+                {/* ── Pipeline des commandes ── */}
+                <div className="divine-card" style={{ padding:20, borderRadius:20, marginBottom:24, background:'linear-gradient(160deg,rgba(245,158,11,0.05),rgba(10,12,16,.98))', border:'1px solid rgba(245,158,11,0.2)' }}>
+                  <h3 style={{ fontSize:15, fontWeight:700, marginBottom:18, display:'flex', alignItems:'center', gap:8 }}>
+                    <Layers size={16} color="#f59e0b"/> Pipeline des commandes
+                  </h3>
+                  <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))', gap:14 }}>
+                    {orderStatusFunnel.map(s => (
+                      <div key={s.status} style={{ padding:'14px 16px', borderRadius:14, background:`${s.color}0d`, border:`1px solid ${s.color}30` }}>
+                        <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:8 }}>
+                          <span style={{ fontSize:14 }}>{s.icon}</span>
+                          <span style={{ fontSize:11, color:'#8b93a1', letterSpacing:0.3 }}>{s.label}</span>
+                        </div>
+                        <div style={{ fontSize:22, fontWeight:800, color:s.color, marginBottom:8 }}>{s.count}</div>
+                        <div style={{ height:5, borderRadius:3, background:'rgba(255,255,255,0.06)', overflow:'hidden' }}>
+                          <div style={{ height:'100%', width:`${s.pct}%`, background:s.color, borderRadius:3, transition:'width .4s ease' }}/>
+                        </div>
+                        <div style={{ fontSize:10, color:'#6b7280', marginTop:5 }}>{s.pct}% du total</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* ── Top vendeurs · Performance livraison · Top régions ── */}
+                <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:24, marginBottom:24 }}>
+                  <div className="divine-card" style={{ padding:20, borderRadius:20, background:'linear-gradient(160deg,rgba(236,72,153,0.05),rgba(10,12,16,.98))', border:'1px solid rgba(236,72,153,0.2)' }}>
+                    <h3 style={{ fontSize:14, fontWeight:700, marginBottom:16, display:'flex', alignItems:'center', gap:8 }}>
+                      <Award size={15} color="#ec4899"/> Top vendeurs
+                    </h3>
+                    {topSellers.length === 0 ? (
+                      <p style={{ fontSize:12, color:'#6b7280' }}>Aucune commande livrée pour l'instant.</p>
+                    ) : (
+                      <div style={{ display:'grid', gap:12 }}>
+                        {topSellers.map((s,i) => (
+                          <div key={i}>
+                            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:5 }}>
+                              <span style={{ fontSize:12, fontWeight:600, display:'flex', alignItems:'center', gap:6 }}>
+                                <span style={{ fontSize:11, color:'#6b7280' }}>{['🥇','🥈','🥉','4.','5.'][i]}</span> {s.name}
+                              </span>
+                              <span style={{ fontSize:11, color:'#8b93a1' }}>{s.orders} cmd</span>
+                            </div>
+                            <div style={{ height:6, borderRadius:3, background:'rgba(255,255,255,0.06)', overflow:'hidden', marginBottom:4 }}>
+                              <div style={{ height:'100%', width:`${(s.revenue/topSellerMaxRevenue)*100}%`, background:'linear-gradient(90deg,#ec4899,#f472b6)', borderRadius:3 }}/>
+                            </div>
+                            <span style={{ fontSize:11, color:'#ec4899', fontWeight:600 }}>{s.revenue.toLocaleString()} FCFA</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="divine-card" style={{ padding:20, borderRadius:20, background:'linear-gradient(160deg,rgba(6,182,212,0.05),rgba(10,12,16,.98))', border:'1px solid rgba(6,182,212,0.2)' }}>
+                    <h3 style={{ fontSize:14, fontWeight:700, marginBottom:16, display:'flex', alignItems:'center', gap:8 }}>
+                      <Truck size={15} color="#06b6d4"/> Performance livraison
+                    </h3>
+                    <div style={{ display:'grid', gap:14 }}>
+                      <div>
+                        <div style={{ fontSize:26, fontWeight:800, color:'#06b6d4' }}>
+                          {deliveryPerformance.avgMinutes !== null ? `${deliveryPerformance.avgMinutes} min` : '—'}
+                        </div>
+                        <div style={{ fontSize:11, color:'#6b7280' }}>
+                          Délai moyen prise en charge → livraison
+                          {deliveryPerformance.sampleSize > 0 && ` (${deliveryPerformance.sampleSize} livraisons)`}
+                        </div>
+                      </div>
+                      <div style={{ height:1, background:'rgba(255,255,255,0.06)' }}/>
+                      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                        <div>
+                          <div style={{ fontSize:20, fontWeight:800, color:'#10b981' }}>{deliveryPerformance.activeCount}</div>
+                          <div style={{ fontSize:11, color:'#6b7280' }}>Livreurs disponibles</div>
+                        </div>
+                        <div style={{ fontSize:12, color:'#8b93a1' }}>sur {deliveryPerformance.totalCount} au total</div>
+                      </div>
+                      <div style={{ height:1, background:'rgba(255,255,255,0.06)' }}/>
+                      <div>
+                        <div style={{ fontSize:20, fontWeight:800, color:'#f59e0b' }}>{totalDelivererEarnings.toLocaleString()} FCFA</div>
+                        <div style={{ fontSize:11, color:'#6b7280' }}>Gains livreurs cumulés</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="divine-card" style={{ padding:20, borderRadius:20, background:'linear-gradient(160deg,rgba(16,185,129,0.05),rgba(10,12,16,.98))', border:'1px solid rgba(16,185,129,0.2)' }}>
+                    <h3 style={{ fontSize:14, fontWeight:700, marginBottom:16, display:'flex', alignItems:'center', gap:8 }}>
+                      <MapIcon size={15} color="#10b981"/> Top régions
+                    </h3>
+                    {topRegions.length === 0 ? (
+                      <p style={{ fontSize:12, color:'#6b7280' }}>Aucune région active pour l'instant.</p>
+                    ) : (
+                      <div style={{ display:'grid', gap:12 }}>
+                        {topRegions.map((r,i) => (
+                          <div key={r.region}>
+                            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:5 }}>
+                              <span style={{ fontSize:12, fontWeight:600 }}>{(r as any).emoji ?? '📍'} {r.region}</span>
+                              <span style={{ fontSize:11, color:'#8b93a1' }}>{r.orders} cmd</span>
+                            </div>
+                            <div style={{ height:6, borderRadius:3, background:'rgba(255,255,255,0.06)', overflow:'hidden', marginBottom:4 }}>
+                              <div style={{ height:'100%', width:`${(r.revenue/topRegionMaxRevenue)*100}%`, background:'linear-gradient(90deg,#10b981,#34d399)', borderRadius:3 }}/>
+                            </div>
+                            <span style={{ fontSize:11, color:'#10b981', fontWeight:600 }}>{r.revenue.toLocaleString()} FCFA</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* ── Alertes stock ── */}
+                {(productStats.lowStock > 0 || productStats.outOfStock > 0) && (
+                  <div className="divine-card" style={{ padding:20, borderRadius:20, marginBottom:24, background:'linear-gradient(160deg,rgba(239,68,68,0.06),rgba(10,12,16,.98))', border:'1px solid rgba(239,68,68,0.25)' }}>
+                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
+                      <h3 style={{ fontSize:14, fontWeight:700, display:'flex', alignItems:'center', gap:8 }}>
+                        <AlertTriangle size={15} color="#ef4444"/> Alertes stock
+                      </h3>
+                      <button onClick={()=>setActiveTab('products')} className="btn-secondary" style={{ padding:'6px 12px', fontSize:12 }}>Voir les produits →</button>
+                    </div>
+                    <div style={{ display:'flex', gap:24 }}>
+                      {productStats.outOfStock > 0 && (
+                        <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                          <div style={{ width:36, height:36, borderRadius:10, background:'rgba(239,68,68,0.15)', display:'flex', alignItems:'center', justifyContent:'center' }}>
+                            <PackageX size={17} color="#ef4444"/>
+                          </div>
+                          <div>
+                            <div style={{ fontSize:18, fontWeight:800, color:'#ef4444' }}>{productStats.outOfStock}</div>
+                            <div style={{ fontSize:11, color:'#6b7280' }}>Rupture de stock</div>
+                          </div>
+                        </div>
+                      )}
+                      {productStats.lowStock > 0 && (
+                        <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                          <div style={{ width:36, height:36, borderRadius:10, background:'rgba(245,158,11,0.15)', display:'flex', alignItems:'center', justifyContent:'center' }}>
+                            <AlertTriangle size={17} color="#f59e0b"/>
+                          </div>
+                          <div>
+                            <div style={{ fontSize:18, fontWeight:800, color:'#f59e0b' }}>{productStats.lowStock}</div>
+                            <div style={{ fontSize:11, color:'#6b7280' }}>Stock faible (&lt; 5)</div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 {/* Recent orders */}
                 <div className="divine-card" style={{ padding:20, borderRadius:20, background:'linear-gradient(160deg,rgba(6,182,212,0.05),rgba(10,12,16,.98))', border:'1px solid rgba(6,182,212,0.2)' }}>
                   <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
@@ -2701,139 +3132,287 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
 
             {/* ═══ COMMANDES ══════════════════════════════════ */}
             {activeTab === 'orders' && (
-              <div className="glass-card animate-fadeIn" style={{ padding:20 }}>
-                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', flexWrap:'wrap', gap:16, marginBottom:20 }}>
-                  <div>
-                    <h2 style={{ fontSize:18, fontWeight:700 }}>📦 Commandes</h2>
-                    <p style={{ fontSize:12, color:'#6b7280', marginTop:4 }}>{orders.length} total · {deliveredOrders} livrées · {platformRevenue.toLocaleString()} FCFA commission</p>
+              <div className="animate-fadeIn">
+
+                {/* ── Hero cosmique ── */}
+                <div className="divine-hero" style={{
+                  position:'relative', overflow:'hidden', borderRadius:24, padding:'30px 26px', marginBottom:24,
+                  background:'radial-gradient(ellipse 130% 90% at 15% -15%,rgba(6,182,212,0.16),transparent 55%), radial-gradient(ellipse 100% 80% at 100% 100%,rgba(59,130,246,0.14),transparent 55%), linear-gradient(135deg,#070a0a 0%,#0c151c 50%,#0a0c12 100%)',
+                  border:'1px solid rgba(6,182,212,0.35)', boxShadow:'0 20px 60px rgba(0,0,0,0.35)',
+                }}>
+                  <div style={{ position:'absolute', top:-100, right:-70, width:280, height:280, pointerEvents:'none' }}>
+                    <div className="divine-halo" style={{ width:'100%', height:'100%', borderRadius:'50%', background:'conic-gradient(from 0deg,rgba(6,182,212,0.3),transparent 30%,transparent 60%,rgba(59,130,246,0.28),transparent 90%)' }}/>
                   </div>
-                  <div style={{ display:'flex', gap:10, flexWrap:'wrap' }}>
-                    <div style={{ position:'relative' }}>
-                      <Search size={15} style={{ position:'absolute', left:10, top:'50%', transform:'translateY(-50%)', color:'#6b7280' }}/>
-                      <input type="text" placeholder="Rechercher…" value={searchQuery} onChange={e=>setSearchQuery(e.target.value)} style={{ paddingLeft:32, width:200 }}/>
+                  {[
+                    { top:'20%', left:'68%', size:3, delay:'0s' },
+                    { top:'58%', left:'80%', size:2, delay:'.9s' },
+                    { top:'38%', left:'90%', size:4, delay:'1.6s' },
+                  ].map((p,i)=>(
+                    <span key={i} className="divine-sparkle" style={{ top:p.top, left:p.left, width:p.size, height:p.size, background:'#67e8f9', boxShadow:'0 0 8px 2px rgba(103,232,249,0.8)', animationDelay:p.delay }}/>
+                  ))}
+                  <div style={{ display:'flex', alignItems:'center', gap:16, position:'relative', zIndex:1 }}>
+                    <div style={{ position:'relative', width:56, height:56, flexShrink:0 }}>
+                      <div style={{ position:'absolute', inset:0, borderRadius:16, animation:'ringExpand 2.4s ease-out infinite', border:'1px solid rgba(6,182,212,0.5)' }}/>
+                      <div style={{ width:56, height:56, borderRadius:16, display:'flex', alignItems:'center', justifyContent:'center', background:'linear-gradient(135deg,#06b6d4,#22d3ee,#0e7490)', boxShadow:'0 8px 28px rgba(6,182,212,0.5), inset 0 1px 2px rgba(255,255,255,0.5)' }}>
+                        <Package size={26} color="#04303a"/>
+                      </div>
                     </div>
-                    <select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)} style={{ width:'auto' }}>
-                      <option value="all">Tous</option>
-                      <option value="en_attente">En attente</option>
-                      <option value="en_preparation">En préparation</option>
-                      <option value="en_livraison">En livraison</option>
-                      <option value="livre">Livrée</option>
-                      <option value="annule">Annulée</option>
-                    </select>
-                    <button onClick={()=>{ const ws=XLSX.utils.json_to_sheet(orders); const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Commandes'); XLSX.writeFile(wb,`commandes_${Date.now()}.xlsx`); toast.success('Export OK'); }} className="btn-secondary">
-                      <Download size={14}/> Export
+                    <div>
+                      <h2 className="divine-shimmer-text" style={{
+                        fontSize:26, fontWeight:800, letterSpacing:0.3, margin:0,
+                        backgroundImage:'linear-gradient(110deg,#0e7490 10%,#67e8f9 35%,#fff 50%,#67e8f9 65%,#0e7490 90%)',
+                        WebkitBackgroundClip:'text', backgroundClip:'text', color:'transparent',
+                      }}>
+                        Commandes
+                      </h2>
+                      <p style={{ fontSize:11, color:'rgba(255,255,255,0.5)', marginTop:4, letterSpacing:1.6, textTransform:'uppercase', display:'flex', alignItems:'center', gap:6 }}>
+                        <Star size={10} color="#06b6d4" fill="#06b6d4"/> {orders.length} commande{orders.length>1?'s':''} · {platformRevenue.toLocaleString()} FCFA commission
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Stats par statut */}
+                <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))', gap:14, marginBottom:24 }}>
+                  {[
+                    { label:'Total', value:orders.length, color:'#e5e7eb', status:'all', icon:<Package size={16}/> },
+                    ...orderStatusFunnel.map(s => ({
+                      label: s.label,
+                      value: s.count,
+                      color: s.color,
+                      status: s.status as string,
+                      icon: s.status==='en_attente' ? <Clock size={16}/> : s.status==='en_preparation' ? <Package size={16}/> : s.status==='en_livraison' ? <Truck size={16}/> : s.status==='livre' ? <CheckCircle size={16}/> : <XCircle size={16}/>,
+                    })),
+                  ].map(s => (
+                    <button
+                      key={s.label}
+                      onClick={()=>setStatusFilter(s.status)}
+                      className="divine-card"
+                      style={{
+                        padding:16, textAlign:'left', cursor:'pointer', borderRadius:16,
+                        background: statusFilter===s.status ? `linear-gradient(160deg,${s.color}18,rgba(10,12,16,.98))` : 'linear-gradient(160deg,rgba(255,255,255,0.03),rgba(10,12,16,.98))',
+                        border: statusFilter===s.status ? `1px solid ${s.color}60` : '1px solid rgba(255,255,255,0.08)',
+                        boxShadow: statusFilter===s.status ? `0 8px 24px ${s.color}20` : 'none',
+                      }}
+                    >
+                      <div style={{ display:'flex', alignItems:'center', gap:6, color:s.color, marginBottom:8 }}>
+                        {s.icon}
+                        <span style={{ fontSize:10, letterSpacing:0.8, textTransform:'uppercase', color:'#8b93a1' }}>{s.label}</span>
+                      </div>
+                      <div style={{ fontSize:24, fontWeight:800, color:s.color, textShadow:`0 0 20px ${s.color}30` }}>{s.value}</div>
                     </button>
-                  </div>
+                  ))}
                 </div>
-                <div style={{ overflowX:'auto' }}>
-                  <table style={{ width:'100%', borderCollapse:'collapse' }}>
-                    <thead>
-                      <tr style={{ borderBottom:'1px solid #1f2127' }}>
-                        {['N°','Client','Produit','Vendeur','Région','Montant','Commission','Statut','Actions'].map(h=>(
-                          <th key={h} style={{ textAlign:'left', padding:'10px 8px', fontSize:11, color:'#6b7280' }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {paginatedOrders.map(order => (
-                        <tr key={order.id} style={{ borderBottom:'1px solid #1a1c22' }}>
-                          <td style={{ padding:'10px 8px', fontFamily:'monospace', fontSize:12, color:'#10b981' }}>{order.orderNumber}</td>
-                          <td style={{ padding:'10px 8px', fontSize:13 }}>{order.userName ?? order.farmer ?? '—'}</td>
-                          <td style={{ padding:'10px 8px', fontSize:13, maxWidth:220 }}>
-                            {order.items && order.items.length > 0 ? (
-                              <div style={{ display:'flex', flexDirection:'column', gap:2 }}>
-                                {order.items.slice(0,2).map((it,idx)=>(
-                                  <div key={idx} style={{ display:'flex', alignItems:'baseline', gap:5, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
-                                    <span style={{ fontWeight:600 }}>{it.productName ?? 'Produit inconnu'}</span>
-                                    <span style={{ color:'#6b7280', fontSize:11 }}>×{it.quantity ?? 1}</span>
+
+                <div className="divine-card" style={{ padding:20, borderRadius:20, background:'linear-gradient(160deg,rgba(6,182,212,0.04),rgba(10,12,16,.98))', border:'1px solid rgba(6,182,212,0.15)' }}>
+                  <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', flexWrap:'wrap', gap:16, marginBottom:20 }}>
+                    <div>
+                      <h2 style={{ fontSize:16, fontWeight:700, display:'flex', alignItems:'center', gap:8 }}>
+                        <Package size={16} color="#06b6d4"/> Liste des commandes
+                      </h2>
+                      <p style={{ fontSize:12, color:'#6b7280', marginTop:4 }}>
+                        {filteredOrders.length} commande{filteredOrders.length>1?'s':''}
+                        {filteredOrders.length !== orders.length && ` (sur ${orders.length})`}
+                        {' '}· {deliveredOrders} livrée{deliveredOrders>1?'s':''}
+                      </p>
+                    </div>
+                    <div style={{ display:'flex', gap:10, flexWrap:'wrap' }}>
+                      <div style={{ position:'relative' }}>
+                        <Search size={14} style={{ position:'absolute', left:10, top:'50%', transform:'translateY(-50%)', color:'#6b7280' }}/>
+                        <input type="text" placeholder="Rechercher…" value={searchQuery} onChange={e=>setSearchQuery(e.target.value)} style={{ paddingLeft:30, width:220 }}/>
+                      </div>
+                      <select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)} style={{ width:'auto' }}>
+                        <option value="all">Tous</option>
+                        <option value="en_attente">En attente</option>
+                        <option value="en_preparation">En préparation</option>
+                        <option value="en_livraison">En livraison</option>
+                        <option value="livre">Livrée</option>
+                        <option value="annule">Annulée</option>
+                      </select>
+                      <button onClick={()=>{ const ws=XLSX.utils.json_to_sheet(orders); const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Commandes'); XLSX.writeFile(wb,`commandes_${Date.now()}.xlsx`); toast.success('Export OK'); }} className="btn-secondary">
+                        <Download size={14}/> Export
+                      </button>
+                    </div>
+                  </div>
+
+                  {filteredOrders.length === 0 ? (
+                    <div style={{ padding:'40px 0', textAlign:'center', color:'#6b7280', fontSize:13 }}>
+                      Aucune commande ne correspond à cette recherche.
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{ overflowX:'auto' }}>
+                        <table style={{ width:'100%', borderCollapse:'collapse' }}>
+                          <thead>
+                            <tr style={{ borderBottom:'1px solid #1f2127' }}>
+                              {['N°','Date','Client','Produit','Vendeur','Région','Montant','Commission','Statut','Actions'].map(h=>(
+                                <th key={h} style={{ textAlign:'left', padding:'10px 8px', fontSize:11, color:'#6b7280', letterSpacing:0.8, textTransform:'uppercase' }}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {paginatedOrders.map(order => (
+                              <tr key={order.id} style={{ borderBottom:'1px solid #1a1c22' }}>
+                                <td style={{ padding:'10px 8px', fontFamily:'monospace', fontSize:12, color:'#10b981' }}>{order.orderNumber}</td>
+                                <td style={{ padding:'10px 8px', fontSize:12, whiteSpace:'nowrap' }}>
+                                  {toDateSafe(order.createdAt) ? (
+                                    <>
+                                      <div>{formatDateSafe(order.createdAt, { day:'2-digit', month:'2-digit', year:'2-digit' })}</div>
+                                      <div style={{ color:'#6b7280', fontSize:11 }}>{toDateSafe(order.createdAt)!.toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' })}</div>
+                                    </>
+                                  ) : '—'}
+                                </td>
+                                <td style={{ padding:'10px 8px', fontSize:13 }}>
+                                  <div>{order.userName ?? order.farmer ?? '—'}</div>
+                                  <div style={{ color:'#6b7280', fontSize:11 }}>{getOrderCustomerPhone(order)}</div>
+                                </td>
+                                <td style={{ padding:'10px 8px', fontSize:13, maxWidth:220 }}>
+                                  {order.items && order.items.length > 0 ? (
+                                    <div style={{ display:'flex', flexDirection:'column', gap:2 }}>
+                                      {order.items.slice(0,2).map((it,idx)=>(
+                                        <div key={idx} style={{ display:'flex', alignItems:'baseline', gap:5, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                                          <span style={{ fontWeight:600 }}>{it.productName ?? 'Produit inconnu'}</span>
+                                          <span style={{ color:'#6b7280', fontSize:11 }}>×{it.quantity ?? 1}</span>
+                                        </div>
+                                      ))}
+                                      {order.items.length > 2 && (
+                                        <span style={{ fontSize:11, color:'#6b7280' }}>+{order.items.length - 2} autre{order.items.length - 2 > 1 ? 's' : ''}</span>
+                                      )}
+                                    </div>
+                                  ) : (order.category ?? '—')}
+                                </td>
+                                <td style={{ padding:'10px 8px', fontSize:12 }}>{getOrderSellerName(order)}</td>
+                                <td style={{ padding:'10px 8px', fontSize:12 }}>{order.sellerRegion ?? order.region ?? '—'}</td>
+                                <td style={{ padding:'10px 8px', fontWeight:600 }}>{(order.amount ?? 0).toLocaleString()} FCFA</td>
+                                <td style={{ padding:'10px 8px', color:'#f59e0b', fontSize:12 }}>{Math.round((order.amount ?? 0)*COMMISSION_RATE).toLocaleString()} FCFA</td>
+                                <td style={{ padding:'10px 8px' }}>
+                                  <StatusBadge status={order.status}/>
+                                  {order.delivererId && (
+                                    <div style={{ fontSize:11, color:'#6b7280', marginTop:4 }}>
+                                      🚴 {order.delivererName} · {order.delivererPhone}
+                                      {order.tracking?.phase && (
+                                        <span style={{
+                                          marginLeft:6, padding:'1px 6px', borderRadius:6, fontSize:10, fontWeight:600,
+                                          background: order.tracking.phase === 'arrived' ? 'rgba(16,185,129,.15)' : 'rgba(6,182,212,.15)',
+                                          color: order.tracking.phase === 'arrived' ? '#10b981' : '#06b6d4',
+                                        }}>
+                                          {{ assigned: 'Attribué', en_route: 'En route', approaching: 'Proche', arrived: 'Arrivé' }[order.tracking.phase]}
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
+                                </td>
+                                <td style={{ padding:'10px 8px' }}>
+                                  <div style={{ display:'flex', gap:6 }}>
+                                    <select value={order.status} onChange={e=>updateOrderStatus(order.id!,e.target.value as Order['status'])} style={{ width:'auto', padding:'5px 8px', fontSize:11 }}>
+                                      <option value="en_attente">En attente</option>
+                                      <option value="en_preparation">En préparation</option>
+                                      <option value="en_livraison">En livraison</option>
+                                      <option value="livre">Livrée</option>
+                                      <option value="annule">Annulée</option>
+                                    </select>
+                                    {(order.status === 'en_attente' || (order.status === 'en_preparation' && !order.delivererId)) && (
+                                      <button onClick={()=>{ setAssignOrderId(order.id!); setAssignOrderNumber(order.orderNumber); setShowAssignModal(true); }} className="btn-secondary" style={{ padding:'5px 10px', fontSize:11 }}>
+                                        Assigner
+                                      </button>
+                                    )}
                                   </div>
-                                ))}
-                                {order.items.length > 2 && (
-                                  <span style={{ fontSize:11, color:'#6b7280' }}>+{order.items.length - 2} autre{order.items.length - 2 > 1 ? 's' : ''}</span>
-                                )}
-                              </div>
-                            ) : (order.category ?? '—')}
-                          </td>
-                          <td style={{ padding:'10px 8px', fontSize:12 }}>{getOrderSellerName(order)}</td>
-                          <td style={{ padding:'10px 8px', fontSize:12 }}>{order.sellerRegion ?? order.region ?? '—'}</td>
-                          <td style={{ padding:'10px 8px', fontWeight:600 }}>{(order.amount ?? 0).toLocaleString()} FCFA</td>
-                          <td style={{ padding:'10px 8px', color:'#f59e0b', fontSize:12 }}>{Math.round((order.amount ?? 0)*COMMISSION_RATE).toLocaleString()} FCFA</td>
-                          <td style={{ padding:'10px 8px' }}>
-                            <StatusBadge status={order.status}/>
-                            {order.delivererId && (
-                              <div style={{ fontSize:11, color:'#6b7280', marginTop:4 }}>
-                                🚴 {order.delivererName} · {order.delivererPhone}
-                                {order.tracking?.phase && (
-                                  <span style={{
-                                    marginLeft:6, padding:'1px 6px', borderRadius:6, fontSize:10, fontWeight:600,
-                                    background: order.tracking.phase === 'arrived' ? 'rgba(16,185,129,.15)' : 'rgba(6,182,212,.15)',
-                                    color: order.tracking.phase === 'arrived' ? '#10b981' : '#06b6d4',
-                                  }}>
-                                    {{ assigned: 'Attribué', en_route: 'En route', approaching: 'Proche', arrived: 'Arrivé' }[order.tracking.phase]}
-                                  </span>
-                                )}
-                              </div>
-                            )}
-                          </td>
-                          <td style={{ padding:'10px 8px' }}>
-                            <div style={{ display:'flex', gap:6 }}>
-                              <select value={order.status} onChange={e=>updateOrderStatus(order.id!,e.target.value as Order['status'])} style={{ width:'auto', padding:'5px 8px', fontSize:11 }}>
-                                <option value="en_attente">En attente</option>
-                                <option value="en_preparation">En préparation</option>
-                                <option value="en_livraison">En livraison</option>
-                                <option value="livre">Livrée</option>
-                                <option value="annule">Annulée</option>
-                              </select>
-                              {(order.status === 'en_attente' || (order.status === 'en_preparation' && !order.delivererId)) && (
-                                <button onClick={()=>{ setAssignOrderId(order.id!); setAssignOrderNumber(order.orderNumber); setShowAssignModal(true); }} className="btn-secondary" style={{ padding:'5px 10px', fontSize:11 }}>
-                                  Assigner
-                                </button>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      {totalPages > 1 && (
+                        <div style={{ display:'flex', justifyContent:'center', gap:8, marginTop:20 }}>
+                          <button disabled={currentPage===0} onClick={()=>setCurrentPage(p=>p-1)} className="btn-secondary" style={{ padding:'7px 14px' }}>← Préc.</button>
+                          <span style={{ padding:'7px 14px', color:'#6b7280', fontSize:13 }}>Page {currentPage+1}/{totalPages}</span>
+                          <button disabled={currentPage>=totalPages-1} onClick={()=>setCurrentPage(p=>p+1)} className="btn-secondary" style={{ padding:'7px 14px' }}>Suiv. →</button>
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
-                {totalPages > 1 && (
-                  <div style={{ display:'flex', justifyContent:'center', gap:8, marginTop:20 }}>
-                    <button disabled={currentPage===0} onClick={()=>setCurrentPage(p=>p-1)} className="btn-secondary" style={{ padding:'7px 14px' }}>← Préc.</button>
-                    <span style={{ padding:'7px 14px', color:'#6b7280', fontSize:13 }}>Page {currentPage+1}/{totalPages}</span>
-                    <button disabled={currentPage>=totalPages-1} onClick={()=>setCurrentPage(p=>p+1)} className="btn-secondary" style={{ padding:'7px 14px' }}>Suiv. →</button>
-                  </div>
-                )}
               </div>
             )}
 
             {/* ═══ UTILISATEURS ═══════════════════════════════ */}
             {activeTab === 'users' && (
               <div className="animate-fadeIn">
-                {/* Stats par rôle */}
-                <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))', gap:14, marginBottom:20 }}>
+
+                {/* ── Hero cosmique ── */}
+                <div className="divine-hero" style={{
+                  position:'relative', overflow:'hidden', borderRadius:24, padding:'30px 26px', marginBottom:24,
+                  background:'radial-gradient(ellipse 130% 90% at 15% -15%,rgba(236,72,153,0.16),transparent 55%), radial-gradient(ellipse 100% 80% at 100% 100%,rgba(139,92,246,0.14),transparent 55%), linear-gradient(135deg,#0a070a 0%,#170f1c 50%,#0a0d12 100%)',
+                  border:'1px solid rgba(236,72,153,0.35)', boxShadow:'0 20px 60px rgba(0,0,0,0.35)',
+                }}>
+                  <div style={{ position:'absolute', top:-100, right:-70, width:280, height:280, pointerEvents:'none' }}>
+                    <div className="divine-halo" style={{ width:'100%', height:'100%', borderRadius:'50%', background:'conic-gradient(from 0deg,rgba(236,72,153,0.3),transparent 30%,transparent 60%,rgba(139,92,246,0.28),transparent 90%)' }}/>
+                  </div>
                   {[
-                    { label:'Total',    value:userStatsByRole.total,    color:'#e5e7eb', role:'all' },
-                    { label:'Clients',  value:userStatsByRole.client,   color:'#10b981', role:'client' },
-                    { label:'Vendeurs', value:userStatsByRole.seller,   color:'#06b6d4', role:'seller' },
-                    { label:'Livreurs', value:userStatsByRole.delivery, color:'#f59e0b', role:'delivery' },
-                    { label:'Admins',   value:userStatsByRole.admin,    color:'#8b5cf6', role:'admin' },
+                    { top:'20%', left:'68%', size:3, delay:'0s' },
+                    { top:'58%', left:'80%', size:2, delay:'.9s' },
+                    { top:'38%', left:'90%', size:4, delay:'1.6s' },
+                  ].map((p,i)=>(
+                    <span key={i} className="divine-sparkle" style={{ top:p.top, left:p.left, width:p.size, height:p.size, background:'#f9a8d4', boxShadow:'0 0 8px 2px rgba(249,168,212,0.8)', animationDelay:p.delay }}/>
+                  ))}
+                  <div style={{ display:'flex', alignItems:'center', gap:16, position:'relative', zIndex:1 }}>
+                    <div style={{ position:'relative', width:56, height:56, flexShrink:0 }}>
+                      <div style={{ position:'absolute', inset:0, borderRadius:16, animation:'ringExpand 2.4s ease-out infinite', border:'1px solid rgba(236,72,153,0.5)' }}/>
+                      <div style={{ width:56, height:56, borderRadius:16, display:'flex', alignItems:'center', justifyContent:'center', background:'linear-gradient(135deg,#ec4899,#f472b6,#be185d)', boxShadow:'0 8px 28px rgba(236,72,153,0.5), inset 0 1px 2px rgba(255,255,255,0.5)' }}>
+                        <Users size={26} color="#3f0620"/>
+                      </div>
+                    </div>
+                    <div>
+                      <h2 className="divine-shimmer-text" style={{
+                        fontSize:26, fontWeight:800, letterSpacing:0.3, margin:0,
+                        backgroundImage:'linear-gradient(110deg,#be185d 10%,#f9a8d4 35%,#fff 50%,#f9a8d4 65%,#be185d 90%)',
+                        WebkitBackgroundClip:'text', backgroundClip:'text', color:'transparent',
+                      }}>
+                        Utilisateurs
+                      </h2>
+                      <p style={{ fontSize:11, color:'rgba(255,255,255,0.5)', marginTop:4, letterSpacing:1.6, textTransform:'uppercase', display:'flex', alignItems:'center', gap:6 }}>
+                        <Star size={10} color="#ec4899" fill="#ec4899"/> {userStatsByRole.total} compte{userStatsByRole.total>1?'s':''} · AgriMarché
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Stats par rôle */}
+                <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))', gap:14, marginBottom:24 }}>
+                  {[
+                    { label:'Total',    value:userStatsByRole.total,    color:'#e5e7eb', role:'all',      icon:<Users size={16}/> },
+                    { label:'Clients',  value:userStatsByRole.client,   color:'#10b981', role:'client',    icon:<UserCheck size={16}/> },
+                    { label:'Vendeurs', value:userStatsByRole.seller,   color:'#06b6d4', role:'seller',    icon:<Leaf size={16}/> },
+                    { label:'Livreurs', value:userStatsByRole.delivery, color:'#f59e0b', role:'delivery',  icon:<Truck size={16}/> },
+                    { label:'Admins',   value:userStatsByRole.admin,    color:'#8b5cf6', role:'admin',     icon:<Shield size={16}/> },
                   ].map(s => (
                     <button
                       key={s.label}
                       onClick={()=>setUserRoleFilter(s.role)}
-                      className="glass-card"
-                      style={{ padding:14, textAlign:'left', cursor:'pointer', border: userRoleFilter===s.role ? `1px solid ${s.color}` : '1px solid transparent' }}
+                      className="divine-card"
+                      style={{
+                        padding:16, textAlign:'left', cursor:'pointer', borderRadius:16,
+                        background: userRoleFilter===s.role ? `linear-gradient(160deg,${s.color}18,rgba(10,12,16,.98))` : 'linear-gradient(160deg,rgba(255,255,255,0.03),rgba(10,12,16,.98))',
+                        border: userRoleFilter===s.role ? `1px solid ${s.color}60` : '1px solid rgba(255,255,255,0.08)',
+                        boxShadow: userRoleFilter===s.role ? `0 8px 24px ${s.color}20` : 'none',
+                      }}
                     >
-                      <div style={{ fontSize:22, fontWeight:700, color:s.color }}>{s.value}</div>
-                      <div style={{ fontSize:11, color:'#6b7280', marginTop:2 }}>{s.label}</div>
+                      <div style={{ display:'flex', alignItems:'center', gap:6, color:s.color, marginBottom:8 }}>
+                        {s.icon}
+                        <span style={{ fontSize:10, letterSpacing:0.8, textTransform:'uppercase', color:'#8b93a1' }}>{s.label}</span>
+                      </div>
+                      <div style={{ fontSize:24, fontWeight:800, color:s.color, textShadow:`0 0 20px ${s.color}30` }}>{s.value}</div>
                     </button>
                   ))}
                 </div>
 
-                <div className="glass-card animate-fadeIn" style={{ padding:20 }}>
+                <div className="divine-card" style={{ padding:20, borderRadius:20, background:'linear-gradient(160deg,rgba(236,72,153,0.04),rgba(10,12,16,.98))', border:'1px solid rgba(236,72,153,0.15)' }}>
                   <div style={{ display:'flex', flexWrap:'wrap', justifyContent:'space-between', alignItems:'center', gap:12, marginBottom:20 }}>
                     <div>
-                      <h2 style={{ fontSize:18, fontWeight:700 }}>👥 Utilisateurs</h2>
+                      <h2 style={{ fontSize:16, fontWeight:700, display:'flex', alignItems:'center', gap:8 }}>
+                        <Users size={16} color="#ec4899"/> Liste des utilisateurs
+                      </h2>
                       <p style={{ fontSize:12, color:'#6b7280', marginTop:4 }}>
                         {filteredUsers.length} compte{filteredUsers.length>1?'s':''}
                         {filteredUsers.length !== users.length && ` (sur ${users.length})`}
@@ -2860,11 +3439,50 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                         <option value="recent">Plus récents</option>
                         <option value="name">Nom (A-Z)</option>
                         <option value="role">Rôle</option>
+                        <option value="lastActive">Dernière activité</option>
                       </select>
+                      <div style={{ display:'flex', borderRadius:8, overflow:'hidden', border:'1px solid #1f2127' }}>
+                        <button
+                          onClick={()=>setUserViewMode('liste')}
+                          className="btn-secondary"
+                          style={{ padding:'7px 12px', fontSize:12, borderRadius:0, border:'none', background: userViewMode==='liste' ? 'rgba(236,72,153,0.14)' : 'transparent', color: userViewMode==='liste' ? '#ec4899' : '#9ca3af' }}
+                        >
+                          Liste
+                        </button>
+                        <button
+                          onClick={()=>setUserViewMode('carte')}
+                          className="btn-secondary"
+                          style={{ padding:'7px 12px', fontSize:12, borderRadius:0, border:'none', background: userViewMode==='carte' ? 'rgba(236,72,153,0.14)' : 'transparent', color: userViewMode==='carte' ? '#ec4899' : '#9ca3af', display:'flex', alignItems:'center', gap:5 }}
+                        >
+                          <MapPin size={12}/> Carte
+                        </button>
+                      </div>
                     </div>
                   </div>
 
-                  {filteredUsers.length === 0 ? (
+                  {userViewMode === 'carte' ? (
+                    <div>
+                      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12 }}>
+                        <p style={{ fontSize:12, color:'#6b7280' }}>
+                          📍 {usersGeolocatedCount} utilisateur{usersGeolocatedCount>1?'s':''} géolocalisé{usersGeolocatedCount>1?'s':''}
+                          {usersGeolocatedCount !== filteredUsers.length && ` (sur ${filteredUsers.length} affiché${filteredUsers.length>1?'s':''} — les autres n'ont pas encore de position enregistrée)`}
+                        </p>
+                        <div style={{ display:'flex', gap:12, fontSize:11, color:'#9ca3af' }}>
+                          <span style={{ display:'flex', alignItems:'center', gap:4 }}><span style={{ width:9, height:9, borderRadius:'50%', background:'#10b981', display:'inline-block' }}/> Client</span>
+                          <span style={{ display:'flex', alignItems:'center', gap:4 }}><span style={{ width:9, height:9, borderRadius:'50%', background:'#f97316', display:'inline-block' }}/> Vendeur</span>
+                          <span style={{ display:'flex', alignItems:'center', gap:4 }}><span style={{ width:9, height:9, borderRadius:'50%', background:'#6366f1', display:'inline-block' }}/> Livreur</span>
+                          <span style={{ display:'flex', alignItems:'center', gap:4 }}><span style={{ width:9, height:9, borderRadius:'50%', background:'#8b5cf6', display:'inline-block' }}/> Admin</span>
+                        </div>
+                      </div>
+                      {usersGeolocatedCount === 0 ? (
+                        <div style={{ padding:'40px 0', textAlign:'center', color:'#6b7280', fontSize:13 }}>
+                          Aucun utilisateur de cette sélection n'a encore de position enregistrée.
+                        </div>
+                      ) : (
+                        <FleetMap points={usersMapPoints} height={460} selectedId={userMapSelectedId} />
+                      )}
+                    </div>
+                  ) : filteredUsers.length === 0 ? (
                     <div style={{ padding:'40px 0', textAlign:'center', color:'#6b7280', fontSize:13 }}>
                       Aucun utilisateur ne correspond à cette recherche.
                     </div>
@@ -2874,8 +3492,8 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                         <table style={{ width:'100%', borderCollapse:'collapse' }}>
                           <thead>
                             <tr style={{ borderBottom:'1px solid #1f2127' }}>
-                              {['Utilisateur','Email','Téléphone','Rôle','Inscription','Actions'].map(h=>(
-                                <th key={h} style={{ textAlign:'left', padding:'10px 8px', fontSize:11, color:'#6b7280' }}>{h}</th>
+                              {['Utilisateur','Email','Téléphone','Rôle','Localisation','Activité','Inscription','Actions'].map(h=>(
+                                <th key={h} style={{ textAlign:'left', padding:'10px 8px', fontSize:11, color:'#6b7280', letterSpacing:0.8, textTransform:'uppercase' }}>{h}</th>
                               ))}
                             </tr>
                           </thead>
@@ -2883,19 +3501,28 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                             {paginatedUsers.map(user => {
                               const productCount = user.role === 'seller' ? (sellerProductCounts.get(user.id!) || 0) : null;
                               const roleColors: Record<string,string> = { client:'#10b981', seller:'#06b6d4', delivery:'#f59e0b', admin:'#8b5cf6' };
+                              const activity = getActivityInfo(user.lastActiveAt);
+                              const returnFreq = getReturnFrequencyInfo(user.recentVisits);
+                              const registeredAt = toDateSafe(user.createdAt);
+                              const registeredDaysAgo = registeredAt ? Math.floor((Date.now()-registeredAt.getTime())/86400000) : null;
                               return (
-                                <tr key={user.id} style={{ borderBottom:'1px solid #1a1c22' }}>
+                                <tr key={user.id} style={{ borderBottom:'1px solid #1a1c22', transition:'background .2s' }}>
                                   <td style={{ padding:'10px 8px' }}>
                                     <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-                                      {user.avatar ? (
-                                        <img src={user.avatar} alt="" style={{ width:32, height:32, borderRadius:'50%', objectFit:'cover', flexShrink:0 }}/>
-                                      ) : (
-                                        <div style={{ width:32, height:32, borderRadius:'50%', background:'rgba(16,185,129,.1)', display:'flex', alignItems:'center', justifyContent:'center', fontWeight:600, flexShrink:0 }}>
-                                          {user.displayName?.charAt(0) ?? '?'}
-                                        </div>
-                                      )}
+                                      <div style={{ position:'relative', width:34, height:34, flexShrink:0 }}>
+                                        {user.avatar ? (
+                                          <img src={user.avatar} alt="" style={{ width:34, height:34, borderRadius:'50%', objectFit:'cover', border:`1.5px solid ${roleColors[user.role]}50` }}/>
+                                        ) : (
+                                          <div style={{ width:34, height:34, borderRadius:'50%', background:`${roleColors[user.role]}18`, border:`1.5px solid ${roleColors[user.role]}50`, display:'flex', alignItems:'center', justifyContent:'center', fontWeight:700, fontSize:13, color:roleColors[user.role] }}>
+                                            {user.displayName?.charAt(0)?.toUpperCase() ?? '?'}
+                                          </div>
+                                        )}
+                                        {activity.certainty === 'confirmed' && activity.label === 'En ligne' && (
+                                          <span style={{ position:'absolute', bottom:-1, right:-1, width:10, height:10, borderRadius:'50%', background:'#10b981', border:'2px solid #0a0c10', boxShadow:'0 0 6px rgba(16,185,129,0.8)' }}/>
+                                        )}
+                                      </div>
                                       <div>
-                                        <div style={{ fontSize:13 }}>{user.displayName || '—'}</div>
+                                        <div style={{ fontSize:13, fontWeight:500 }}>{user.displayName || '—'}</div>
                                         {productCount !== null && (
                                           <div style={{ fontSize:10, color:'#6b7280' }}>{productCount} produit{productCount>1?'s':''}</div>
                                         )}
@@ -2920,16 +3547,84 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                                       <option value="admin">Admin</option>
                                     </select>
                                   </td>
-                                  <td style={{ padding:'10px 8px', fontSize:12, color:'#6b7280' }}>{user.createdAt?.toDate?.().toLocaleDateString?.() ?? '—'}</td>
+                                  <td style={{ padding:'10px 8px' }}>
+                                    {isValidCoordinate(user.lat, user.lng) ? (
+                                      <button
+                                        onClick={() => { setUserMapSelectedId(user.id!); setUserViewMode('carte'); }}
+                                        title="Voir sur la carte"
+                                        className="btn-secondary"
+                                        style={{ padding:'5px 9px', fontSize:11, display:'flex', alignItems:'center', gap:5, color:'#10b981', borderColor:'rgba(16,185,129,0.35)', maxWidth:150 }}
+                                      >
+                                        <MapPin size={12}/>
+                                        <span style={{ overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                                          {user.locationAddress || 'Voir sur la carte'}
+                                        </span>
+                                      </button>
+                                    ) : (
+                                      <span style={{ fontSize:11, color:'#4b5563', fontStyle:'italic' }}>Non renseignée</span>
+                                    )}
+                                  </td>
+                                  <td style={{ padding:'10px 8px' }}>
+                                    {/* ⚠️ FIX : distingue désormais "on n'a aucune mesure"
+                                        (pastille creuse, libellé neutre) de "on sait avec
+                                        certitude qu'il n'est pas revenu depuis longtemps"
+                                        (pastille pleine colorée) — voir getActivityInfo. */}
+                                    <div style={{ display:'flex', alignItems:'center', gap:6, fontSize:12, color:activity.color, fontStyle: activity.certainty==='no_data' ? 'italic' : 'normal' }}>
+                                      <span style={{
+                                        width:7, height:7, borderRadius:'50%', flexShrink:0,
+                                        background: activity.certainty==='no_data' ? 'transparent' : activity.dotColor,
+                                        border: activity.certainty==='no_data' ? '1.5px solid #4b5563' : 'none',
+                                      }}/>
+                                      {activity.label}
+                                      {returnFreq.status === 'atRisk' && (
+                                        <span title={returnFreq.label} style={{ color:'#ef4444' }}>⚠️</span>
+                                      )}
+                                    </div>
+                                    {typeof user.sessionCount === 'number' && (
+                                      <div style={{ fontSize:10, color:'#6b7280', marginTop:2 }}>{user.sessionCount} visite{user.sessionCount>1?'s':''} mesurée{user.sessionCount>1?'s':''}</div>
+                                    )}
+                                  </td>
+                                  {/* ⚠️ FIX : createdAt est un Timestamp pour certains
+                                      comptes (créés côté serveur) mais une simple chaîne
+                                      ISO pour d'autres (AuthContext.signUp classique) —
+                                      `.toDate?.()` renvoyait silencieusement undefined
+                                      sur une chaîne, d'où "—" pour une partie des
+                                      utilisateurs. toDateSafe() accepte les deux. */}
+                                  <td style={{ padding:'10px 8px', fontSize:12, color:'#6b7280' }}>
+                                    {registeredAt ? (
+                                      <>
+                                        <div>{registeredAt.toLocaleDateString('fr-FR')}</div>
+                                        <div style={{ fontSize:10, color:'#4b5563', marginTop:1 }}>
+                                          {registeredDaysAgo===0 ? "Aujourd'hui" : registeredDaysAgo===1 ? 'Hier' : `il y a ${registeredDaysAgo} j`}
+                                        </div>
+                                      </>
+                                    ) : '—'}
+                                  </td>
                                   <td style={{ padding:'10px 8px', whiteSpace:'nowrap' }}>
-                                    <button onClick={()=>setSelectedUser(user)} className="btn-secondary" style={{ padding:'5px 10px', fontSize:11, marginRight:6 }}><Eye size={11}/> Voir</button>
-                                    <button
-                                      onClick={()=>deleteUser(user.id!)}
-                                      className="btn-secondary"
-                                      style={{ padding:'5px 10px', fontSize:11, color:'#ef4444', borderColor:'#ef4444' }}
-                                    >
-                                      <X size={11}/> Suppr.
-                                    </button>
+                                    <div style={{ display:'flex', gap:6 }}>
+                                      <button onClick={()=>setSelectedUser(user)} title="Voir le profil" className="btn-secondary" style={{ padding:'6px 9px', fontSize:11, display:'flex', alignItems:'center', gap:5 }}>
+                                        <Eye size={12}/> Voir
+                                      </button>
+                                      {user.phone && (
+                                        <a
+                                          href={`https://wa.me/${user.phone.replace(/\D/g,'')}`}
+                                          target="_blank" rel="noopener noreferrer"
+                                          title="Contacter sur WhatsApp"
+                                          className="btn-secondary"
+                                          style={{ padding:'6px 9px', fontSize:11, color:'#10b981', borderColor:'rgba(16,185,129,0.35)', display:'flex', alignItems:'center' }}
+                                        >
+                                          <Phone size={12}/>
+                                        </a>
+                                      )}
+                                      <button
+                                        onClick={()=>deleteUser(user.id!)}
+                                        title="Supprimer le compte"
+                                        className="btn-secondary"
+                                        style={{ padding:'6px 9px', fontSize:11, color:'#ef4444', borderColor:'rgba(239,68,68,0.35)' }}
+                                      >
+                                        <X size={12}/>
+                                      </button>
+                                    </div>
                                   </td>
                                 </tr>
                               );
@@ -3072,6 +3767,24 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                           <div style={{ padding:'2px 10px', fontSize:10, color:'#6b7280' }}>
                             Marge admin : {computeAdminMargin(productEditForm.basePrice).toLocaleString()} FCFA ({Math.round(ADMIN_MARGIN_RATE*100)}%)
                           </div>
+                          <textarea value={productEditForm.description} onChange={e=>setProductEditForm(f=>({...f,description:e.target.value}))} placeholder="Description (visible acheteur)" rows={3}
+                            style={{ padding:'8px 10px', borderRadius:8, border:'1px solid rgba(255,255,255,0.12)', background:'rgba(255,255,255,0.05)', color:'#fff', fontSize:12, resize:'vertical', width:'100%' }} />
+                          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
+                            <div>
+                              <label style={{ display:'block', fontSize:10, color:'#6b7280', marginBottom:3 }}>Date de récolte</label>
+                              <input type="date" value={productEditForm.harvestDate} onChange={e=>setProductEditForm(f=>({...f,harvestDate:e.target.value}))}
+                                style={{ width:'100%', padding:'8px 10px', borderRadius:8, border:'1px solid rgba(255,255,255,0.12)', background:'rgba(255,255,255,0.05)', color:'#fff', fontSize:12 }} />
+                            </div>
+                            <div>
+                              <label style={{ display:'block', fontSize:10, color:'#6b7280', marginBottom:3 }}>Disponibilité</label>
+                              <select value={productEditForm.availability} onChange={e=>setProductEditForm(f=>({...f,availability:e.target.value as any}))}
+                                style={{ width:'100%', padding:'8px 10px', borderRadius:8, border:'1px solid rgba(255,255,255,0.12)', background:'rgba(255,255,255,0.05)', color:'#fff', fontSize:12 }}>
+                                <option value="disponible">✅ Disponible</option>
+                                <option value="sur_commande">⏳ Sur commande</option>
+                                <option value="a_venir">📅 Bientôt disponible</option>
+                              </select>
+                            </div>
+                          </div>
                         </div>
                         <div style={{ display:'flex', gap:8 }}>
                           <button onClick={cancelEditProduct} disabled={productSaving} className="btn-secondary" style={{ flex:1, justifyContent:'center' }}>Annuler</button>
@@ -3101,6 +3814,27 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                           <span style={{ color:'#6b7280' }}>Prix vendeur : {(pricingByProduct[product.id!] ?? inferBasePrice(product.price)).toLocaleString()} FCFA</span>
                           <span style={{ color:'#f59e0b', fontWeight:600 }}>+{computeAdminMargin(pricingByProduct[product.id!] ?? inferBasePrice(product.price)).toLocaleString()} FCFA marge</span>
                         </div>
+
+                        {/* Description saisie par le vendeur — auparavant invisible pour
+                            l'admin (et donc pour l'acheteur, faute de vérification) */}
+                        {product.description && (
+                          <p style={{ fontSize:12, color:'#9ca3af', marginBottom:10, lineHeight:1.5 }}>{product.description}</p>
+                        )}
+
+                        {(product.harvestDate || product.availability) && (
+                          <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginBottom:10 }}>
+                            {product.harvestDate && (
+                              <span style={{ fontSize:10, fontWeight:600, color:'#a78bfa', background:'rgba(167,139,250,.12)', padding:'3px 9px', borderRadius:20 }}>
+                                🗓️ Récolte : {new Date(product.harvestDate).toLocaleDateString('fr-FR')}
+                              </span>
+                            )}
+                            {product.availability && (
+                              <span style={{ fontSize:10, fontWeight:600, color:'#10b981', background:'rgba(16,185,129,.12)', padding:'3px 9px', borderRadius:20 }}>
+                                {product.availability === 'disponible' ? '✅ Disponible' : product.availability === 'sur_commande' ? '⏳ Sur commande' : '📅 Bientôt disponible'}
+                              </span>
+                            )}
+                          </div>
+                        )}
 
                         {(isOut || isLow) && (
                           <div style={{ marginBottom:10 }}>
@@ -3298,14 +4032,14 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                   <h3 style={{ fontSize:15, fontWeight:600, marginBottom:4, display:'flex', alignItems:'center', gap:8 }}>
                     <Brain size={17} color="#8b5cf6"/> Scoring crédit — Vendeurs actifs (Firestore)
                   </h3>
-                  <p style={{ fontSize:11, color:'#6b7280', marginBottom:16 }}>Calculé en temps réel depuis les données Firestore : commandes, paiements, ancienneté du compte</p>
+                  <p style={{ fontSize:11, color:'#6b7280', marginBottom:16 }}>Scorecard pondéré (ponctualité, volume, revenu, ancienneté, endettement, garantie) — pondérations fixes et déterministes, calculé depuis les données Firestore</p>
                   <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(300px,1fr))', gap:12 }}>
                     {users.filter(u=>u.role==='seller').slice(0,6).map(seller => {
                       // ⚠️ FIX : o.farmerId n'existe jamais (checkout écrit sellerId) —
                       // cette liste était donc toujours vide pour chaque vendeur.
                       const sellerOrders = orders.filter(o=>o.sellerId===seller.uid||o.sellerId===seller.id);
                       const paidOrders   = sellerOrders.filter(o=>o.status==='livre');
-                      const accountAgeMs = seller.createdAt?.toDate ? Date.now()-seller.createdAt.toDate().getTime() : 0;
+                      const accountAgeMs = toDateSafe(seller.createdAt) ? Date.now()-toDateSafe(seller.createdAt)!.getTime() : 0;
                       const accountAgeMo = Math.floor(accountAgeMs/(1000*60*60*24*30));
                       const sellerLoans  = loans.filter(l=>l.sellerId===seller.uid||l.sellerId===seller.id);
                       const totalDebt    = sellerLoans.filter(l=>l.status==='active'||l.status==='approved').reduce((s,l)=>s+(l.remainingBalance??0),0);
@@ -3809,7 +4543,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                               <tr key={c.id} style={{ borderBottom:'1px solid #1a1c22' }}>
                                 <td style={{ padding:'10px', fontFamily:'monospace', color:'#10b981', fontWeight:600 }}>{c.id}</td>
                                 <td style={{ padding:'10px', color:'#9ca3af' }}>{c.days}j</td>
-                                <td style={{ padding:'10px', color:'#6b7280' }}>{c.createdAt?.toDate?.().toLocaleDateString('fr-FR')??'—'}</td>
+                                <td style={{ padding:'10px', color:'#6b7280' }}>{formatDateSafe(c.createdAt)}</td>
                                 <td style={{ padding:'10px', color:'#6b7280' }}>{c.expiresAt?.toDate?.().toLocaleDateString('fr-FR')??'—'}</td>
                                 <td style={{ padding:'10px' }}>
                                   {codesTab==='used'
@@ -4497,7 +5231,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                             <div style={{ flex:1, minWidth:0 }}>
                               <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:4, gap:8 }}>
                                 <span style={{ fontWeight:600, fontSize:13 }}>{notif.title}</span>
-                                <span style={{ fontSize:10, color:'#4b5563', flexShrink:0 }}>{notif.createdAt?.toDate?.().toLocaleString?.() ?? ''}</span>
+                                <span style={{ fontSize:10, color:'#4b5563', flexShrink:0 }}>{toDateSafe(notif.createdAt)?.toLocaleString('fr-FR') ?? ''}</span>
                               </div>
                               <p style={{ fontSize:12, color:'#9ca3af', marginBottom:6 }}>{notif.body}</p>
                               <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
@@ -5001,7 +5735,9 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                       </label>
                     </div>
                     <p style={{ fontSize:10, color:'#6b7280', marginBottom:10 }}>
-                      "Inactif" = pas de commande depuis N jours (pas de suivi de dernière connexion dans l'app).
+                      "Inactif" = pas de commande depuis N jours. Le rythme réel de connexion (dernière
+                      activité, fréquence de retour) est visible dans l'onglet Utilisateurs, mais n'est
+                      pas encore utilisé comme critère ici.
                     </p>
                     <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
                       <div>
@@ -5022,6 +5758,52 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                         {inactiveClientsHistory.map(h => (
                           <div key={h.id} style={{ padding:8, borderRadius:8, background:'#1f2127', fontSize:11, color:'#6b7280' }}>
                             {h.clientsChecked} client(s) vérifié(s) · {h.clientsNotified} relancé(s)
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ borderTop:'1px solid #1a1c22', paddingTop:14, marginBottom:14 }}>
+                    <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:10 }}>
+                      <h4 style={{ fontSize:13, fontWeight:600 }}>Inscription non terminée</h4>
+                      <label style={{ display:'flex', alignItems:'center', gap:6, cursor: pendingSignupLoading ? 'wait' : 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          disabled={pendingSignupLoading || pendingSignupSaving}
+                          checked={pendingSignupSettings.enabled}
+                          onChange={e => savePendingSignupSettings({ ...pendingSignupSettings, enabled: e.target.checked })}
+                          style={{ width:'auto', cursor:'pointer' }}
+                        />
+                        <span style={{ fontSize:12, color: pendingSignupSettings.enabled ? '#10b981' : '#6b7280' }}>
+                          {pendingSignupSettings.enabled ? 'Activée' : 'Désactivée'}
+                        </span>
+                      </label>
+                    </div>
+                    <p style={{ fontSize:10, color:'#6b7280', marginBottom:10 }}>
+                      Visiteurs ayant autorisé les notifications mais jamais créé de compte (token FCM
+                      capté avant inscription, voir AuthContext.migratePendingFcmToken). Relancé une
+                      seule fois — jamais deux fois un inconnu — puis abandonné après le délai d'expiration.
+                    </p>
+                    <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
+                      <div>
+                        <label style={{ fontSize:11, color:'#6b7280', marginBottom:6, display:'block' }}>Relance après (h)</label>
+                        <input type="number" min={1} value={pendingSignupSettings.thresholdHours}
+                          onChange={e => setPendingSignupSettings({ ...pendingSignupSettings, thresholdHours: Number(e.target.value) || 1 })}
+                          onBlur={() => savePendingSignupSettings(pendingSignupSettings)} />
+                      </div>
+                      <div>
+                        <label style={{ fontSize:11, color:'#6b7280', marginBottom:6, display:'block' }}>Abandon après (jours)</label>
+                        <input type="number" min={1} value={pendingSignupSettings.expireAfterDays}
+                          onChange={e => setPendingSignupSettings({ ...pendingSignupSettings, expireAfterDays: Number(e.target.value) || 1 })}
+                          onBlur={() => savePendingSignupSettings(pendingSignupSettings)} />
+                      </div>
+                    </div>
+                    {pendingSignupHistory.length > 0 && (
+                      <div style={{ marginTop:10, display:'flex', flexDirection:'column', gap:6, maxHeight:140, overflowY:'auto' }}>
+                        {pendingSignupHistory.map(h => (
+                          <div key={h.id} style={{ padding:8, borderRadius:8, background:'#1f2127', fontSize:11, color:'#6b7280' }}>
+                            {h.checked} relancé(s) · {h.expired} abandonné(s)
                           </div>
                         ))}
                       </div>
@@ -5058,15 +5840,24 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                 <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(320px,1fr))', gap:16 }}>
                 {deliveryPersons.map(d=>{
                   const stats = delivererEarnings[d.id!] || { total:0, today:0, week:0, count:0 };
+                  const perf = delivererPerf[d.id!] || { avgTransitMinutes:null, avgReactionMinutes:null, onTimeRate:null, sampleSize:0 };
                   return (
                   <div key={d.id} className="glass-card" style={{ padding:16 }}>
                     <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:12 }}>
                       <div style={{ width:44, height:44, borderRadius:12, background:'rgba(16,185,129,.1)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:20, flexShrink:0 }}>🚚</div>
-                      <div><div style={{ fontWeight:600 }}>{d.displayName}</div><div style={{ fontSize:12, color:'#6b7280' }}>{d.phone||'—'}</div></div>
+                      <div style={{ flex:1 }}><div style={{ fontWeight:600 }}>{d.displayName}</div><div style={{ fontSize:12, color:'#6b7280' }}>{d.phone||'—'}</div></div>
+                      {/* ✅ FIX : statut réel (était codé en dur "✅ Disponible" pour tout le monde) */}
+                      <span style={{
+                        fontSize:11, fontWeight:600, padding:'4px 10px', borderRadius:999,
+                        background: d.isAvailable ? 'rgba(16,185,129,.12)' : 'rgba(107,114,128,.15)',
+                        color: d.isAvailable ? '#10b981' : '#9ca3af',
+                      }}>
+                        {d.isAvailable ? '🟢 Disponible' : '⚪ Hors ligne'}
+                      </span>
                     </div>
 
                     {/* Gains — même donnée que "Mes gains" côté livreur */}
-                    <div style={{ display:'flex', gap:8, marginBottom:12 }}>
+                    <div style={{ display:'flex', gap:8, marginBottom:8 }}>
                       <div style={{ flex:1, background:'rgba(16,185,129,.08)', border:'1px solid rgba(16,185,129,.25)', borderRadius:10, padding:'8px 10px' }}>
                         <div style={{ fontSize:10, color:'#6b7280' }}>Total</div>
                         <div style={{ fontSize:14, fontWeight:700, color:'#10b981' }}>{stats.total.toLocaleString()} FCFA</div>
@@ -5081,7 +5872,25 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                       </div>
                     </div>
 
-                    {[['Véhicule',d.vehicle||'Non spécifié'],['Région',d.region||'—'],['Livraisons validées',String(stats.count)],['Statut','✅ Disponible']].map(([k,v])=>(
+                    {/* ✅ NOUVEAU — Perf réelle, même métriques que /admin/logistics::delivererStats */}
+                    <div style={{ display:'flex', gap:8, marginBottom:12 }}>
+                      <div style={{ flex:1, background:'#15171c', borderRadius:10, padding:'8px 10px' }}>
+                        <div style={{ fontSize:10, color:'#6b7280' }}>Trajet moyen</div>
+                        <div style={{ fontSize:13, fontWeight:700 }}>{formatDuration(perf.avgTransitMinutes)}</div>
+                      </div>
+                      <div style={{ flex:1, background:'#15171c', borderRadius:10, padding:'8px 10px' }}>
+                        <div style={{ fontSize:10, color:'#6b7280' }}>Réactivité</div>
+                        <div style={{ fontSize:13, fontWeight:700 }}>{formatDuration(perf.avgReactionMinutes)}</div>
+                      </div>
+                      <div style={{ flex:1, background:'#15171c', borderRadius:10, padding:'8px 10px' }}>
+                        <div style={{ fontSize:10, color:'#6b7280' }}>Ponctualité</div>
+                        <div style={{ fontSize:13, fontWeight:700, color: perf.onTimeRate===null?'#6b7280':perf.onTimeRate>=80?'#10b981':perf.onTimeRate>=50?'#f59e0b':'#ef4444' }}>
+                          {perf.onTimeRate===null ? '—' : `${Math.round(perf.onTimeRate)}%`}
+                        </div>
+                      </div>
+                    </div>
+
+                    {[['Véhicule',d.vehicle||'Non spécifié'],['Région',d.region||'—'],['Livraisons validées',String(stats.count)]].map(([k,v])=>(
                       <div key={k} style={{ display:'flex', justifyContent:'space-between', fontSize:12, padding:'6px 0', borderBottom:'1px solid #1a1c22' }}>
                         <span style={{ color:'#6b7280' }}>{k}</span><span>{v}</span>
                       </div>
@@ -5249,7 +6058,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                             {r.comment && <p style={{ fontSize:12, color:'#9ca3af', marginTop:6 }}>{r.comment}</p>}
                             <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginTop:6 }}>
                               <div style={{ fontSize:10, color:'#4b5563' }}>
-                                {r.createdAt?.toDate?.().toLocaleString?.() ?? ''}
+                                {toDateSafe(r.createdAt)?.toLocaleString('fr-FR') ?? ''}
                                 {r.userEmail ? ` · ${r.userEmail}` : ''}
                               </div>
                               <button
@@ -6044,7 +6853,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
             </div>
 
             {/* Aperçu activité */}
-            <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8, marginBottom:16 }}>
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8, marginBottom:8 }}>
               {selectedUser.role === 'seller' ? (
                 <>
                   <div style={{ background:'#1f2127', borderRadius:10, padding:'10px 8px', textAlign:'center' }}>
@@ -6064,7 +6873,45 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
               )}
             </div>
 
-            {[['Email',selectedUser.email],['Téléphone',selectedUser.phone||'—'],['Région',selectedUser.region||'—'],['Inscription',selectedUser.createdAt?.toDate?.().toLocaleDateString?.()??'—']].map(([k,v])=>(
+            <div style={{ background:'#1f2127', borderRadius:10, padding:'10px 8px', textAlign:'center', marginBottom:8 }}>
+              <div style={{ fontSize:18, fontWeight:700 }}>{selectedUser.sessionCount ?? 0}</div>
+              <div style={{ fontSize:10, color:'#6b7280' }}>Visite{(selectedUser.sessionCount ?? 0)>1?'s':''} mesurée{(selectedUser.sessionCount ?? 0)>1?'s':''}</div>
+            </div>
+
+            {(() => {
+              const rf = getReturnFrequencyInfo(selectedUser.recentVisits);
+              const statusColor = { unknown:'#6b7280', engaged:'#10b981', normal:'#06b6d4', atRisk:'#ef4444' }[rf.status];
+              return (
+                <div style={{ background:'#1f2127', borderRadius:10, padding:'10px 12px', marginBottom:16, borderLeft:`3px solid ${statusColor}` }}>
+                  <div style={{ fontSize:10, color:'#6b7280', marginBottom:2 }}>Rythme de retour</div>
+                  <div style={{ fontSize:12, color:statusColor, fontWeight:600 }}>{rf.label}</div>
+                </div>
+              );
+            })()}
+
+            {isValidCoordinate(selectedUser.lat, selectedUser.lng) && (
+              <div style={{ marginBottom:16 }}>
+                <div style={{ fontSize:10, color:'#6b7280', marginBottom:6, textTransform:'uppercase', letterSpacing:0.6 }}>Localisation</div>
+                <div style={{ borderRadius:12, overflow:'hidden', border:'1px solid #1f2127' }}>
+                  <FleetMap
+                    points={[{
+                      id: selectedUser.id!,
+                      lat: selectedUser.lat!,
+                      lng: selectedUser.lng!,
+                      label: selectedUser.displayName || 'Utilisateur',
+                      sublabel: selectedUser.locationAddress,
+                      kind: (ROLE_MAP_KIND[selectedUser.role] || 'client'),
+                    }]}
+                    height={180}
+                  />
+                </div>
+                {selectedUser.locationAddress && (
+                  <div style={{ fontSize:11, color:'#9ca3af', marginTop:6 }}>📍 {selectedUser.locationAddress}</div>
+                )}
+              </div>
+            )}
+
+            {[['Email',selectedUser.email],['Téléphone',selectedUser.phone||'—'],['Région',selectedUser.region||'—'],['Dernière activité',getActivityInfo(selectedUser.lastActiveAt).label],['Inscription',formatDateSafe(selectedUser.createdAt)]].map(([k,v])=>(
               <div key={k} style={{ display:'flex', justifyContent:'space-between', padding:'9px 0', borderBottom:'1px solid #1a1c22', fontSize:13 }}>
                 <span style={{ color:'#6b7280' }}>{k}</span><span>{v}</span>
               </div>

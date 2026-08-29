@@ -24,14 +24,40 @@ import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
 
+// ============================================================
+// FIREBASE ADMIN — accepte les deux formats de config utilisés dans ce
+// projet (voir /api/send-push/route.ts, qui documentait déjà cet écart) :
+// soit FIREBASE_SERVICE_ACCOUNT_JSON (un seul bloc JSON), soit les 3
+// variables séparées FIREBASE_PROJECT_ID / FIREBASE_CLIENT_EMAIL /
+// FIREBASE_PRIVATE_KEY. Cette route n'acceptait QUE le premier format —
+// même bug que periodic-checks et promote-stale-products, corrigé pareil.
+// ============================================================
 function getAdminApp() {
   if (getApps().length > 0) return getApps()[0];
+
   const json = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  if (!json || json.trim() === '') {
-    throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON manquant');
+  if (json && json.trim() !== '') {
+    let serviceAccount;
+    try {
+      serviceAccount = JSON.parse(json);
+    } catch {
+      throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON invalide (JSON malformé).');
+    }
+    return initializeApp({ credential: cert(serviceAccount) });
   }
-  const serviceAccount = JSON.parse(json);
-  return initializeApp({ credential: cert(serviceAccount) });
+
+  const projectId = process.env.FIREBASE_PROJECT_ID;
+  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+  const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
+
+  if (!projectId || !clientEmail || !privateKey) {
+    throw new Error(
+      "Firebase Admin n'est pas configuré : définis soit FIREBASE_SERVICE_ACCOUNT_JSON, " +
+      'soit FIREBASE_PROJECT_ID + FIREBASE_CLIENT_EMAIL + FIREBASE_PRIVATE_KEY dans .env.local.'
+    );
+  }
+
+  return initializeApp({ credential: cert({ projectId, clientEmail, privateKey }) });
 }
 
 const CORS_HEADERS = {
