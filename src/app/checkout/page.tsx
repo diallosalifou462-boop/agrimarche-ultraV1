@@ -1114,9 +1114,19 @@ export default function CheckoutPage() {
                         <p style={{ fontSize:14, fontWeight:500, color:'var(--ink)', marginBottom:2 }}>Utiliser ma position GPS</p>
                         {locationLoading
                           ? <p style={{ fontSize:12, color:'var(--ink-lt)' }}>Détection en cours…</p>
-                          : location?.city
-                            ? <p style={{ fontSize:12, color:'var(--gold)' }}>{location.city}{location.region ? `, ${location.region}` : ''}</p>
-                            : <p style={{ fontSize:12, color:'var(--ink-lt)' }}>Cliquez pour détecter automatiquement</p>}
+                          // 🐛 FIX : ce libellé affichait toujours `location.city` (la
+                          // détection GPS/IP brute), même après que le client ait
+                          // confirmé une position corrigée sur la carte. Résultat :
+                          // quoi qu'il confirme, ce bandeau continuait d'afficher
+                          // l'ancienne ville détectée automatiquement, donnant
+                          // l'impression que la correction n'avait jamais été prise
+                          // en compte. `manualLocation` doit être prioritaire ici,
+                          // comme il l'est déjà pour `effectiveLocation` plus bas.
+                          : manualLocation?.address
+                            ? <p style={{ fontSize:12, color:'#059669' }}>{manualLocation.address} (position corrigée)</p>
+                            : location?.city
+                              ? <p style={{ fontSize:12, color:'var(--gold)' }}>{location.city}{location.region ? `, ${location.region}` : ''}</p>
+                              : <p style={{ fontSize:12, color:'var(--ink-lt)' }}>Cliquez pour détecter automatiquement</p>}
                       </div>
                     </div>
                     <ChevronRight size={16} style={{ color:'var(--gold)', flexShrink:0 }} />
