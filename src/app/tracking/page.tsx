@@ -45,15 +45,22 @@ function TrackingMap({
   driverLoc,
   destLoc,
   animFrame,
+  onRouteInfo,
 }: {
   driverLoc?: Location;
   destLoc?: Location;
   animFrame: number;
+  /** Distance/durée RÉELLES par la route (OSRM), pas à vol d'oiseau — voir fetchRoadRoute plus bas. */
+  onRouteInfo?: (info: { distanceKm: number; durationMin: number } | null) => void;
 }) {
   const mapRef = useRef<HTMLDivElement>(null);
   const instanceRef = useRef<any>(null);
   const driverMarkerRef = useRef<any>(null);
   const routeRef = useRef<any>(null);
+  // Ligne droite pointillée — gardée en fallback visuel instantané tant que
+  // le vrai tracé routier n'est pas encore chargé (ou si OSRM échoue).
+  const straightLineRef = useRef<any>(null);
+  const lastRoutedFixRef = useRef<{ lat: number; lng: number; t: number } | null>(null);
 
   useEffect(() => {
     if (!document.getElementById('lf-css')) {
@@ -134,9 +141,10 @@ function TrackingMap({
           .bindPopup('<b>Votre adresse</b>');
       }
 
-      // Ligne pointillée verte
+      // Ligne droite pointillée — fallback instantané, remplacée dès que le
+      // vrai tracé routier (OSRM) est disponible (voir effet plus bas).
       if (driverLoc && destLoc) {
-        routeRef.current = L.polyline(
+        straightLineRef.current = L.polyline(
           [[driverLoc.lat, driverLoc.lng], [destLoc.lat, destLoc.lng]],
           { color: '#22c55e', weight: 2, dashArray: '6,10', opacity: 0.7 }
         ).addTo(map);
@@ -169,14 +177,100 @@ function TrackingMap({
     if (!(window as any).L || !instanceRef.current || !driverLoc) return;
     if (driverMarkerRef.current)
       driverMarkerRef.current.setLatLng([driverLoc.lat, driverLoc.lng]);
-    if (routeRef.current && destLoc)
-      routeRef.current.setLatLngs([
+    if (straightLineRef.current && destLoc)
+      straightLineRef.current.setLatLngs([
         [driverLoc.lat, driverLoc.lng],
         [destLoc.lat, destLoc.lng],
       ]);
   }, [animFrame]);
 
+  // ─── Vrai tracé routier (OSRM) ───────────────────────────────────────────
+  //
+  // 🐛 CORRECTIF — avant ça, la seule "route" affichée était une ligne
+  // droite à vol d'oiseau entre le livreur et la destination, et la
+  // distance/ETA du client (voir plus bas dans TrackingClientContent)
+  // étaient calculées sur cette même distance à vol d'oiseau. Sur le
+  // réseau routier réel de Dakar (rues en damier imparfait, échangeurs,
+  // zones côtières), ça sous-estime systématiquement la distance et donc
+  // l'ETA — l'app la plus visible du parcours client (celle qu'on regarde
+  // en boucle en attendant sa commande) affichait donc une position/ETA
+  // "fausse" par construction, même avec un GPS livreur parfaitement exact.
+  //
+  // Le reste du code sait déjà router via OSRM (voir MapInner.tsx, utilisé
+  // en amont pour l'estimation vendeur→client) — on applique la même
+  // logique ici, avec un throttle pour ne pas spammer l'API publique OSRM à
+  // chaque tick GPS (~1 fixe par seconde côté livreur) : on ne re-route que
+  // si le livreur a bougé de plus de 60 m OU que 20 s se sont écoulées.
+  useEffect(() => {
+    if (!driverLoc || !destLoc) {
+      onRouteInfo?.(null);
+      return;
+    }
+
+    const last = lastRoutedFixRef.current;
+    const movedM = last
+      ? haversineMeters(last.lat, last.lng, driverLoc.lat, driverLoc.lng)
+      : Infinity;
+    const elapsedMs = last ? Date.now() - last.t : Infinity;
+    if (movedM < 60 && elapsedMs < 20_000) return;
+
+    let cancelled = false;
+    lastRoutedFixRef.current = { lat: driverLoc.lat, lng: driverLoc.lng, t: Date.now() };
+
+    (async () => {
+      try {
+        const url = `https://router.project-osrm.org/route/v1/driving/${driverLoc.lng},${driverLoc.lat};${destLoc.lng},${destLoc.lat}?overview=full&geometries=geojson`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`OSRM ${res.status}`);
+        const data = await res.json();
+        const route = data?.routes?.[0];
+        if (!route || cancelled) return;
+
+        const L = (window as any).L;
+        const map = instanceRef.current;
+        if (!L || !map) return;
+
+        // GeoJSON = [lon, lat] — inversion obligatoire pour Leaflet [lat, lng].
+        const latlngs = route.geometry.coordinates.map((c: [number, number]) => [c[1], c[0]]);
+
+        if (routeRef.current) {
+          routeRef.current.setLatLngs(latlngs);
+        } else {
+          routeRef.current = L.polyline(latlngs, { color: '#22c55e', weight: 4, opacity: 0.85 }).addTo(map);
+        }
+        // Le vrai tracé est affiché : la ligne droite de secours s'efface
+        // (elle reste montée en mémoire, prête à réapparaître si jamais on
+        // repasse en fallback — cf. catch ci-dessous).
+        straightLineRef.current?.setStyle?.({ opacity: 0 });
+
+        onRouteInfo?.({ distanceKm: route.distance / 1000, durationMin: route.duration / 60 });
+      } catch {
+        if (cancelled) return;
+        // OSRM indisponible/hors-ligne : on rend la ligne droite visible en
+        // secours plutôt que de laisser la carte sans aucun tracé, et on
+        // prévient le parent qu'on n'a pas de distance routière fiable
+        // (il retombera sur son estimation à vol d'oiseau).
+        straightLineRef.current?.setStyle?.({ opacity: 0.7 });
+        onRouteInfo?.(null);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [driverLoc?.lat, driverLoc?.lng, destLoc?.lat, destLoc?.lng]);
+
   return <div ref={mapRef} style={{ width: '100%', height: '100%' }} />;
+}
+
+function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371000;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) *
+    Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
 }
 
 // ─── Stepper ───────────────────────────────────────────────────────────────────
@@ -268,6 +362,10 @@ function TrackingClientContent() {
   const [showItems, setShowItems] = useState(false);
   const [tick,      setTick]      = useState(0);
   const [animFrame, setAnimFrame] = useState(0);
+  // Distance/durée RÉELLES par la route (OSRM) — voir TrackingMap. `null`
+  // tant qu'on n'a pas encore de tracé, ou si OSRM est indisponible (dans
+  // ce cas le rendu retombe sur l'estimation à vol d'oiseau ci-dessous).
+  const [roadRoute, setRoadRoute] = useState<{ distanceKm: number; durationMin: number } | null>(null);
 
   // Ticker 1 s
   useEffect(() => {
@@ -336,9 +434,20 @@ function TrackingClientContent() {
       ? { lat: order.customerLocation.lat, lng: order.customerLocation.lng }
       : undefined;
 
-  const distance    = driverLoc && destLoc ? distanceKm(driverLoc, destLoc) : null;
+  // ✅ CORRECTIF — `distance`/`eta` utilisaient une distance à vol d'oiseau
+  // (Haversine), qui sous-estime systématiquement la vraie distance
+  // routière. On préfère maintenant `roadRoute` (OSRM, calculé par
+  // TrackingMap sur le tracé réel) dès qu'il est disponible ; la distance
+  // à vol d'oiseau reste un filet de sécurité si OSRM est indisponible
+  // (hors-ligne, service externe en panne) — mieux vaut une estimation
+  // approximative qu'aucune information.
+  const straightDistance = driverLoc && destLoc ? distanceKm(driverLoc, destLoc) : null;
+  const distance    = roadRoute?.distanceKm ?? straightDistance;
+  const isRoadDistance = roadRoute?.distanceKm != null;
   const speed       = order.tracking?.speed ?? 0;
-  const eta         = distance
+  const eta         = roadRoute?.durationMin != null
+    ? Math.max(1, Math.round(roadRoute.durationMin))
+    : distance
     ? speed > 0.5
       ? Math.max(1, Math.round((distance / (speed / 3.6)) / 60))
       : Math.max(1, Math.round(distance * 3.5))
@@ -376,7 +485,7 @@ function TrackingClientContent() {
       <div style={{ position: 'relative', height: '52vh', flexShrink: 0 }}>
 
         {driverLoc || destLoc ? (
-          <TrackingMap driverLoc={driverLoc} destLoc={destLoc} animFrame={animFrame} />
+          <TrackingMap driverLoc={driverLoc} destLoc={destLoc} animFrame={animFrame} onRouteInfo={setRoadRoute} />
         ) : (
           <div style={{
             width: '100%', height: '100%',
@@ -490,6 +599,11 @@ function TrackingClientContent() {
                   color: '#22c55e', fontSize: '10px', fontWeight: 600,
                   marginTop: '2px', fontFamily: "'DM Mono', monospace",
                 }}>~{eta} min</p>
+              )}
+              {!isRoadDistance && (
+                <p style={{ color: 'rgba(255,255,255,0.28)', fontSize: '8px', marginTop: '1px' }}>
+                  estimation à vol d'oiseau
+                </p>
               )}
             </div>
 

@@ -1263,6 +1263,16 @@ export const weeklyInterestDigest = onSchedule(
 // collecte, prête à être exploitée.
 
 const SEUIL_PROCHE_METRES = 500;
+// Au-delà de cette imprécision GPS, une lecture ne suffit plus à
+// conclure une proximité : mieux vaut attendre le point suivant (plus
+// précis) que de déclencher "votre livreur arrive !" alors qu'il pourrait
+// en réalité être à plusieurs centaines de mètres. Le filtrage de qualité
+// GPS déjà en place côté client (delivery/dashboard/page.tsx,
+// MIN_ACCEPTABLE_ACCURACY_M = 150) fait qu'une valeur au-delà de ce seuil
+// ne devrait plus vraiment atteindre Firestore — cette vérification est
+// une seconde ligne de défense, pas une redite : le serveur ne doit
+// jamais faire une confiance aveugle à ce que le client a écrit.
+const MAX_TRUSTED_ACCURACY_M = 300;
 
 function haversineMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
   const R = 6371000;
@@ -1272,6 +1282,23 @@ function haversineMeters(a: { lat: number; lng: number }, b: { lat: number; lng:
     Math.sin(dLat / 2) ** 2 +
     Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+// ⚠️ `!point.lat` rejette à tort une coordonnée valide de 0 (le classique
+// "falsy zero" bug) — sans conséquence pratique au Sénégal (jamais proche
+// de l'équateur/méridien 0), mais c'est le genre de vérification qui doit
+// être correcte par construction, pas "correcte parce que la zone
+// géographique actuelle l'arrange". Reprend la même logique que
+// isValidCoordinate côté client (lib/geo/distance.ts) pour que les deux
+// bouts du pipeline appliquent exactement la même définition d'une
+// coordonnée valide.
+function isValidCoordinate(point: any): point is { lat: number; lng: number } {
+  return (
+    !!point &&
+    typeof point.lat === 'number' && Number.isFinite(point.lat) &&
+    typeof point.lng === 'number' && Number.isFinite(point.lng) &&
+    Math.abs(point.lat) <= 90 && Math.abs(point.lng) <= 180
+  );
 }
 
 export const checkDeliveryProximity = functions.firestore.onDocumentUpdated(
@@ -1287,19 +1314,31 @@ export const checkDeliveryProximity = functions.firestore.onDocumentUpdated(
     const beforeLoc = before.tracking?.currentLocation;
     const afterLoc = after.tracking?.currentLocation;
     if (!afterLoc || (beforeLoc?.lat === afterLoc.lat && beforeLoc?.lng === afterLoc.lng)) return;
+    if (!isValidCoordinate(afterLoc)) return;
 
     // Ne fait progresser que depuis 'en_route' — si la phase est déjà
     // 'approaching'/'arrived', ou pas encore 'assigned', rien à faire ici.
     if (after.tracking?.phase !== 'en_route') return;
 
     const dest = after.customerLocation;
-    if (!dest?.lat || !dest?.lng) return;
+    if (!isValidCoordinate(dest)) return;
+
+    // Seconde ligne de défense (voir MAX_TRUSTED_ACCURACY_M ci-dessus) :
+    // un point GPS de mauvaise qualité ne doit jamais, à lui seul,
+    // déclencher la notification "votre livreur arrive !". On ne bloque
+    // pas la progression pour autant — on attend simplement un point plus
+    // fiable, qui arrivera dans les secondes suivantes.
+    const accuracy = after.tracking?.accuracy;
+    if (typeof accuracy === 'number' && accuracy > MAX_TRUSTED_ACCURACY_M) {
+      console.log(`📍 Point GPS trop imprécis pour conclure une proximité (±${Math.round(accuracy)}m) — commande ${event.params.orderId}, en attente d'un meilleur fixe.`);
+      return;
+    }
 
     const distance = haversineMeters(afterLoc, dest);
     if (distance > SEUIL_PROCHE_METRES) return;
 
     await event.data!.after.ref.update({ 'tracking.phase': 'approaching' });
-    console.log(`📍 Proximité détectée (${Math.round(distance)}m) — commande ${event.params.orderId} → approaching`);
+    console.log(`📍 Proximité détectée (${Math.round(distance)}m, ±${accuracy ?? '?'}m) — commande ${event.params.orderId} → approaching`);
   }
 );
 

@@ -3,6 +3,8 @@
 import { doc, getDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
 import { getCurrentPosition } from '@/lib/geolocation';
+import { reverseGeocode } from '@/lib/geo/geocode';
+import { getAnyCachedLocation, isLocationStale, setCachedLocation } from '@/lib/locationCache';
 import { Suspense, useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -221,22 +223,24 @@ function ProductDetailContent() {
 
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 5000);
-          const response = await fetch(
-            `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&addressdetails=1&accept-language=fr`,
-            { signal: controller.signal }
-          );
+          const geocoded = await reverseGeocode(latitude, longitude, { signal: controller.signal });
           clearTimeout(timeoutId);
-          const data = await response.json();
+          if (!geocoded) throw new Error('Reverse geocoding indisponible');
 
-          const city = data.address?.city || data.address?.town || data.address?.village || 'Dakar';
-          const region = data.address?.state || data.address?.region || 'Sénégal';
-          const country = data.address?.country || 'Sénégal';
+          const city = geocoded.city || 'Dakar';
+          const region = geocoded.region || 'Sénégal';
+          const country = geocoded.country || 'Sénégal';
 
           const newLocation = { city, region, country, lat: latitude, lng: longitude, detected: true };
           setLocation(newLocation);
           updateDeliveryEstimate(latitude, longitude);
           localStorage.setItem(cacheKey, JSON.stringify({ ...newLocation, timestamp: Date.now() }));
-          localStorage.setItem('user_location', JSON.stringify(newLocation));
+          // ✅ Passe par lib/locationCache.ts (source unique partagée avec
+          // useUserLocation.ts et main/products/page.tsx) au lieu d'écrire
+          // directement la clé 'user_location' — c'était le 2ᵉ écrivain
+          // indépendant de cette clé, sans expiration, à l'origine des
+          // positions "figées" affichées comme exactes des jours plus tard.
+          setCachedLocation(newLocation);
         } catch (error) {
           console.error(error);
           fallbackToIPGeolocation();
@@ -251,15 +255,31 @@ function ProductDetailContent() {
   }, [fallbackToIPGeolocation, updateDeliveryEstimate]);
 
   // 📍 Init location
+  //
+  // ✅ Lit désormais lib/locationCache.ts (même source que useUserLocation.ts
+  // et main/products/page.tsx) au lieu de relire 'user_location' en brut.
+  // Deux bugs réels corrigés du même coup :
+  //  1. Pas d'expiration avant → une position vieille de plusieurs jours
+  //     s'affichait comme "exacte" indéfiniment sur cette page produit.
+  //  2. Cette page pouvait afficher une position DIFFÉRENTE du checkout ou
+  //     du catalogue, faute de cache partagé — trois "vérités" possibles
+  //     pour la même visite.
   useEffect(() => {
-    const savedLocation = parseJSON<UserLocation>(localStorage.getItem('user_location'));
-    if (savedLocation) {
-      setLocation(savedLocation);
-      updateDeliveryEstimate(savedLocation.lat, savedLocation.lng);
+    const cached = getAnyCachedLocation();
+
+    if (cached && !isLocationStale(cached)) {
+      setLocation({ city: cached.city || '', region: cached.region || '', country: cached.country || '', lat: cached.lat, lng: cached.lng, detected: cached.detected ?? true });
+      updateDeliveryEstimate(cached.lat, cached.lng);
       setLocationLoading(false);
-    } else {
-      detectLocation();
+      return;
     }
+
+    if (cached) {
+      // Périmé : affichage instantané en attendant une redétection fraîche.
+      setLocation({ city: cached.city || '', region: cached.region || '', country: cached.country || '', lat: cached.lat, lng: cached.lng, detected: cached.detected ?? true });
+      updateDeliveryEstimate(cached.lat, cached.lng);
+    }
+    detectLocation();
   }, [detectLocation, updateDeliveryEstimate]);
 
   // 📦 Load product

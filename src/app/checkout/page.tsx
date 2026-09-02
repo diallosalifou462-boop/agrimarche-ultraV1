@@ -512,7 +512,16 @@ export default function CheckoutPage() {
   // manuel centré dessus (plutôt que sur Dakar par défaut) pour que le
   // client n'ait qu'à l'affiner, pas à chercher sa position de zéro.
   useEffect(() => {
-    if (location?.isDefault && location.lat && location.lng && !manualPin) {
+    // 🐛 FIX : avant, ce point de départ n'était posé QUE si la position
+    // détectée était un repli (isDefault:true). Dès que le GPS renvoyait une
+    // position fiable (isDefault:false, ex: Colobane bien détecté), manualPin
+    // restait null pour toujours — et comme le bloc de correction plus bas
+    // ne s'affichait QUE si `showLocationPicker && manualPin`, le client
+    // n'avait tout simplement AUCUN moyen d'ouvrir la carte pour choisir un
+    // point de livraison différent de sa position GPS actuelle. Résultat :
+    // quoi qu'il tente de "confirmer" ailleurs dans l'app, la commande
+    // repartait toujours avec la position auto-détectée.
+    if (location?.lat && location.lng && !manualPin) {
       setManualPin({ lat: location.lat, lng: location.lng });
     }
   }, [location, manualPin]);
@@ -761,6 +770,17 @@ export default function CheckoutPage() {
         // moyen de savoir si le pickup affiché était fiable. isDefault reste
         // true tant qu'aucune coordonnée réelle n'est trouvée sur le profil.
         let sellerLocationIsDefault = true;
+        // ✅ NOUVEAU — on capture aussi *comment* et *quand* cette position a
+        // été obtenue (voir seller/page.tsx : 'MANUAL_PIN' vs 'GPS' + date),
+        // et on fige ces deux informations sur la commande elle-même au
+        // moment de la création. Sans ça, le badge de confiance affiché au
+        // livreur (delivery/dashboard) et à l'admin ne pourrait refléter que
+        // l'état ACTUEL du profil vendeur, pas celui au moment où la
+        // commande a réellement été passée — or le vendeur peut corriger sa
+        // position après coup, ce qui ne doit pas réécrire l'historique
+        // d'une commande déjà en cours de livraison.
+        let sellerLocationSource: string | null = null;
+        let sellerLocationUpdatedAt: string | null = null;
         if (safeSellerId && safeSellerId !== 'agrimarche-official') {
           try {
             const sellerDoc = await getDoc(doc(db, 'users', safeSellerId));
@@ -768,8 +788,16 @@ export default function CheckoutPage() {
               const d = sellerDoc.data();
               sellerLat = d?.latitude || d?.lat || 14.7167;
               sellerLng = d?.longitude || d?.lng || -17.4677;
-              sellerAddress = d?.address || d?.city || 'Dakar, Sénégal';
+              // 🐛 FIX : ne lisait jamais `locationAddress` — le seul champ
+              // texte que seller/register.tsx ET seller/page.tsx (dashboard)
+              // écrivent réellement (voir leurs commentaires "FIX RACINE").
+              // `address` n'est écrit nulle part côté vendeur ; sans ce
+              // fallback, un vendeur ayant pourtant corrigé sa position à la
+              // main voyait quand même "Dakar, Sénégal" affiché au livreur.
+              sellerAddress = d?.locationAddress || d?.address || d?.city || 'Dakar, Sénégal';
               sellerLocationIsDefault = !(d?.latitude || d?.lat);
+              sellerLocationSource = d?.locationSource || null;
+              sellerLocationUpdatedAt = d?.locationUpdatedAt || null;
             }
           } catch {}
         }
@@ -816,7 +844,11 @@ export default function CheckoutPage() {
           // de retrouver cette commande par téléphone sans compte ni SMS. Vide
           // pour un compte normal (non nécessaire, userId suffit déjà).
           ...(((profile as any)?.isGuest || (guestPhone && !profile)) ? { guestPhone: guestPhone.replace(/[^\d+]/g, '') } : {}),
-          sellerLocation: { lat: sellerLat, lng: sellerLng, address: sellerAddress, isDefault: sellerLocationIsDefault },
+          sellerLocation: {
+            lat: sellerLat, lng: sellerLng, address: sellerAddress, isDefault: sellerLocationIsDefault,
+            ...(sellerLocationSource ? { locationSource: sellerLocationSource } : {}),
+            ...(sellerLocationUpdatedAt ? { locationUpdatedAt: sellerLocationUpdatedAt } : {}),
+          },
           // 🐛 FIX : isDefault (posé par useUserLocation.ts) est propagé ici —
           // avant, on écrivait lat/lng sans jamais dire si c'était une vraie
           // position ou le repli Dakar, donc impossible de le savoir plus tard
@@ -1114,19 +1146,9 @@ export default function CheckoutPage() {
                         <p style={{ fontSize:14, fontWeight:500, color:'var(--ink)', marginBottom:2 }}>Utiliser ma position GPS</p>
                         {locationLoading
                           ? <p style={{ fontSize:12, color:'var(--ink-lt)' }}>Détection en cours…</p>
-                          // 🐛 FIX : ce libellé affichait toujours `location.city` (la
-                          // détection GPS/IP brute), même après que le client ait
-                          // confirmé une position corrigée sur la carte. Résultat :
-                          // quoi qu'il confirme, ce bandeau continuait d'afficher
-                          // l'ancienne ville détectée automatiquement, donnant
-                          // l'impression que la correction n'avait jamais été prise
-                          // en compte. `manualLocation` doit être prioritaire ici,
-                          // comme il l'est déjà pour `effectiveLocation` plus bas.
-                          : manualLocation?.address
-                            ? <p style={{ fontSize:12, color:'#059669' }}>{manualLocation.address} (position corrigée)</p>
-                            : location?.city
-                              ? <p style={{ fontSize:12, color:'var(--gold)' }}>{location.city}{location.region ? `, ${location.region}` : ''}</p>
-                              : <p style={{ fontSize:12, color:'var(--ink-lt)' }}>Cliquez pour détecter automatiquement</p>}
+                          : location?.city
+                            ? <p style={{ fontSize:12, color:'var(--gold)' }}>{location.city}{location.region ? `, ${location.region}` : ''}</p>
+                            : <p style={{ fontSize:12, color:'var(--ink-lt)' }}>Cliquez pour détecter automatiquement</p>}
                       </div>
                     </div>
                     <ChevronRight size={16} style={{ color:'var(--gold)', flexShrink:0 }} />
@@ -1165,51 +1187,68 @@ export default function CheckoutPage() {
                       >
                         {showLocationPicker ? 'Masquer la carte' : '📍 Corriger ma position sur la carte'}
                       </button>
-                      {showLocationPicker && manualPin && (
-                        <div style={{ marginTop:12 }}>
-                          <div style={{ position:'relative', marginBottom:10 }}>
-                            <input
-                              type="text"
-                              value={placeQuery}
-                              onChange={e => setPlaceQuery(e.target.value)}
-                              placeholder="Rechercher un lieu (ex : Ecobank UCAD, Marché Sandaga…)"
-                              style={{ width:'100%', fontSize:13, padding:'9px 12px', borderRadius:8, border:'1px solid var(--border)', outline:'none' }}
-                            />
-                            {placeSearching && (
-                              <div style={{ position:'absolute', right:10, top:'50%', transform:'translateY(-50%)', width:14, height:14, border:'2px solid #10b981', borderTopColor:'transparent', borderRadius:'50%', animation:'spin 0.8s linear infinite' }} />
-                            )}
-                            {placeResults.length > 0 && (
-                              <div style={{ marginTop:4, background:'#fff', border:'1px solid var(--border)', borderRadius:8, overflow:'hidden', boxShadow:'0 4px 14px rgba(0,0,0,.08)' }}>
-                                {placeResults.map((r, i) => (
-                                  <button
-                                    key={i}
-                                    type="button"
-                                    onClick={() => pickSearchedPlace(r)}
-                                    style={{ display:'block', width:'100%', textAlign:'left', padding:'9px 12px', fontSize:12, color:'var(--ink-md)', background:'none', border:'none', borderTop: i>0 ? '1px solid var(--border)' : 'none', cursor:'pointer' }}
-                                  >
-                                    {r.displayName}
-                                  </button>
-                                ))}
-                              </div>
-                            )}
+                    </div>
+                  )}
+                  {/* 🐛 FIX RACINE : ce bouton était auparavant enfermé DANS le bloc
+                      ci-dessus, donc invisible dès que le GPS renvoyait une position
+                      jugée fiable (isDefault:false — ex: Colobane correctement détecté).
+                      Le client n'avait alors aucun moyen d'ouvrir la carte pour livrer
+                      à une autre adresse que sa position actuelle : quoi qu'il tente,
+                      la commande repartait toujours avec la position auto-détectée.
+                      Ce bouton est maintenant TOUJOURS accessible, position fiable ou
+                      non, et pilote le même panneau de correction (recherche + carte). */}
+                  {!locationLoading && !manualLocation && !location?.isDefault && (location?.lat || manualPin) && (
+                    <button
+                      type="button"
+                      onClick={() => setShowLocationPicker(v => !v)}
+                      style={{ marginTop:10, fontSize:12, fontWeight:600, color:'var(--gold-dk, #b8935a)', background:'rgba(201,169,110,.12)', border:'1px solid rgba(201,169,110,.35)', borderRadius:8, padding:'7px 12px', cursor:'pointer' }}
+                    >
+                      {showLocationPicker ? 'Masquer la carte' : '📍 Livrer à une autre adresse'}
+                    </button>
+                  )}
+                  {showLocationPicker && manualPin && !manualLocation && (
+                    <div style={{ marginTop:12 }}>
+                      <div style={{ position:'relative', marginBottom:10 }}>
+                        <input
+                          type="text"
+                          value={placeQuery}
+                          onChange={e => setPlaceQuery(e.target.value)}
+                          placeholder="Rechercher un lieu (ex : Ecobank UCAD, Marché Sandaga…)"
+                          style={{ width:'100%', fontSize:13, padding:'9px 12px', borderRadius:8, border:'1px solid var(--border)', outline:'none' }}
+                        />
+                        {placeSearching && (
+                          <div style={{ position:'absolute', right:10, top:'50%', transform:'translateY(-50%)', width:14, height:14, border:'2px solid #10b981', borderTopColor:'transparent', borderRadius:'50%', animation:'spin 0.8s linear infinite' }} />
+                        )}
+                        {placeResults.length > 0 && (
+                          <div style={{ marginTop:4, background:'#fff', border:'1px solid var(--border)', borderRadius:8, overflow:'hidden', boxShadow:'0 4px 14px rgba(0,0,0,.08)' }}>
+                            {placeResults.map((r, i) => (
+                              <button
+                                key={i}
+                                type="button"
+                                onClick={() => pickSearchedPlace(r)}
+                                style={{ display:'block', width:'100%', textAlign:'left', padding:'9px 12px', fontSize:12, color:'var(--ink-md)', background:'none', border:'none', borderTop: i>0 ? '1px solid var(--border)' : 'none', cursor:'pointer' }}
+                              >
+                                {r.displayName}
+                              </button>
+                            ))}
                           </div>
-                          <p style={{ fontSize:11, color:'var(--ink-lt)', marginBottom:6 }}>Ou déplacez directement le point sur la carte :</p>
-                          <LocationPicker
-                            lat={manualPin.lat}
-                            lng={manualPin.lng}
-                            onChange={(lat, lng) => setManualPin({ lat, lng })}
-                          />
-                          <p style={{ fontSize:11, color:'var(--ink-lt)', marginTop:6 }}>Déplacez le point exactement à l'endroit où vous voulez être livré.</p>
-                          <button
-                            type="button"
-                            onClick={confirmManualLocation}
-                            disabled={manualLocationLoading}
-                            style={{ marginTop:8, width:'100%', fontSize:13, fontWeight:600, color:'#04140d', background:'#10b981', border:'none', borderRadius:8, padding:'10px 12px', cursor: manualLocationLoading ? 'default' : 'pointer', opacity: manualLocationLoading ? 0.7 : 1 }}
-                          >
-                            {manualLocationLoading ? 'Confirmation…' : 'Confirmer cette localisation'}
-                          </button>
-                        </div>
-                      )}
+                        )}
+                      </div>
+                      <p style={{ fontSize:11, color:'var(--ink-lt)', marginBottom:6 }}>Ou déplacez directement le point sur la carte :</p>
+                      <LocationPicker
+                        lat={manualPin.lat}
+                        lng={manualPin.lng}
+                        onChange={(lat, lng) => setManualPin({ lat, lng })}
+                      />
+                      <p style={{ fontSize:11, color:'var(--ink-lt)', marginTop:6 }}>Déplacez le point exactement à l'endroit où vous voulez être livré.</p>
+                      <button
+                        type="button"
+                        onClick={confirmManualLocation}
+                        disabled={manualLocationLoading}
+                        style={{ marginTop:8, width:'100%', fontSize:13, fontWeight:600, color:'#04140d', background:'#10b981', border:'none', borderRadius:8, padding:'10px 12px', cursor: manualLocationLoading ? 'default' : 'pointer', opacity: manualLocationLoading ? 0.7 : 1 }}
+                      >
+                        {manualLocationLoading ? 'Confirmation…' : 'Confirmer cette localisation'}
+                      </button>
                     </div>
                   )}
                   {manualLocation && (

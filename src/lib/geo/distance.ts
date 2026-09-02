@@ -32,9 +32,26 @@ export function isValidCoordinate(lat: unknown, lng: unknown): lat is number {
 }
 
 /**
- * Filtre + trie une liste d'éléments géolocalisés par proximité à un point
- * de référence. Les éléments sans coordonnées valides sont exclus.
+ * Boîte englobante généreuse du Sénégal (+ marge d'environ 60 km de chaque
+ * côté pour ne jamais rejeter à tort une position réelle mais proche d'une
+ * frontière). Sert uniquement à repérer une position GPS *implausible*
+ * (mauvais fuseau, émulateur mal configuré, VPN, point 0,0 par défaut d'un
+ * SDK bugué…) — jamais à bloquer une saisie, seulement à l'annoter d'un
+ * avertissement pour que la personne concernée (vendeur, admin, livreur)
+ * puisse la corriger avant qu'elle ne cause un vrai problème de livraison.
  */
+export const SENEGAL_BOUNDS = { minLat: 11.5, maxLat: 17.0, minLng: -18.0, maxLng: -10.5 } as const;
+
+/** Une position à l'intérieur de la boîte englobante du Sénégal (± marge) ? */
+export function isPlausibleSenegalCoordinate(lat: unknown, lng: unknown): boolean {
+  if (!isValidCoordinate(lat, lng)) return false;
+  return (
+    lat >= SENEGAL_BOUNDS.minLat && lat <= SENEGAL_BOUNDS.maxLat &&
+    lng >= SENEGAL_BOUNDS.minLng && lng <= SENEGAL_BOUNDS.maxLng
+  );
+}
+
+
 export function nearbySorted<T extends { lat?: number; lng?: number }>(
   items: T[],
   origin: { lat: number; lng: number },

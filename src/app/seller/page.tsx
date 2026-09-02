@@ -5,12 +5,21 @@ import Link from 'next/link';
 import {
   DollarSign, ShoppingBag, Package, Star,
   Clock, TrendingUp, Award, Navigation, ChevronRight,
-  Sparkles, Shield, Zap, Leaf, Compass, Heart,
-  Store, Truck, CheckCircle, AlertCircle, Sun, Moon
+  Sparkles, Zap, Leaf, Compass, Heart,
+  Store, Truck, CheckCircle, AlertCircle, Sun, Moon, Pencil, X,
 } from 'lucide-react';
 import { auth, db } from '@/lib/firebase/firebase';
 import { getCurrentPosition } from '@/lib/geolocation';
 import { onAuthStateChanged } from 'firebase/auth';
+// ✅ NOUVEAU — permet au vendeur de saisir/corriger lui-même sa position
+// (recherche de lieu + carte), au lieu de dépendre uniquement du GPS
+// automatique. Mêmes briques que checkout/page.tsx côté client, pour rester
+// cohérent (même fournisseur, même UX de correction).
+import { searchPlaces, reverseGeocode } from '@/lib/geo/geocode';
+import { computeGeohash } from '@/lib/geo/geohash';
+import { isPlausibleSenegalCoordinate } from '@/lib/geo/distance';
+import type { GeocodeResult } from '@/lib/geo/types';
+import LocationPicker from '@/components/LocationPicker';
 import {
   collection,
   query,
@@ -107,6 +116,74 @@ export default function SellerDashboard() {
     pendingCount: 0,
   });
   const [darkMode, setDarkMode] = useState(false);
+  // ✅ NOUVEAU — saisie manuelle de la localisation boutique.
+  const [sellerUid, setSellerUid] = useState<string | null>(null);
+  const [showLocationEditor, setShowLocationEditor] = useState(false);
+  const [manualPin, setManualPin] = useState<{ lat: number; lng: number } | null>(null);
+  const [placeQuery, setPlaceQuery] = useState('');
+  const [placeResults, setPlaceResults] = useState<GeocodeResult[]>([]);
+  const [placeSearching, setPlaceSearching] = useState(false);
+  const [savingLocation, setSavingLocation] = useState(false);
+  // ✅ NOUVEAU — provenance et fraîcheur de la position, pour afficher un
+  // signal de confiance (voir badge dans le rendu) plutôt que de traiter
+  // toute position connue comme également fiable.
+  const [sellerLocationSource, setSellerLocationSource] = useState<string | null>(null);
+  const [sellerLocationUpdatedAt, setSellerLocationUpdatedAt] = useState<string | null>(null);
+
+  useEffect(() => {
+    const q = placeQuery.trim();
+    if (q.length < 3) { setPlaceResults([]); return; }
+    setPlaceSearching(true);
+    const t = setTimeout(() => {
+      searchPlaces(q, 5).then(setPlaceResults).finally(() => setPlaceSearching(false));
+    }, 300);
+    return () => clearTimeout(t);
+  }, [placeQuery]);
+
+  const pickSearchedPlace = (r: GeocodeResult) => {
+    setManualPin({ lat: r.latitude, lng: r.longitude });
+    setPlaceQuery('');
+    setPlaceResults([]);
+  };
+
+  const saveManualLocation = async () => {
+    if (!sellerUid || !manualPin) return;
+    setSavingLocation(true);
+    try {
+      const geocoded = await reverseGeocode(manualPin.lat, manualPin.lng);
+      const address =
+        [geocoded?.neighborhood, geocoded?.city].filter(Boolean).join(', ') ||
+        `${manualPin.lat.toFixed(5)}, ${manualPin.lng.toFixed(5)}`;
+
+      // 🔗 FIX RACINE : ces trois champs (lat/lng/locationAddress) sont
+      // exactement ceux que app/admin/page.tsx lit pour chaque utilisateur
+      // (isValidCoordinate(user.lat, user.lng), user.locationAddress) —
+      // voir l'interface UserProfile là-bas. Le code précédent écrivait
+      // `latitude`/`longitude` (aucun champ `locationAddress` du tout), des
+      // noms que l'admin ne lit jamais : la position du vendeur pouvait donc
+      // être enregistrée avec succès sans JAMAIS apparaître dans l'onglet
+      // Utilisateurs. `locationSource: 'MANUAL_PIN'` reprend la valeur déjà
+      // utilisée par seller/register.tsx pour une saisie manuelle, afin de
+      // rester cohérent dans toute l'app.
+      await setDoc(doc(db, 'users', sellerUid), {
+        lat: manualPin.lat,
+        lng: manualPin.lng,
+        geohash: computeGeohash(manualPin.lat, manualPin.lng),
+        locationAddress: address,
+        locationSource: 'MANUAL_PIN',
+        locationUpdatedAt: new Date().toISOString(),
+      }, { merge: true });
+
+      setSellerLocation(address);
+      setSellerLocationSource('MANUAL_PIN');
+      setSellerLocationUpdatedAt(new Date().toISOString());
+      setShowLocationEditor(false);
+    } catch (err) {
+      console.error('Erreur enregistrement position boutique:', err);
+    } finally {
+      setSavingLocation(false);
+    }
+  };
 
   useEffect(() => {
     const savedTheme = localStorage.getItem('sellerTheme');
@@ -143,10 +220,22 @@ export default function SellerDashboard() {
         return;
       }
 
+      setSellerUid(user.uid);
       const sellerDoc = await getDoc(doc(db, 'users', user.uid));
       const data = sellerDoc.exists() ? sellerDoc.data() : null;
       const profileExists = !!(data?.displayName?.trim() && data?.phone?.trim() && data?.region?.trim());
       setHasProfile(profileExists);
+
+      // Pré-remplit le point de départ de la carte de correction avec la
+      // position déjà connue du vendeur (saisie manuelle antérieure ou GPS),
+      // pour que "Modifier" ouvre directement sur son quartier au lieu de
+      // repartir de zéro.
+      if (data?.lat && data?.lng) {
+        setManualPin({ lat: data.lat, lng: data.lng });
+        if (data?.locationAddress) setSellerLocation(data.locationAddress);
+        if (data?.locationSource) setSellerLocationSource(data.locationSource);
+        if (data?.locationUpdatedAt) setSellerLocationUpdatedAt(data.locationUpdatedAt);
+      }
 
       if (profileExists) {
         // ── Produits (temps réel) ────────────────────────────────────────────
@@ -250,30 +339,42 @@ export default function SellerDashboard() {
       // Géolocalisation — natif (@capacitor/geolocation) ou web selon la
       // plateforme, voir src/lib/geolocation.ts. Sur Android ce bloc ne
       // s'exécutait jamais (permissions manifest absentes jusqu'ici).
-      getCurrentPosition({ enableHighAccuracy: true, timeout: 10000 })
-        .then(async (pos) => {
-          // 🐛 FIX géoloc vendeur : cette position ne servait jusqu'ici qu'à
-          // l'affichage du message de bienvenue (setSellerLocation ci-dessous)
-          // et n'était JAMAIS enregistrée sur le profil. checkout/page.tsx
-          // retombait donc systématiquement sur le point par défaut (Dakar,
-          // 14.7167/-17.4677) pour le pickup du livreur, quel que soit le
-          // vendeur — aucune page de l'appli n'écrivait latitude/longitude.
-          // On persiste ici les coordonnées déjà récupérées, sans prompt ni
-          // permission supplémentaire.
-          setDoc(doc(db, 'users', user.uid), {
-            latitude: pos.coords.latitude,
-            longitude: pos.coords.longitude,
-          }, { merge: true }).catch((err) => console.error('Maj position vendeur:', err));
+      // 🐛 FIX : si le vendeur a déjà renseigné sa position À LA MAIN
+      // (locationSource:'MANUAL_PIN'), on ne l'écrase plus silencieusement
+      // avec le prochain relevé GPS auto — sinon une correction manuelle
+      // pouvait redisparaître au chargement suivant du dashboard.
+      if (data?.locationSource !== 'MANUAL_PIN') {
+        getCurrentPosition({ enableHighAccuracy: true, timeout: 10000 })
+          .then(async (pos) => {
+            // 🐛 FIX géoloc vendeur : cette position ne servait jusqu'ici qu'à
+            // l'affichage du message de bienvenue (setSellerLocation ci-dessous)
+            // et n'était enregistrée que sous `latitude`/`longitude` — des
+            // champs que app/admin/page.tsx ne lit jamais (il lit `lat`/`lng`
+            // + `locationAddress`, voir interface UserProfile là-bas). Résultat
+            // concret : la position semblait "enregistrée" côté vendeur mais
+            // n'apparaissait JAMAIS dans l'onglet Utilisateurs de l'admin, et
+            // checkout/page.tsx retombait sur le point par défaut (Dakar,
+            // 14.7167/-17.4677) faute de champ `lat`/`lng` exploitable.
+            const city = await reverseGeocode(pos.coords.latitude, pos.coords.longitude)
+              .then(g => g?.city || 'Dakar')
+              .catch(() => 'Dakar');
 
-          try {
-            const res = await fetch(
-              `https://nominatim.openstreetmap.org/reverse?format=json&lat=${pos.coords.latitude}&lon=${pos.coords.longitude}`
-            );
-            const json = await res.json();
-            setSellerLocation(json.address?.city || json.address?.town || json.address?.village || 'Dakar');
-          } catch { setSellerLocation('Dakar'); }
-        })
-        .catch(() => setSellerLocation('Dakar'));
+            setDoc(doc(db, 'users', user.uid), {
+              lat: pos.coords.latitude,
+              lng: pos.coords.longitude,
+              geohash: computeGeohash(pos.coords.latitude, pos.coords.longitude),
+              locationAddress: city,
+              locationSource: 'GPS',
+              locationUpdatedAt: new Date().toISOString(),
+            }, { merge: true }).catch((err) => console.error('Maj position vendeur:', err));
+
+            setManualPin({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+            setSellerLocation(city);
+            setSellerLocationSource('GPS');
+            setSellerLocationUpdatedAt(new Date().toISOString());
+          })
+          .catch(() => { if (!data?.locationAddress) setSellerLocation('📍 Position non détectée'); });
+      }
     });
 
     const updateTime = () => {
@@ -385,19 +486,105 @@ export default function SellerDashboard() {
           </div>
         </div>
 
-        {/* 📍 LOCALISATION */}
-        {sellerLocation && (
-          <div className="bg-white/70 dark:bg-gray-800/70 backdrop-blur-md rounded-2xl px-4 py-3 shadow-sm border border-white/40 dark:border-gray-700 flex items-center gap-3 animate-fadeIn">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-emerald-400 to-teal-400 flex items-center justify-center shadow-md">
+        {/* 📍 LOCALISATION — le vendeur peut désormais la corriger/saisir
+            lui-même (bouton crayon), au lieu de dépendre uniquement du GPS
+            automatique qui peut échouer ou être imprécis. */}
+        <div className="bg-white/70 dark:bg-gray-800/70 backdrop-blur-md rounded-2xl px-4 py-3 shadow-sm border border-white/40 dark:border-gray-700 animate-fadeIn">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-emerald-400 to-teal-400 flex items-center justify-center shadow-md flex-shrink-0">
               <Compass size={15} className="text-white" />
             </div>
-            <div className="flex-1">
+            <div className="flex-1 min-w-0">
               <p className="text-[9px] text-emerald-600 dark:text-emerald-400 font-bold uppercase tracking-wider">📍 Votre boutique</p>
-              <p className="text-sm text-gray-700 dark:text-gray-300 font-medium truncate">{sellerLocation}</p>
+              <p className="text-sm text-gray-700 dark:text-gray-300 font-medium truncate">
+                {sellerLocation || 'Position non renseignée'}
+              </p>
+              {/* ✅ NOUVEAU — signal de confiance : une position saisie/
+                  corrigée à la main par le vendeur est plus fiable qu'une
+                  simple détection GPS non revérifiée depuis longtemps, et
+                  une position en dehors du Sénégal est presque certainement
+                  une erreur (émulateur, VPN, GPS resté sur un ancien relevé
+                  de voyage…) — mieux vaut le signaler tout de suite au
+                  vendeur que le laisser découvrir le problème via un
+                  livreur perdu. */}
+              {manualPin && (() => {
+                const implausible = !isPlausibleSenegalCoordinate(manualPin.lat, manualPin.lng);
+                const stale = sellerLocationSource === 'GPS' && sellerLocationUpdatedAt &&
+                  (Date.now() - new Date(sellerLocationUpdatedAt).getTime()) > 90 * 24 * 3600 * 1000;
+                if (implausible) {
+                  return <p className="text-[10px] text-rose-500 font-semibold mt-0.5">⚠️ Position hors du Sénégal — à vérifier</p>;
+                }
+                if (sellerLocationSource === 'MANUAL_PIN') {
+                  return <p className="text-[10px] text-emerald-500 font-semibold mt-0.5">✏️ Confirmée par vous</p>;
+                }
+                if (stale) {
+                  return <p className="text-[10px] text-amber-500 font-semibold mt-0.5">📡 GPS non revérifié depuis longtemps</p>;
+                }
+                if (sellerLocationSource === 'GPS') {
+                  return <p className="text-[10px] text-gray-400 mt-0.5">📡 Détection GPS automatique</p>;
+                }
+                return null;
+              })()}
             </div>
-            <Shield size={14} className="text-emerald-400 dark:text-emerald-500" />
+            <button
+              type="button"
+              onClick={() => setShowLocationEditor(v => !v)}
+              className="w-8 h-8 rounded-xl bg-emerald-50 dark:bg-emerald-900/30 flex items-center justify-center flex-shrink-0 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 transition"
+              aria-label="Modifier la position de la boutique"
+            >
+              {showLocationEditor ? <X size={14} className="text-emerald-600" /> : <Pencil size={14} className="text-emerald-600" />}
+            </button>
           </div>
-        )}
+
+          {showLocationEditor && (
+            <div className="mt-3 pt-3 border-t border-gray-100 dark:border-gray-700">
+              <div className="relative mb-2">
+                <input
+                  type="text"
+                  value={placeQuery}
+                  onChange={e => setPlaceQuery(e.target.value)}
+                  placeholder="Rechercher votre adresse (ex : Marché Sandaga, Parcelles Assainies…)"
+                  className="w-full text-sm px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-600 dark:bg-gray-900 dark:text-white outline-none focus:border-emerald-400"
+                />
+                {placeSearching && (
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+                )}
+                {placeResults.length > 0 && (
+                  <div className="mt-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden shadow-lg">
+                    {placeResults.map((r, i) => (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => pickSearchedPlace(r)}
+                        className="block w-full text-left px-3 py-2 text-xs text-gray-700 dark:text-gray-200 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 border-t border-gray-100 dark:border-gray-700 first:border-t-0"
+                      >
+                        {r.displayName}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {manualPin && (
+                <>
+                  <p className="text-[11px] text-gray-500 dark:text-gray-400 mb-1.5">Ou déplacez directement le point sur la carte :</p>
+                  <LocationPicker
+                    lat={manualPin.lat}
+                    lng={manualPin.lng}
+                    onChange={(lat, lng) => setManualPin({ lat, lng })}
+                  />
+                </>
+              )}
+              <button
+                type="button"
+                onClick={saveManualLocation}
+                disabled={!manualPin || savingLocation}
+                className="mt-2 w-full text-sm font-semibold text-white bg-emerald-500 hover:bg-emerald-600 disabled:opacity-60 rounded-lg py-2.5 transition"
+              >
+                {savingLocation ? 'Enregistrement…' : 'Enregistrer cette position'}
+              </button>
+            </div>
+          )}
+        </div>
 
         {/* 📊 STATS */}
         <div className="grid grid-cols-2 gap-3">

@@ -11,6 +11,7 @@ import { useCart } from '@/hooks/useCart';
 import { useAuth } from '@/hooks/useAuth';
 import { Network } from '@capacitor/network';
 import { distanceKm, nearbySorted, formatDistance, SEARCH_RADII_KM } from '@/lib/geo/distance';
+import { getAnyCachedLocation, isLocationStale } from '@/lib/locationCache';
 
 const CATEGORIES = [
   { label: 'Tous',              icon: '✦',  color: '#C9A84C' },
@@ -619,24 +620,33 @@ export default function AgriMarket() {
     return sections;
   }, [selected, products, location]);
 
-  // ── Lecture de la localisation sauvegardée par /main/location ──
+  // ── Lecture de la localisation détectée ──
+  //
+  // 🐛 BUG RÉEL : cet effet lisait la clé localStorage 'agrimarche_location',
+  // qui n'était écrite NULLE PART ailleurs dans le code (ni par
+  // /main/location, ni par LiveLocation.tsx, ni par personne). Résultat :
+  // `location` restait quasiment toujours `null` ici, et la section "Près
+  // de chez vous" du catalogue ne s'affichait donc presque jamais — pas un
+  // problème de précision GPS, mais une position qui n'était simplement
+  // jamais lue. Corrigé en branchant sur lib/locationCache.ts, la même
+  // source unique désormais utilisée par useUserLocation.ts (checkout) et
+  // app/product/page.tsx (fiche produit), avec la même règle d'expiration
+  // (10 min) pour ne jamais afficher une position "exacte" périmée.
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem('agrimarche_location');
-      if (!raw) { setLocStatus('found'); return; }
-      const saved = JSON.parse(raw);
-      setLocation({
-        address: saved.address,
-        lat: saved.lat,
-        lng: saved.lng,
-        precision: saved.precision,
-        detailedAddress: saved.detailedAddress,
-        region: saved.region,
-      });
+    const cached = getAnyCachedLocation();
+    if (!cached || isLocationStale(cached)) {
       setLocStatus('found');
-    } catch {
-      setLocStatus('found');
+      return;
     }
+    setLocation({
+      address: cached.address || cached.city || '',
+      lat: cached.lat,
+      lng: cached.lng,
+      precision: cached.precision ?? (cached.isDefault ? 5000 : 50),
+      detailedAddress: cached.detailedAddress,
+      region: cached.region,
+    });
+    setLocStatus('found');
   }, []);
 
 

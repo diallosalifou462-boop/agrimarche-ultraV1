@@ -2,8 +2,16 @@
 
 import { useEffect, useMemo, useRef } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import MarkerClusterGroup from 'react-leaflet-cluster';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+// Import cluster CSS explicitly (rather than relying on react-leaflet-cluster's
+// internal `require('leaflet.markercluster/dist/MarkerCluster.css')`), because
+// that internal import triggers Turbopack's "module factory is not available"
+// error in Next.js dev. In react-leaflet-cluster@2.1.0 these ship under
+// lib/assets (not dist/assets — that path only exists in newer versions).
+import 'react-leaflet-cluster/lib/assets/MarkerCluster.css';
+import 'react-leaflet-cluster/lib/assets/MarkerCluster.Default.css';
 
 /**
  * Carte multi-marqueurs partagée par l'admin (« tous les utilisateurs ») et
@@ -11,6 +19,13 @@ import 'leaflet/dist/leaflet.css';
  * MapInner (un seul trajet départ→arrivée), ce composant affiche un nombre
  * arbitraire de points, chacun typé/coloré, avec centrage + zoom
  * automatiques sur l'ensemble des points visibles.
+ *
+ * Clustering (react-leaflet-cluster / leaflet.markercluster) : sans lui, une
+ * carte avec quelques centaines de vendeurs devient illisible (marqueurs
+ * empilés) et lente (chaque marqueur est un nœud DOM séparé). Les points se
+ * regroupent visuellement en dessous d'un rayon de proximité à l'écran et se
+ * séparent automatiquement au zoom — comportement standard sur ce type de
+ * carte (cf. Uber, Yango). Installation requise : `npm install react-leaflet-cluster`.
  */
 
 export type FleetPointKind = 'client' | 'seller' | 'delivery' | 'admin' | 'pickup' | 'dropoff' | 'me';
@@ -24,6 +39,14 @@ export interface FleetPoint {
   kind: FleetPointKind;
   /** Position approximative (floutée pour la confidentialité) — affichée différemment. */
   approximate?: boolean;
+  /**
+   * Horodatage de la dernière position connue (Date, ms epoch, ou objet
+   * Firestore Timestamp via `.toDate()`). Permet de distinguer un point
+   * "en direct" d'un point figé depuis longtemps — sans ça, un livreur
+   * dont la position date de 3 jours apparaît visuellement identique à un
+   * livreur suivi en direct, ce qui est trompeur sur une carte flotte.
+   */
+  updatedAt?: Date | number | string | { toDate: () => Date } | null;
   onClick?: () => void;
 }
 
@@ -47,24 +70,93 @@ const KIND_EMOJI: Record<FleetPointKind, string> = {
   me: '📍',
 };
 
-function makeDivIcon(kind: FleetPointKind, approximate?: boolean) {
+function makeDivIcon(kind: FleetPointKind, approximate?: boolean, freshness?: Freshness) {
   const color = KIND_COLOR[kind];
   const emoji = KIND_EMOJI[kind];
+  // Un point "live" pulse doucement et reste net ; un point périmé se
+  // ternit progressivement — signal visuel immédiat de fiabilité, sans
+  // avoir à lire le popup pour chaque marqueur.
+  const staleOpacity = freshness === 'live' ? 1 : freshness === 'recent' ? 0.85 : freshness === 'stale' ? 0.55 : 0.3;
+  const finalOpacity = approximate ? Math.min(staleOpacity, 0.72) : staleOpacity;
+  const pulse = freshness === 'live'
+    ? `<div style="position:absolute;inset:-4px;border-radius:50%;border:2px solid ${color};opacity:.6;animation:fleetPulse 1.6s ease-out infinite;"></div>`
+    : '';
   return L.divIcon({
     className: 'fleet-map-marker',
-    html: `<div style="
+    html: `<div style="position:relative;">
+      ${pulse}
+      <div style="
         width:30px;height:30px;border-radius:50%;
         background:${color};
         display:flex;align-items:center;justify-content:center;
         box-shadow:0 2px 8px rgba(0,0,0,.35);
         border:2px solid #fff;
         font-size:14px;
-        ${approximate ? 'opacity:.72;' : ''}
+        opacity:${finalOpacity};
       ">${emoji}</div>
-      ${approximate ? `<div style="position:absolute;inset:-6px;border-radius:50%;border:2px dashed ${color};opacity:.5;"></div>` : ''}`,
+      ${approximate ? `<div style="position:absolute;inset:-6px;border-radius:50%;border:2px dashed ${color};opacity:.5;"></div>` : ''}
+      </div>
+      <style>@keyframes fleetPulse{0%{transform:scale(.8);opacity:.7}100%{transform:scale(1.6);opacity:0}}</style>`,
     iconSize: [30, 30],
     iconAnchor: [15, 15],
     popupAnchor: [0, -15],
+  });
+}
+
+type Freshness = 'live' | 'recent' | 'stale' | 'unknown';
+
+function toDate(v: FleetPoint['updatedAt']): Date | null {
+  if (!v) return null;
+  if (v instanceof Date) return v;
+  if (typeof v === 'number') return new Date(v);
+  if (typeof v === 'string') {
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof (v as any).toDate === 'function') return (v as any).toDate();
+  return null;
+}
+
+function getFreshness(v: FleetPoint['updatedAt']): Freshness {
+  const d = toDate(v);
+  if (!d) return 'unknown';
+  const ageMs = Date.now() - d.getTime();
+  if (ageMs < 60_000) return 'live';       // < 1 min : considéré en direct
+  if (ageMs < 15 * 60_000) return 'recent'; // < 15 min : récent mais pas live
+  return 'stale';                           // au-delà : clairement périmé
+}
+
+/** "il y a 3 min", "il y a 2 h", etc. — pour le popup. */
+export function formatRelativeAge(v: FleetPoint['updatedAt']): string | null {
+  const d = toDate(v);
+  if (!d) return null;
+  const sec = Math.round((Date.now() - d.getTime()) / 1000);
+  if (sec < 10) return "à l'instant";
+  if (sec < 60) return `il y a ${sec}s`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `il y a ${min} min`;
+  const h = Math.round(min / 60);
+  if (h < 24) return `il y a ${h} h`;
+  const days = Math.round(h / 24);
+  return `il y a ${days} j`;
+}
+
+/** Icône de cluster (groupe de N points) — cohérente visuellement avec les marqueurs individuels. */
+function makeClusterIcon(cluster: { getChildCount: () => number }) {
+  const count = cluster.getChildCount();
+  const size = count < 10 ? 34 : count < 50 ? 40 : 48;
+  return L.divIcon({
+    className: 'fleet-map-cluster',
+    html: `<div style="
+        width:${size}px;height:${size}px;border-radius:50%;
+        background:#16a34a;
+        display:flex;align-items:center;justify-content:center;
+        box-shadow:0 2px 10px rgba(0,0,0,.4);
+        border:3px solid #fff;
+        color:#fff;font-weight:700;font-size:${count < 100 ? 14 : 12}px;
+      ">${count}</div>`,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
   });
 }
 
@@ -117,21 +209,34 @@ export default function FleetMapInner({ points, fallbackCenter, height = 420, se
         url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
       />
       <FitBounds points={valid} />
-      {valid.map(p => (
-        <Marker
-          key={p.id}
-          position={[p.lat, p.lng]}
-          icon={makeDivIcon(p.kind, p.approximate)}
-          ref={el => { markerRefs.current[p.id] = el; }}
-          eventHandlers={p.onClick ? { click: p.onClick } : undefined}
-        >
-          <Popup>
-            <div style={{ fontSize: 13, fontWeight: 600 }}>{p.label}</div>
-            {p.sublabel && <div style={{ fontSize: 11, color: '#6b7280' }}>{p.sublabel}</div>}
-            {p.approximate && <div style={{ fontSize: 10, color: '#9ca3af', marginTop: 2 }}>📍 Position approximative</div>}
-          </Popup>
-        </Marker>
-      ))}
+      <MarkerClusterGroup
+        chunkedLoading
+        iconCreateFunction={makeClusterIcon}
+        maxClusterRadius={50}
+        spiderfyOnMaxZoom
+        showCoverageOnHover={false}
+      >
+        {valid.map(p => (
+          <Marker
+            key={p.id}
+            position={[p.lat, p.lng]}
+            icon={makeDivIcon(p.kind, p.approximate, getFreshness(p.updatedAt))}
+            ref={el => { markerRefs.current[p.id] = el; }}
+            eventHandlers={p.onClick ? { click: p.onClick } : undefined}
+          >
+            <Popup>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>{p.label}</div>
+              {p.sublabel && <div style={{ fontSize: 11, color: '#6b7280' }}>{p.sublabel}</div>}
+              {p.approximate && <div style={{ fontSize: 10, color: '#9ca3af', marginTop: 2 }}>📍 Position approximative</div>}
+              {p.updatedAt != null && (
+                <div style={{ fontSize: 10, marginTop: 2, color: getFreshness(p.updatedAt) === 'live' ? '#16a34a' : getFreshness(p.updatedAt) === 'recent' ? '#d97706' : '#9ca3af', fontWeight: getFreshness(p.updatedAt) === 'live' ? 700 : 400 }}>
+                  {getFreshness(p.updatedAt) === 'live' ? '🟢 En direct' : `🕓 ${formatRelativeAge(p.updatedAt)}`}
+                </div>
+              )}
+            </Popup>
+          </Marker>
+        ))}
+      </MarkerClusterGroup>
     </MapContainer>
   );
 }

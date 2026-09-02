@@ -1,0 +1,569 @@
+import { initializeApp, getApps, getApp } from 'firebase/app';
+import { initializeAuth, browserLocalPersistence, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, sendPasswordResetEmail, updateProfile } from 'firebase/auth';
+import { initializeFirestore, onSnapshotsInSync, disableNetwork, enableNetwork, collection, query, limit, getDocs, doc, getDoc, setDoc, updateDoc, onSnapshot, Timestamp, arrayUnion, arrayRemove, increment, writeBatch } from 'firebase/firestore';
+
+// =====================================================
+// TRACE — journal d'initialisation avec horodatage relatif
+// =====================================================
+// Point de log UNIQUE pour tout tracer (Auth / Firestore / Profil /
+// Produits / Panier) avec un t+Xms commun depuis le chargement du module,
+// pour reconstituer l'ordre RÉEL des événements dans les logs iOS
+// (Safari Web Inspector / console Xcode), et non l'ordre supposé en
+// lisant le code.
+const __traceStart = typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+// Buffer en mémoire des N derniers logs, pour l'overlay de debug in-app
+// (utile sans Mac/Safari Web Inspector — on ne peut pas lire la console
+// native autrement facilement).
+const TRACE_BUFFER_MAX = 200;
+export const traceBuffer: string[] = [];
+type TraceListener = (line: string) => void;
+const traceListeners: TraceListener[] = [];
+export function onTrace(listener: TraceListener) {
+  traceListeners.push(listener);
+  return () => {
+    const i = traceListeners.indexOf(listener);
+    if (i >= 0) traceListeners.splice(i, 1);
+  };
+}
+
+export function trace(tag: string, msg: string, extra?: any) {
+  const t = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - __traceStart);
+  const line = extra !== undefined
+    ? `[INIT t+${t}ms] [${tag}] ${msg} ${(() => { try { return JSON.stringify(extra); } catch { return String(extra); } })()}`
+    : `[INIT t+${t}ms] [${tag}] ${msg}`;
+
+  console.log(line);
+  traceBuffer.push(line);
+  if (traceBuffer.length > TRACE_BUFFER_MAX) traceBuffer.shift();
+  traceListeners.forEach((l) => l(line));
+}
+import { getStorage, uploadBytes, uploadBytesResumable, getDownloadURL, deleteObject } from 'firebase/storage';
+import { getMessaging, getToken, onMessage, isSupported } from 'firebase/messaging';
+import { getAnalytics, isSupported as analyticsIsSupported } from 'firebase/analytics';
+import { Capacitor } from '@capacitor/core';
+
+// =====================================================
+// CONFIG FIREBASE
+// =====================================================
+
+const firebaseConfig = {
+  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY || 'AIzaSyD9HHxhbNvOQizx7Qbp4JVSThFW1OyTO_A',
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN || 'agrimarche-24e37.firebaseapp.com',
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || 'agrimarche-24e37',
+  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || 'agrimarche-24e37.appspot.com',
+  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID || '21462709831',
+  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID || '1:21462709831:web:e82e3b09279ac7584ba362',
+  measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID || 'G-0L41S1RHWZ',
+};
+
+// =====================================================
+// INITIALISATION
+// =====================================================
+
+const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+
+// ⚠️ FIX v9 — CAUSE RACINE CONFIRMÉE DU BLOCAGE DE `onAuthStateChanged` :
+// `getAuth(app)` seul (sans configuration explicite) tente en interne, dès
+// l'appel, la persistance `indexedDBLocalPersistence` par défaut — EXACTEMENT
+// le même mécanisme IndexedDB déjà identifié et désactivé pour Firestore
+// plus bas dans ce fichier (voir FIX v3) : dans cet environnement WKWebView/
+// Capacitor, son initialisation ne se termine jamais, ce qui bloque tout ce
+// qui en dépend en interne dans le SDK Auth — dont le tout premier
+// déclenchement d'`onAuthStateChanged`.
+//
+// Le code appelait ensuite `setPersistence(auth, browserLocalPersistence)`
+// pour forcer un changement — mais TROP TARD : `onAuthStateChanged` s'abonne
+// dès le montage de AuthContext et attend la fin de CETTE PREMIÈRE lecture
+// (IndexedDB, déjà lancée par `getAuth()`) avant de pouvoir émettre son tout
+// premier état, qu'importe qu'on lui demande de changer de persistance
+// juste après. D'où le blocage systématique de ~8s (jusqu'au filet de
+// sécurité de AuthContext), identique dans son mécanisme au blocage
+// Firestore déjà résolu.
+//
+// Fix : configurer la persistance voulue DÈS LA CRÉATION avec
+// `initializeAuth()`, pour qu'IndexedDB ne soit jamais sollicité, plutôt
+// que d'essayer de s'en éloigner après coup une fois la course perdue.
+export const auth = initializeAuth(app, {
+  persistence: browserLocalPersistence,
+});
+
+// ⚠️ FIX : `getFirestore(app)` utilise par défaut une connexion en streaming
+// (WebChannel/HTTP2) pour les listeners `onSnapshot`. Sous Capacitor iOS
+// (WKWebView, scheme capacitor://localhost), si cette connexion tente de
+// s'établir avant que la pile réseau native soit pleinement initialisée —
+// ce qui arrive typiquement au tout premier lancement à froid quand la
+// connexion (wifi/4G) est déjà active — elle reste bloquée dans une boucle
+// de reconnexion silencieuse : aucune donnée n'arrive jamais, aucune erreur
+// n'est levée non plus. C'est pour ça que couper puis rallumer la connexion
+// "débloquait" l'app : ça forçait le navigateur à renégocier une connexion
+// propre.
+//
+// ⚠️ FIX (v2) : `experimentalAutoDetectLongPolling` fait d'abord une phase
+// de DÉTECTION pour choisir entre streaming et long-polling — et cette
+// détection elle-même peut rester bloquée sans jamais aboutir sur un réseau
+// mobile instable (signal faible, coupures), ce qui reproduit exactement le
+// même symptôme qu'on essayait de corriger. `experimentalForceLongPolling`
+// saute complètement cette phase de détection et utilise directement le
+// long-polling (simples requêtes HTTP, le protocole le plus robuste et le
+// plus largement supporté), au prix d'un tout petit surcoût réseau —
+// largement compensé par la fiabilité sur les connexions faibles typiques
+// du terrain (Sénégal, zones rurales).
+//
+// ⚠️ FIX v6 — ce forçage ne doit s'appliquer QUE sur natif (Capacitor
+// iOS/Android), pas dans un navigateur classique (Chrome/Edge en dev sur
+// localhost, ou PWA web). Un vrai navigateur gère très bien le streaming
+// WebChannel natif — c'est justement ce que ce fix contourne. En le
+// forçant aussi côté web, chaque connexion Firestore devient un
+// "hanging GET" qui met 15 à 30s à s'établir (visible dans l'onglet
+// Réseau : requêtes `channel?gsessionid=...` très longues), ce qui
+// dépasse largement les filets de sécurité de 5-8s ailleurs dans le code
+// et déclenche des `[firebase] Firestore prêt (timeout de sécurité 5s)`
+// à répétition alors que rien n'est réellement cassé. Sur le web, le SDK
+// choisit lui-même le meilleur transport (généralement le streaming,
+// beaucoup plus rapide à établir).
+const isNative = typeof window !== 'undefined' && Capacitor.isNativePlatform();
+
+// ⚠️ FIX v7 — CAUSE RACINE probable du blocage au cold start (réseau déjà
+// actif) : sur iOS, la TOUTE PREMIÈRE requête réseau émise depuis le
+// contexte JS de la WKWebView (fetch/XHR — PAS les appels natifs du pont
+// Capacitor, qui empruntent un chemin différent) peut rester bloquée sans
+// jamais aboutir NI échouer, tant qu'aucun véritable événement de
+// connectivité ne force la WebView à (ré)initialiser son moteur réseau
+// interne. C'est un comportement documenté de WKWebView, pas un bug
+// Firestore. C'est exactement pour ça que couper/rallumer le réseau
+// "débloquait" tout : ça fournissait cet événement manquant.
+//
+// `Network.getStatus()` (natif) et `FirebaseAuthentication.getCurrentUser()`
+// (natif) répondent très bien pendant ce blocage — normal, ils ne passent
+// pas par le moteur réseau JS bloqué. Firestore, lui, fait un vrai
+// fetch/XHR (canal long-polling) depuis le JS, et reste donc bloqué.
+//
+// Fix : dès que possible sur natif, on émet nous-mêmes une petite requête
+// HTTP bidon depuis le JS (fire-and-forget, réponse ignorée) — le simple
+// fait qu'elle aboutisse (ou échoue proprement) force la WebView à engager
+// réellement son moteur réseau, avant que Firestore ne tente sa propre
+// connexion juste derrière.
+// Fix : `generate_204` ne renvoie pas d'en-têtes CORS, donc un `fetch()`
+// en mode CORS normal échoue quasi toujours avec "Load failed" — que le
+// réseau soit prêt ou non. Ça ne prouvait rien. En mode `no-cors`, on
+// n'a pas accès à la réponse (opaque), mais le navigateur/WebView effectue
+// bien le round-trip réseau complet, ce qui est tout ce qu'on veut ici :
+// forcer un vrai aller-retour, pas lire la réponse.
+if (isNative) {
+  fetch('https://www.gstatic.com/generate_204', { cache: 'no-store', mode: 'no-cors' })
+    .then(() => trace('firestore', 'réveil réseau WKWebView — requête de test aboutie (no-cors)'))
+    .catch((err) => trace('firestore', 'réveil réseau WKWebView — requête de test en échec MÊME en no-cors (signal réseau réel)', err?.message || err));
+}
+
+export const db = initializeFirestore(app, {
+  ...(isNative ? { experimentalForceLongPolling: true } : {}),
+});
+
+// ⚠️ FIX v5 — CAUSE RÉELLE CONFIRMÉE (erreur exacte capturée en prod) :
+// `FirebaseError: Failed to get document because the client is offline`.
+//
+// Le vrai problème n'était ni le réseau, ni IndexedDB, ni le long-polling :
+// c'est que `ensureUserExists()` appelle `getDoc()` — une lecture UNIQUE,
+// pas un listener — immédiatement après la connexion de l'utilisateur.
+// Or `getDoc()` (contrairement à `onSnapshot()`) échoue IMMÉDIATEMENT avec
+// "client is offline" si le SDK Firestore n'a pas encore intérieurement
+// confirmé son état "en ligne", même si le réseau de l'appareil fonctionne
+// très bien — c'est un pur problème de timing interne au SDK au démarrage
+// à froid, pas un problème réseau réel. Une fois cette première lecture
+// ratée, l'état de l'app (profil non chargé, redirection non faite) restait
+// cassé, même si Firestore se connectait correctement juste après.
+//
+// La solution : exposer un vrai signal "Firestore est prêt" basé sur
+// `onSnapshotsInSync` (l'événement officiel de synchronisation avec le
+// serveur), que `ensureUserExists()` et toute autre lecture ponctuelle
+// attendent AVANT de faire leur premier `getDoc()`. Un timeout de sécurité
+// de 5s évite de bloquer indéfiniment si cet événement ne se déclenchait
+// jamais pour une raison quelconque.
+// ⚠️ FIX v10 — FAILLE TROUVÉE DANS LE FIX v8 : le mécanisme de
+// canari + reconnexion automatique (disableNetwork/enableNetwork) n'était
+// déclenché QUE par le premier appel à `waitForFirestoreReady()` — or
+// SEULES `products/page.tsx` et `userProfile.ts` appellent cette fonction.
+// Les rôles admin, seller et delivery sont redirigés directement vers
+// leurs propres tableaux de bord (voir app/page.tsx) qui posent leurs
+// `onSnapshot()` SANS JAMAIS appeler `waitForFirestoreReady()` — pour ces
+// utilisateurs, le canal pouvait rester zombie SANS AUCUN filet de
+// sécurité, la logique de récupération ne s'exécutant tout simplement
+// jamais.
+//
+// FIX : ce mécanisme s'exécute maintenant automatiquement, une seule fois,
+// dès le chargement de ce module (donc pour TOUT rôle/toute route, puisque
+// `firebase.ts` est importé par `AuthContext` qui enveloppe toute l'app) —
+// il n'attend plus qu'un appelant précis vienne le déclencher.
+// `waitForFirestoreReady()` devient un simple wrapper qui attend ce même
+// mécanisme partagé, sans plus jamais être responsable de l'amorcer.
+let firestoreReadyPromise: Promise<void> | null = null;
+
+function startFirestoreReadyWatcher(timeoutMs = 5000): Promise<void> {
+  trace('firestore', 'démarrage automatique du canari (indépendant de tout appelant)');
+  return new Promise<void>((resolve) => {
+    let done = false;
+    let canaryGotServerData = false;
+
+    const timer = setTimeout(() => finish(`timeout de sécurité ${timeoutMs}ms`), timeoutMs);
+
+    // ⚠️ FIX v8 — CAUSE RACINE CONFIRMÉE (diagnostic du 26/07) : le réseau
+    // natif est bien connecté, un fetch REST brut vers Firestore répond
+    // HTTP 200 immédiatement — mais le canal de streaming temps réel du
+    // SDK (le "Listen channel" en long-polling utilisé par onSnapshot)
+    // reste "zombie" au cold start : ni donnée, ni erreur, indéfiniment.
+    // C'est un problème isolé à CE canal persistant, pas au réseau ni à
+    // Firestore côté serveur (qui répond très bien aux appels REST).
+    //
+    // C'est exactement pour ça que couper/rallumer le réseau réglait le
+    // problème manuellement : ça force le SDK à fermer et rouvrir ce
+    // canal. On reproduit ça nous-mêmes, automatiquement, via l'API
+    // publique du SDK — sans dépendre d'une action de l'utilisateur.
+    //
+    // Si le canari n'a toujours pas reçu de donnée confirmée serveur
+    // après un délai court (bien avant le timeout final de 5s), on
+    // force un cycle disableNetwork()/enableNetwork() : ça imite
+    // précisément l'effet d'un vrai changement de connectivité, et
+    // force le SDK à relancer son canal de streaming au lieu de rester
+    // bloqué dessus indéfiniment. Ce forçage agit sur `db` globalement :
+    // il débloque donc AUSSI tous les autres `onSnapshot()` actifs
+    // ailleurs dans l'app (admin, seller, delivery...), pas seulement
+    // ce canari.
+    const reconnectTimer = isNative
+      ? setTimeout(() => {
+          if (canaryGotServerData || done) return;
+          trace('firestore', 'canal encore zombie après 3s — forçage disableNetwork()/enableNetwork() pour relancer la connexion');
+          disableNetwork(db)
+            .then(() => enableNetwork(db))
+            .then(() => trace('firestore', 'disableNetwork()/enableNetwork() terminé — en attente de confirmation serveur'))
+            .catch((err) => trace('firestore', 'échec disableNetwork()/enableNetwork() (ignoré, le timeout prendra le relais)', err?.message || err));
+        }, 3000)
+      : null;
+
+    const finish = (reason: string) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      trace('firestore', `prêt (${reason})`);
+      resolve();
+    };
+
+    // Canari : force un vrai aller-retour serveur avant que
+    // `onSnapshotsInSync` puisse être considéré comme fiable.
+    const unsubCanary = onSnapshot(
+      query(collection(db, 'products'), limit(1)),
+      (snap) => {
+        // `fromCache: false` = donnée confirmée par le serveur, pas
+        // juste servie depuis le cache local instantanément.
+        if (!snap.metadata.fromCache) {
+          canaryGotServerData = true;
+        }
+      },
+      (err) => {
+        trace('firestore', 'canari en erreur (ignoré, le timeout prendra le relais)', err?.code || err);
+      },
+    );
+
+    const unsubSync = onSnapshotsInSync(db, () => {
+      if (!canaryGotServerData) {
+        trace('firestore', 'onSnapshotsInSync ignoré (trivial — canari pas encore confirmé serveur)');
+        return;
+      }
+      unsubSync();
+      unsubCanary();
+      finish('onSnapshotsInSync + canari confirmé serveur');
+    });
+  });
+}
+
+// Démarrage immédiat, une seule fois, dès le chargement du module — pour
+// TOUS les rôles et TOUTES les routes, plus seulement pour ceux qui
+// passent par `/main/products`.
+if (typeof window !== 'undefined') {
+  firestoreReadyPromise = startFirestoreReadyWatcher();
+}
+
+export function waitForFirestoreReady(timeoutMs = 5000): Promise<void> {
+  if (typeof window === 'undefined') return Promise.resolve();
+  // Le watcher est déjà démarré au chargement du module (voir plus haut) ;
+  // on ne fait ici qu'attendre le même résultat partagé. `timeoutMs` n'a
+  // plus d'effet ici (il ne s'applique qu'au démarrage du watcher) —
+  // conservé pour compatibilité de signature avec les appelants existants.
+  void timeoutMs;
+  if (!firestoreReadyPromise) {
+    firestoreReadyPromise = startFirestoreReadyWatcher(timeoutMs);
+  }
+  return firestoreReadyPromise;
+}
+
+// ⚠️ FIX v3 — CAUSE CONFIRMÉE DU BLOCAGE TOTAL : `enableIndexedDbPersistence`
+// n'est pas un simple cache à côté, c'est un VERROU interne que le SDK
+// Firestore utilise pour synchroniser TOUTES ses opérations (lectures,
+// écritures, listeners) via IndexedDB. Preuve définitive : une requête HTTP
+// brute vers l'API REST Firestore répondait 200 normalement (elle
+// contourne entièrement le SDK JS), alors que TOUT ce qui passait par ce
+// SDK (onSnapshot, y compris sur des collections totalement différentes)
+// restait bloqué sans jamais ni répondre ni renvoyer d'erreur — signe que
+// l'attente se faisait AVANT même la moindre requête réseau, au niveau de
+// ce verrou interne. Dans ce WebView précis, son initialisation ne
+// s'est jamais terminée, gelant donc tout le moteur Firestore derrière
+// elle. On retire cette persistence : on perd le cache instantané entre
+// deux visites, mais on retrouve un SDK qui répond de façon fiable.
+export const storage = getStorage(app);
+
+// ⚠️ FIX : `getAnalytics(app)` était appelé de façon synchrone et
+// inconditionnelle au chargement du module. Sur iOS (WKWebView via
+// Capacitor), Firebase Analytics peut jeter une erreur synchrone
+// ("browser doesn't support all required features") — non catchée,
+// ce qui faisait échouer l'IMPORT ENTIER de ce fichier, donc `auth`/
+// `db` n'étaient jamais initialisés et rien ne pouvait démarrer.
+// Android tolère généralement cet appel, d'où le comportement différent.
+// On applique désormais le même garde-fou que pour `messaging` :
+// vérification async de support + try/catch, sans jamais bloquer ni
+// faire planter l'initialisation du reste de Firebase.
+export let analytics: ReturnType<typeof getAnalytics> | null = null;
+let messaging: any = null;
+
+// =====================================================
+// PERSISTENCE (côté client uniquement)
+// =====================================================
+
+if (typeof window !== 'undefined') {
+  // FIX v9 : plus besoin de `setPersistence(...)` ici — la persistance
+  // `browserLocalPersistence` est désormais fixée dès la création de `auth`
+  // via `initializeAuth()` ci-dessus, avant que quoi que ce soit ne puisse
+  // s'abonner à `onAuthStateChanged`. Voir le commentaire FIX v9 plus haut.
+
+  isSupported()
+    .then((supported) => {
+      if (supported) {
+        messaging = getMessaging(app);
+      }
+    })
+    .catch((err) => console.error('[firebase] messaging isSupported() a échoué:', err));
+
+  analyticsIsSupported()
+    .then((supported) => {
+      if (supported) analytics = getAnalytics(app);
+    })
+    .catch((err) => console.error('[firebase] analytics non initialisé (ignoré, non bloquant):', err));
+}
+
+// =====================================================
+// CATÉGORIES
+// =====================================================
+
+export const PRODUCT_CATEGORIES = [
+  'Tous',
+  'Fruits',
+  'Légumes',
+  'Céréales',
+  'Tubercules',
+  'Légumineuses',
+  'Épices',
+  'Produits laitiers',
+  'Viandes',
+  'Poissons & Fruits de mer',
+  'Boissons',
+  'Produits transformés',
+  'Semences & Agricole',
+] as const;
+
+export type ProductCategory = typeof PRODUCT_CATEGORIES[number];
+
+// =====================================================
+// TYPES
+// =====================================================
+
+export interface UserProfile {
+  uid: string;
+  email: string;
+  displayName: string;
+  phone: string;
+  photoURL: string;
+  role: 'client' | 'seller' | 'both' | 'admin';
+  currentMode?: 'client' | 'seller' | 'admin';
+  status: 'active' | 'suspended' | 'pending';
+  emailVerified: boolean;
+  phoneVerified: boolean;
+  notificationToken?: string;
+  sellerInfo?: {
+    shopName: string;
+    description: string;
+    approved: boolean;
+    verified: boolean;
+    rating: number;
+    totalSales: number;
+    totalRevenue: number;
+    joinedAt: Timestamp;
+  };
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+// =====================================================
+// SIGN UP
+// =====================================================
+
+export async function signUpUser(email: string, password: string, displayName: string, phone: string) {
+  const credential = await createUserWithEmailAndPassword(auth, email, password);
+  const user = credential.user;
+
+  await updateProfile(user, { displayName });
+
+  const profile: UserProfile = {
+    uid: user.uid,
+    email,
+    displayName,
+    phone,
+    photoURL: '',
+    role: 'client',
+    currentMode: 'client',
+    status: 'active',
+    emailVerified: false,
+    phoneVerified: false,
+    createdAt: Timestamp.now(),
+    updatedAt: Timestamp.now(),
+  };
+
+  await setDoc(doc(db, 'users', user.uid), profile);
+
+  return { user, profile };
+}
+
+// =====================================================
+// SIGN IN
+// =====================================================
+
+export async function signInUser(email: string, password: string) {
+  return signInWithEmailAndPassword(auth, email, password);
+}
+
+// =====================================================
+// LOGOUT
+// =====================================================
+
+export async function logoutUser() {
+  return signOut(auth);
+}
+
+// =====================================================
+// RESET PASSWORD
+// =====================================================
+
+export async function resetPassword(email: string) {
+  return sendPasswordResetEmail(auth, email);
+}
+
+// =====================================================
+// GET USER PROFILE
+// =====================================================
+
+export async function getUserProfile(uid: string): Promise<UserProfile | null> {
+  const snapshot = await getDoc(doc(db, 'users', uid));
+  if (!snapshot.exists()) return null;
+  return snapshot.data() as UserProfile;
+}
+
+// =====================================================
+// UPDATE PROFILE
+// =====================================================
+
+export async function updateUserProfile(uid: string, data: Partial<UserProfile>) {
+  await updateDoc(doc(db, 'users', uid), {
+    ...data,
+    updatedAt: Timestamp.now(),
+  });
+}
+
+// =====================================================
+// DEVENIR VENDEUR
+// =====================================================
+
+export async function becomeSeller(uid: string, sellerInfo: { shopName: string; description: string }) {
+  const ref = doc(db, 'users', uid);
+  const snap = await getDoc(ref);
+
+  if (!snap.exists()) throw new Error('Utilisateur introuvable');
+
+  const current = snap.data() as UserProfile;
+
+  // DÉJÀ VENDEUR
+  if (current.role === 'seller' || current.role === 'both') {
+    await updateDoc(ref, {
+      currentMode: 'seller',
+      updatedAt: Timestamp.now(),
+    });
+    return;
+  }
+
+  // ADMIN
+  if (current.role === 'admin') {
+    await updateDoc(ref, {
+      currentMode: 'admin',
+      updatedAt: Timestamp.now(),
+    });
+    return;
+  }
+
+  // CLIENT -> BOTH
+  await updateDoc(ref, {
+    role: 'both',
+    currentMode: 'seller',
+    sellerInfo: {
+      ...sellerInfo,
+      approved: false,
+      verified: false,
+      rating: 0,
+      totalSales: 0,
+      totalRevenue: 0,
+      joinedAt: Timestamp.now(),
+    },
+    updatedAt: Timestamp.now(),
+  });
+}
+
+// =====================================================
+// SWITCH MODE
+// =====================================================
+
+export async function switchUserMode(uid: string, mode: 'client' | 'seller') {
+  const ref = doc(db, 'users', uid);
+  const snap = await getDoc(ref);
+
+  if (!snap.exists()) return;
+
+  const user = snap.data() as UserProfile;
+
+  // SÉCURITÉ
+  if (mode === 'seller' && user.role !== 'both' && user.role !== 'seller') {
+    return;
+  }
+
+  await updateDoc(ref, {
+    currentMode: mode,
+    updatedAt: Timestamp.now(),
+  });
+}
+
+// =====================================================
+// EXPORTS
+// =====================================================
+
+export {
+  app,
+  messaging,
+  onAuthStateChanged,
+  uploadBytes,
+  uploadBytesResumable,
+  getDownloadURL,
+  deleteObject,
+  arrayUnion,
+  arrayRemove,
+  increment,
+  Timestamp,
+  writeBatch,
+  getToken,
+  onMessage,
+};

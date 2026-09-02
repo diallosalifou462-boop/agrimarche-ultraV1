@@ -32,4 +32,15 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Requises par @capacitor/geolocation (lib/geolocation.ts) : sans elles,
+         Geolocation.getCurrentPosition/watchPosition échouent systématiquement
+         côté natif, quel que soit ce que l'utilisateur accepte dans le popup
+         de permission de l'app — c'est la cause du bug "tombe toujours sur
+         Dakar" sur Android. ACCESS_COARSE_LOCATION seule suffit pour une
+         position approximative (réseau/Wi-Fi) ; ACCESS_FINE_LOCATION est
+         nécessaire pour la précision GPS utilisée par LiveLocation.tsx
+         (tracking livreur en temps réel). -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 </manifest>

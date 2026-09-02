@@ -1,0 +1,48 @@
+// ============================================================
+// EXTRAIT A FUSIONNER DANS firestore.rules (bloc match /databases/...)
+// ============================================================
+//
+// Portee : les 3 automatisations de notifications sans cron (voir
+// admin/page.tsx onglet Notifications, /api/products/check-stock et
+// /api/system/periodic-checks).
+//
+// ⚠️ IMPORTANT : les erreurs "Missing or insufficient permissions" vues
+// sur `aiPromotion settings load` (fonctionnalite PRE-EXISTANTE, pas
+// nouvelle) montrent que `settings/*` n'a probablement jamais eu de
+// regle explicite pour l'admin. Ce snippet couvre `settings/*` de
+// maniere generique pour regler ca aussi, pas seulement les 3 nouvelles
+// cles.
+//
+// Deux categories de documents :
+//   1. settings/{aiPromotion, lowStockAlerts, pendingOrdersAlerts,
+//      inactiveClientsAlerts, periodicChecksLock} -- lus ET ecrits
+//      depuis le client admin (toggle, seuils). L'admin a besoin de
+//      read+write direct.
+//   2. {ai_promotions, low_stock_alerts, pending_order_alerts,
+//      inactive_client_alerts} -- historiques, ECRITS UNIQUEMENT par les
+//      routes API (Admin SDK, hors regles), l'admin n'a besoin que de
+//      LIRE pour afficher l'historique dans l'UI.
+
+match /settings/{settingId} {
+  allow read, write: if isAdmin();
+}
+
+match /ai_promotions/{docId} {
+  allow read: if isAdmin();
+  allow write: if false; // ecrit uniquement via Admin SDK (cron)
+}
+
+match /low_stock_alerts/{docId} {
+  allow read: if isAdmin();
+  allow write: if false; // ecrit uniquement via Admin SDK (/api/products/check-stock)
+}
+
+match /pending_order_alerts/{docId} {
+  allow read: if isAdmin();
+  allow write: if false; // ecrit uniquement via Admin SDK (/api/system/periodic-checks)
+}
+
+match /inactive_client_alerts/{docId} {
+  allow read: if isAdmin();
+  allow write: if false; // ecrit uniquement via Admin SDK (/api/system/periodic-checks)
+}

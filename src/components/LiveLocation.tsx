@@ -31,6 +31,9 @@ import {
 import { useAuth } from '@/hooks/useAuth';
 import { db } from '@/lib/firebase/firebase';
 import { doc, updateDoc, Timestamp } from 'firebase/firestore';
+import { distanceKm } from '@/lib/geo/distance';
+import { computeGeohash } from '@/lib/geo/geohash';
+import { setCachedLocation } from '@/lib/locationCache';
 
 interface LocationData {
   lat: number;
@@ -101,6 +104,17 @@ export function LiveLocation() {
   // près"). 60s suffit largement pour que l'admin voie une position
   // à jour, sans spammer Firestore.
   const lastPersistRef = useRef<number>(0);
+  // Dernière position réellement écrite sur Firestore : sert au filtre de
+  // mouvement ci-dessous (voir updateLocation), pour ne pas ré-écrire quand
+  // l'appareil est immobile — indépendant du throttle temporel 60s.
+  const lastPersistedCoordsRef = useRef<{ lat: number; lng: number } | null>(null);
+  // Seuil de mouvement en dessous duquel une position n'est pas considérée
+  // comme "nouvelle" (bruit GPS typique à l'arrêt : 5-15m). Un livreur
+  // immobile à un feu rouge ne doit pas spammer Firestore toutes les 60s.
+  const MOVEMENT_THRESHOLD_METERS = 20;
+  // Heartbeat : même sans mouvement, on force une écriture toutes les 5min
+  // pour que l'admin sache que le suivi est toujours actif (et pas figé/mort).
+  const HEARTBEAT_MS = 5 * 60_000;
   const [isLocating, setIsLocating] = useState(false);
   const watchIdRef = useRef<string | number | null>(null);
   const historyMax = 10;
@@ -324,11 +338,27 @@ export function LiveLocation() {
     setLastUpdate(new Date());
     setLocationHistory(prev => [locationData, ...prev].slice(0, historyMax));
 
+    // isDefault:true — précision IP (~5km), jamais mise en cache comme
+    // fiable au même titre qu'un vrai fix GPS (voir lib/locationCache.ts) :
+    // sinon une position par IP pourrait bloquer une future tentative GPS
+    // plus précise, ou s'afficher ailleurs comme "position exacte".
+    setCachedLocation({
+      lat: locationData.lat,
+      lng: locationData.lng,
+      city: locationData.address.city,
+      region: locationData.address.region,
+      country: locationData.address.country,
+      address: locationData.address.full,
+      detected: true,
+      isDefault: true,
+    });
+
     if (user?.uid && Date.now() - lastPersistRef.current > 60_000) {
       lastPersistRef.current = Date.now();
       updateDoc(doc(db, 'users', user.uid), {
         lat: locationData.lat,
         lng: locationData.lng,
+        geohash: computeGeohash(locationData.lat, locationData.lng),
         locationAccuracy: locationData.accuracy,
         locationAddress: locationData.address.full,
         locationSource: 'IP_FALLBACK',
@@ -362,6 +392,26 @@ export function LiveLocation() {
     setStatus('found');
     setLastUpdate(new Date());
 
+    // ✅ Alimente le cache partagé (lib/locationCache.ts) — cette page est
+    // justement l'endroit où l'utilisateur détecte sa position le plus
+    // explicitement, mais avant ce correctif elle n'écrivait QUE Firestore
+    // (pour un compte connecté). Résultat concret : détecter sa position
+    // ici n'aidait ni le checkout ni la fiche produit ni "Près de chez
+    // vous" dans le catalogue, qui lisaient chacun leur propre cache
+    // (voir lib/locationCache.ts pour l'historique des 3 caches
+    // désynchronisés). Best-effort, marche aussi pour un visiteur non
+    // connecté (contrairement à l'écriture Firestore ci-dessous).
+    setCachedLocation({
+      lat: latitude,
+      lng: longitude,
+      city: address.city,
+      region: address.region,
+      country: address.country,
+      address: address.full || `${address.city || ''}${address.region ? ', ' + address.region : ''}`.trim(),
+      detected: true,
+      isDefault: source !== 'gps',
+    });
+
     // ✅ NOUVEAU — recopie sur users/{uid}, comme checkout/page.tsx : cette
     // page (/main/location) est justement l'endroit où l'utilisateur détecte
     // sa position explicitement, donc c'est la source la plus fiable pour
@@ -370,15 +420,23 @@ export function LiveLocation() {
     // l'écriture échoue), et seulement pour un compte connecté (pas de
     // profil à mettre à jour pour un visiteur non authentifié).
     if (user?.uid && Date.now() - lastPersistRef.current > 60_000) {
-      lastPersistRef.current = Date.now();
-      updateDoc(doc(db, 'users', user.uid), {
-        lat: latitude,
-        lng: longitude,
-        locationAccuracy: accuracy ?? undefined,
-        locationAddress: address.full || `${address.city || ''}${address.region ? ', ' + address.region : ''}`.trim() || undefined,
-        locationSource: source === 'gps' ? 'GPS' : 'IP_FALLBACK',
-        locationUpdatedAt: Timestamp.now(),
-      }).catch(() => {});
+      const prev = lastPersistedCoordsRef.current;
+      const movedMeters = prev ? distanceKm(prev.lat, prev.lng, latitude, longitude) * 1000 : Infinity;
+      const dueForHeartbeat = Date.now() - lastPersistRef.current > HEARTBEAT_MS;
+
+      if (movedMeters > MOVEMENT_THRESHOLD_METERS || dueForHeartbeat) {
+        lastPersistRef.current = Date.now();
+        lastPersistedCoordsRef.current = { lat: latitude, lng: longitude };
+        updateDoc(doc(db, 'users', user.uid), {
+          lat: latitude,
+          lng: longitude,
+          geohash: computeGeohash(latitude, longitude),
+          locationAccuracy: accuracy ?? undefined,
+          locationAddress: address.full || `${address.city || ''}${address.region ? ', ' + address.region : ''}`.trim() || undefined,
+          locationSource: source === 'gps' ? 'GPS' : 'IP_FALLBACK',
+          locationUpdatedAt: Timestamp.now(),
+        }).catch(() => {});
+      }
     }
 
     // Ajouter à l'historique

@@ -20,7 +20,7 @@ import {
   HelpCircle, Menu, Moon, Sun, Monitor, Database, Cloud, Server, Megaphone,
   ShieldCheck, Fingerprint, Key, Lock, Unlock, Gift, Heart, ThumbsUp,
   Send, Globe, Pencil, Trash2, Loader2, ImagePlus, RadioTower,
-  Filter, ArrowUpDown, PackageX, Layers, Smartphone, History
+  Filter, ArrowUpDown, PackageX, Layers, Smartphone, History, Store
 } from "lucide-react";
 import { db, auth } from "@/lib/firebase/firebase";
 import {
@@ -140,14 +140,15 @@ interface Order {
   paymentMethod?: 'wave' | 'orange' | 'free' | 'card';
   paymentStatus?: 'pending' | 'paid' | 'failed';
   commission?: number;
-  // Parcours de suivi hybride (voir functions/src/index.ts et
-  // delivery/dashboard/page.tsx) — écrit par assignDelivery ci-dessous et
-  // par le livreur lui-même, jusqu'ici jamais déclaré ni affiché côté admin.
-  // ⚠️ Les horodatages assignedAt/enRouteAt/approachingAt/arrivedAt existent
-  // déjà dans les documents Firestore (voir /admin/logistics::OrderDoc, qui
-  // les lit) mais n'étaient déclarés ici que via `phase` — ajoutés pour
-  // pouvoir calculer les mêmes métriques de perf par livreur dans l'onglet
-  // "Livreurs" (temps de trajet, réactivité, ponctualité).
+  // Parcours de suivi hybride — écrit par assignDelivery ci-dessous
+  // ('assigned') et par le livreur (delivery/dashboard/page.tsx :
+  // 'en_route' au premier point GPS, 'arrived' sur confirmation manuelle).
+  // La transition 'en_route' → 'approaching' et TOUS les horodatages
+  // tracking.{phase}At sont écrits par le Cloud Functions
+  // checkDeliveryProximity / notifyDeliveryPhaseChange (functions/index.ts,
+  // fourni séparément — vérifier qu'il est bien déployé : son propre
+  // en-tête indique qu'il ne l'était pas encore à la dernière vérification).
+  // Ce sont ces fonctions, pas le code client, qui font foi pour ces champs.
   tracking?: {
     phase?: 'assigned' | 'en_route' | 'approaching' | 'arrived';
     assignedAt?: Timestamp;
@@ -155,6 +156,14 @@ interface Order {
     approachingAt?: Timestamp;
     arrivedAt?: Timestamp;
   };
+  // ✅ NOUVEAU — posés respectivement par checkout/page.tsx (customerLocation,
+  // sur CHAQUE commande depuis toujours) et par le même createOrder au moment
+  // de la commande (sellerLocation, recopié depuis users/{sellerId}.lat/lng —
+  // voir seller/dashboard/page.tsx pour la saisie GPS/manuelle). Jamais
+  // déclarés ni affichés ici jusqu'ici : l'admin n'avait aucun moyen de voir
+  // où récupérer (vendeur) ni où livrer (client) pour une commande donnée.
+  sellerLocation?: { lat?: number; lng?: number; address?: string; isDefault?: boolean };
+  customerLocation?: { lat?: number; lng?: number; address?: string; isDefault?: boolean };
 }
 
 interface UserProfile {
@@ -1307,6 +1316,7 @@ export default function AdminDashboard() {
         label: `${u.displayName || 'Sans nom'} (${{ client: 'Client', seller: 'Vendeur', delivery: 'Livreur', admin: 'Admin' }[u.role] || u.role})`,
         sublabel: u.locationAddress || u.phone || u.email,
         kind: ROLE_MAP_KIND[u.role] || 'client',
+        updatedAt: u.locationUpdatedAt ?? null,
         onClick: () => setUserMapSelectedId(u.id!),
       }))
   ), [filteredUsers]);
@@ -1536,6 +1546,13 @@ export default function AdminDashboard() {
         delivererAssignedAt: Timestamp.now(), status: 'en_preparation' as const, updatedAt: now,
         // Parcours de suivi hybride (voir delivery/dashboard::claimOrder pour
         // le contexte complet) — cohérence entre les deux voies d'attribution.
+        // 'tracking.assignedAt' n'est PAS écrit ici : functions/index.ts::
+        // notifyDeliveryPhaseChange l'horodate automatiquement dès que
+        // 'tracking.phase' passe à 'assigned' (voir son fallback
+        // `${afterPhase}At` pour les phases sans entrée dans
+        // PHASE_NOTIFICATIONS) — écrire les deux créerait la même
+        // divergence potentielle que le bug de seuil 400m/500m déjà
+        // corrigé dans startSharingLocation.
         'tracking.phase': 'assigned',
       };
       const batch = writeBatch(db);
@@ -3245,7 +3262,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                         <table style={{ width:'100%', borderCollapse:'collapse' }}>
                           <thead>
                             <tr style={{ borderBottom:'1px solid #1f2127' }}>
-                              {['N°','Date','Client','Produit','Vendeur','Région','Montant','Commission','Statut','Actions'].map(h=>(
+                              {['N°','Date','Client','Produit','Vendeur','Localisation','Région','Montant','Commission','Statut','Actions'].map(h=>(
                                 <th key={h} style={{ textAlign:'left', padding:'10px 8px', fontSize:11, color:'#6b7280', letterSpacing:0.8, textTransform:'uppercase' }}>{h}</th>
                               ))}
                             </tr>
@@ -3282,6 +3299,68 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                                   ) : (order.category ?? '—')}
                                 </td>
                                 <td style={{ padding:'10px 8px', fontSize:12 }}>{getOrderSellerName(order)}</td>
+                                <td style={{ padding:'10px 8px', fontSize:11, maxWidth:190 }}>
+                                  {/* ✅ NOUVEAU — les deux adresses d'une commande (retrait chez le
+                                      vendeur, livraison chez le client), avec lien "Naviguer" pointant
+                                      exactement sur le pin GPS quand il est connu (même lien Google Maps
+                                      que delivery/dashboard::navigateUrl) — pas juste un nom de quartier.
+                                      Le badge de confiance reprend exactement la même logique que
+                                      delivery/dashboard.tsx (à garder synchronisées si l'une évolue) :
+                                      un seul ⚠️ binaire ne distinguait pas "position confirmée par le
+                                      vendeur" d'un "vieux relevé GPS jamais revérifié" — deux niveaux de
+                                      fiabilité très différents pour quelqu'un qui gère une livraison. */}
+                                  <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+                                    <div style={{ display:'flex', alignItems:'flex-start', gap:4 }}>
+                                      <Store size={11} style={{ color:'#f97316', flexShrink:0, marginTop:1 }}/>
+                                      {order.sellerLocation?.address ? (
+                                        isValidCoordinate(order.sellerLocation.lat, order.sellerLocation.lng) ? (
+                                          <a
+                                            href={`https://www.google.com/maps/dir/?api=1&destination=${order.sellerLocation.lat},${order.sellerLocation.lng}&travelmode=driving`}
+                                            target="_blank" rel="noopener noreferrer"
+                                            style={{ color:'#f97316', textDecoration:'none' }}
+                                            title="Ouvrir l'itinéraire exact vers le vendeur"
+                                          >
+                                            {order.sellerLocation.address}{order.sellerLocation.isDefault && ' ⚠️'}
+                                          </a>
+                                        ) : (
+                                          <span style={{ color:'#9ca3af' }}>{order.sellerLocation.address}</span>
+                                        )
+                                      ) : (
+                                        <span style={{ color:'#4b5563', fontStyle:'italic' }}>Non renseignée</span>
+                                      )}
+                                    </div>
+                                    {!order.sellerLocation?.isDefault && order.sellerLocation?.address && (
+                                      order.sellerLocation?.locationSource === 'MANUAL_PIN' ? (
+                                        <span style={{ fontSize:9, fontWeight:700, color:'#10b981', marginLeft:15 }}>✏️ Confirmée par le vendeur</span>
+                                      ) : (() => {
+                                        const updatedAt = order.sellerLocation?.locationUpdatedAt;
+                                        const stale = updatedAt && (Date.now() - new Date(updatedAt).getTime()) > 90 * 24 * 3600 * 1000;
+                                        return stale
+                                          ? <span style={{ fontSize:9, fontWeight:700, color:'#b45309', marginLeft:15 }}>📡 GPS non revérifié depuis longtemps</span>
+                                          : null;
+                                      })()
+                                    )}
+                                    <div style={{ display:'flex', alignItems:'flex-start', gap:4 }}>
+                                      <MapPin size={11} style={{ color:'#10b981', flexShrink:0, marginTop:1 }}/>
+                                      {order.customerLocation?.address ? (
+                                        isValidCoordinate(order.customerLocation.lat, order.customerLocation.lng) ? (
+                                          <a
+                                            href={`https://www.google.com/maps/dir/?api=1&destination=${order.customerLocation.lat},${order.customerLocation.lng}&travelmode=driving`}
+                                            target="_blank" rel="noopener noreferrer"
+                                            style={{ color:'#10b981', textDecoration:'none' }}
+                                            title="Ouvrir l'itinéraire exact vers le client"
+                                          >
+                                            {order.customerLocation.address}{order.customerLocation.isDefault && ' ⚠️'}
+                                          </a>
+                                        ) : (
+                                          <span style={{ color:'#9ca3af' }}>{order.customerLocation.address}</span>
+                                        )
+                                      ) : (
+                                        <span style={{ color:'#4b5563', fontStyle:'italic' }}>Non renseignée</span>
+                                      )}
+                                    </div>
+                                  </div>
+                                </td>
                                 <td style={{ padding:'10px 8px', fontSize:12 }}>{order.sellerRegion ?? order.region ?? '—'}</td>
                                 <td style={{ padding:'10px 8px', fontWeight:600 }}>{(order.amount ?? 0).toLocaleString()} FCFA</td>
                                 <td style={{ padding:'10px 8px', color:'#f59e0b', fontSize:12 }}>{Math.round((order.amount ?? 0)*COMMISSION_RATE).toLocaleString()} FCFA</td>
@@ -3549,17 +3628,33 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                                   </td>
                                   <td style={{ padding:'10px 8px' }}>
                                     {isValidCoordinate(user.lat, user.lng) ? (
-                                      <button
-                                        onClick={() => { setUserMapSelectedId(user.id!); setUserViewMode('carte'); }}
-                                        title="Voir sur la carte"
-                                        className="btn-secondary"
-                                        style={{ padding:'5px 9px', fontSize:11, display:'flex', alignItems:'center', gap:5, color:'#10b981', borderColor:'rgba(16,185,129,0.35)', maxWidth:150 }}
-                                      >
-                                        <MapPin size={12}/>
-                                        <span style={{ overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
-                                          {user.locationAddress || 'Voir sur la carte'}
+                                      <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+                                        <button
+                                          onClick={() => { setUserMapSelectedId(user.id!); setUserViewMode('carte'); }}
+                                          title="Voir sur la carte"
+                                          className="btn-secondary"
+                                          style={{ padding:'5px 9px', fontSize:11, display:'flex', alignItems:'center', gap:5, color:'#10b981', borderColor:'rgba(16,185,129,0.35)', maxWidth:150 }}
+                                        >
+                                          <MapPin size={12}/>
+                                          <span style={{ overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                                            {user.locationAddress || 'Voir sur la carte'}
+                                          </span>
+                                        </button>
+                                        {/* ✅ NOUVEAU : distingue une position saisie/corrigée à la
+                                            main (fiable — le vendeur l'a validée lui-même) d'une
+                                            position issue de la seule détection GPS automatique
+                                            (peut être imprécise ou obsolète). */}
+                                        <span
+                                          title={user.locationSource === 'MANUAL_PIN' ? 'Position saisie manuellement par l\'utilisateur' : 'Position détectée automatiquement (GPS)'}
+                                          style={{
+                                            fontSize:9, fontWeight:700, padding:'2px 6px', borderRadius:6, whiteSpace:'nowrap',
+                                            color: user.locationSource === 'MANUAL_PIN' ? '#a78bfa' : '#6b7280',
+                                            background: user.locationSource === 'MANUAL_PIN' ? 'rgba(167,139,250,0.12)' : 'rgba(107,114,128,0.12)',
+                                          }}
+                                        >
+                                          {user.locationSource === 'MANUAL_PIN' ? '✏️ Manuelle' : '📡 GPS'}
                                         </span>
-                                      </button>
+                                      </div>
                                     ) : (
                                       <span style={{ fontSize:11, color:'#4b5563', fontStyle:'italic' }}>Non renseignée</span>
                                     )}
@@ -6891,7 +6986,16 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
 
             {isValidCoordinate(selectedUser.lat, selectedUser.lng) && (
               <div style={{ marginBottom:16 }}>
-                <div style={{ fontSize:10, color:'#6b7280', marginBottom:6, textTransform:'uppercase', letterSpacing:0.6 }}>Localisation</div>
+                <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:6 }}>
+                  <div style={{ fontSize:10, color:'#6b7280', textTransform:'uppercase', letterSpacing:0.6 }}>Localisation</div>
+                  <span style={{
+                    fontSize:9, fontWeight:700, padding:'2px 6px', borderRadius:6,
+                    color: selectedUser.locationSource === 'MANUAL_PIN' ? '#a78bfa' : '#6b7280',
+                    background: selectedUser.locationSource === 'MANUAL_PIN' ? 'rgba(167,139,250,0.12)' : 'rgba(107,114,128,0.12)',
+                  }}>
+                    {selectedUser.locationSource === 'MANUAL_PIN' ? '✏️ Saisie manuellement' : '📡 Détection GPS'}
+                  </span>
+                </div>
                 <div style={{ borderRadius:12, overflow:'hidden', border:'1px solid #1f2127' }}>
                   <FleetMap
                     points={[{
@@ -6901,6 +7005,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                       label: selectedUser.displayName || 'Utilisateur',
                       sublabel: selectedUser.locationAddress,
                       kind: (ROLE_MAP_KIND[selectedUser.role] || 'client'),
+                      updatedAt: selectedUser.locationUpdatedAt ?? null,
                     }]}
                     height={180}
                   />
@@ -6908,6 +7013,24 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                 {selectedUser.locationAddress && (
                   <div style={{ fontSize:11, color:'#9ca3af', marginTop:6 }}>📍 {selectedUser.locationAddress}</div>
                 )}
+                {selectedUser.locationUpdatedAt && (() => {
+                  const raw: any = selectedUser.locationUpdatedAt;
+                  const d: Date | null = typeof raw?.toDate === 'function' ? raw.toDate() : (raw ? new Date(raw) : null);
+                  if (!d || Number.isNaN(d.getTime())) return null;
+                  const sec = Math.round((Date.now() - d.getTime()) / 1000);
+                  const isLive = sec < 60;
+                  const label = sec < 10 ? "à l'instant" : sec < 60 ? `il y a ${sec}s` : sec < 3600 ? `il y a ${Math.round(sec/60)} min` : sec < 86400 ? `il y a ${Math.round(sec/3600)} h` : `il y a ${Math.round(sec/86400)} j`;
+                  // Rappel visible : une position vieille de plusieurs
+                  // heures ne doit jamais être confondue avec un livreur
+                  // suivi en direct — voir le correctif dans
+                  // app/delivery/dashboard/page.tsx (users/{uid} n'est
+                  // désormais synchronisé qu'en cours de livraison active).
+                  return (
+                    <div style={{ fontSize:11, marginTop:4, color: isLive ? '#22c55e' : sec < 900 ? '#f59e0b' : '#6b7280', fontWeight: isLive ? 700 : 400 }}>
+                      {isLive ? '🟢 Position en direct' : `🕓 Dernière position connue ${label}`}
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
