@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { watchPosition, clearWatch, requestLocationPermission } from '@/lib/geolocation';
+import { Geolocation } from '@capacitor/geolocation';
 import { useAuth } from '@/hooks/useAuth';
 import { useRouter } from 'next/navigation';
 import { db } from '@/lib/firebase/firebase';
@@ -10,7 +10,7 @@ import {
   doc, updateDoc, serverTimestamp, getDoc, writeBatch
 } from 'firebase/firestore';
 import {
-  MapPin, Phone, CheckCircle, User,
+  MapPin, CheckCircle, User,
   Wifi, WifiOff, Package, ChevronDown, ChevronUp,
   AlertCircle, Eye, Target, LogOut, Navigation,
   Calendar, MessageCircle, Save, Zap,
@@ -26,7 +26,6 @@ import { apiUrl } from '@/lib/api-config';
 import { claimOrder as claimOrderSecure, confirmDeliveryWithCode, DeliveryCodeError } from '@/lib/deliveryCodeActions';
 import FleetMap, { type FleetPoint } from '@/components/FleetMap';
 import { isValidCoordinate, formatDistance } from '@/lib/geo/distance';
-import { computeGeohash } from '@/lib/geo/geohash';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -39,10 +38,13 @@ interface Order {
   userPhone?: string;
   status: string;
   customerLocation?: { address?: string; lat?: number; lng?: number; isDefault?: boolean };
+  // ✅ Écrit par checkout/page.tsx : 'MANUAL_PIN' | 'MAP_SEARCH' quand le
+  // client a corrigé sa position lui-même, 'GPS' | 'IP_FALLBACK' sinon.
+  locationSource?: string;
   sellerId?: string;
   sellerName?: string;
   sellerPhone?: string;
-  sellerLocation?: { address?: string; lat?: number; lng?: number; isDefault?: boolean };
+  sellerLocation?: { address?: string; lat?: number; lng?: number; isDefault?: boolean; locationSource?: string };
   delivererId?: string;
   delivererName?: string;
   delivererPhone?: string;
@@ -315,7 +317,15 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
   // livreur peut déjà voir/appeler tout le monde, mais la course n'a pas
   // vraiment commencé : pas de "Livré" tant que le statut n'est pas
   // 'en_livraison'.
-  const isPendingSellerConfirm = order.status === 'en_attente' || order.status === 'en_preparation';
+  // 🐛 FIX : incluait aussi 'en_preparation', qui dans le pipeline canonique
+  // (voir lib/orderStatus.ts) signifie déjà CONFIRMÉE — par le vendeur ou
+  // par l'admin. Résultat : quand l'admin (et non le vendeur) faisait passer
+  // la commande à 'en_preparation' depuis sa page, le livreur voyait quand
+  // même le bandeau "en attente de confirmation du vendeur" et le bouton
+  // "Livré" restait désactivé, alors que la commande était bel et bien
+  // confirmée. Seul 'en_attente' correspond réellement à une confirmation
+  // encore manquante.
+  const isPendingSellerConfirm = order.status === 'en_attente';
 
   const saveDates = async () => {
     setSaving(true);
@@ -445,26 +455,58 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
           </div>
         )}
 
-        {/* ✅ NOUVEAU — numéros client ET vendeur affichés systématiquement
-            en haut de chaque livraison, quel que soit le vendeur ou le
-            client concerné (avant : seul le numéro client était visible ici,
-            le vendeur n'apparaissait que dans l'onglet "Disponibles"). */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '12px', padding: '10px 12px', background: '#f8fafc', borderRadius: '12px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '9px' }}>
-            <span style={{ display: 'flex', alignItems: 'center', gap: '7px', color: '#334155', fontSize: '12px' }}>
-              <User size={12} style={{ color: '#3b82f6', flexShrink: 0 }} /> Client : {order.userName || '—'}
+        {/* 🐛 FIX confidentialité (v2) — ce bloc affichait auparavant le
+            numéro brut du client ET du vendeur (order.userPhone /
+            order.sellerPhone en clair, cliquables en tel:), puis un texte
+            "Téléphone : appel via AgriMarché" qui laissait croire à un
+            canal de contact par commande — canal qu'on a justement décidé
+            de ne PAS construire. Décision produit finale (architecture
+            "0 FCFA") : le livreur n'a besoin ni du numéro client ni du
+            numéro vendeur pour livrer — adresse + code commande + OTP de
+            livraison suffisent. S'il doit absolument joindre quelqu'un,
+            il utilise le bouton "🆘 Support" plus bas, qui contacte
+            directement AgriMarché (admin) — jamais le client ou le
+            vendeur en direct.
+            🐛 FIX adresses — ce bloc affichait #numéro de commande côté
+            "Client" et juste le nom côté "Vendeur", sans jamais l'adresse
+            exacte de retrait/livraison ici (celle-ci n'apparaissait que
+            plus bas — pour le client seulement — ou dans l'onglet
+            "Disponibles" — pour le vendeur seulement). Le livreur devait
+            recouper deux endroits différents pour avoir les deux adresses
+            d'une même course. Les deux adresses EXACTES (customerLocation
+            / sellerLocation — voir checkout/page.tsx pour le client et le
+            fix géoloc à l'acceptation dans seller/orders/page.tsx pour le
+            vendeur) sont maintenant affichées ici, côte à côte, avec le
+            même signal ⚠️ "position approximative" si isDefault est resté
+            true (aucune position fiable captée). */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '12px', padding: '10px 12px', background: '#f8fafc', borderRadius: '12px' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '7px' }}>
+            <User size={12} style={{ color: '#3b82f6', flexShrink: 0, marginTop: '2px' }} />
+            <span style={{ color: '#334155', fontSize: '12px', lineHeight: 1.4 }}>
+              <strong>Client :</strong> {order.customerLocation?.address || 'Adresse non spécifiée'}
+              {order.customerLocation?.isDefault && (
+                <span style={{ color: '#b45309', fontWeight: 600 }}> · ⚠️ position approximative</span>
+              )}
+              {/* ✅ NOUVEAU — même logique que app/admin/page.tsx : une
+                  adresse saisie à la main par le client (checkout, bouton
+                  "Livrer à une autre adresse") est signalée comme fiable et
+                  intentionnelle, à distinguer d'un simple relevé GPS. */}
+              {!order.customerLocation?.isDefault && (order.locationSource === 'MANUAL_PIN' || order.locationSource === 'MAP_SEARCH') && (
+                <span style={{ color: '#10b981', fontWeight: 700 }}> · ✏️ Confirmée par le client</span>
+              )}
             </span>
-            <a href={order.userPhone ? `tel:${order.userPhone}` : undefined} style={{ color: order.userPhone ? '#2563eb' : '#94a3b8', fontSize: '12px', fontWeight: 600, textDecoration: 'none' }}>
-              {order.userPhone || 'Pas de téléphone'}
-            </a>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '9px' }}>
-            <span style={{ display: 'flex', alignItems: 'center', gap: '7px', color: '#334155', fontSize: '12px' }}>
-              <Package size={12} style={{ color: '#f97316', flexShrink: 0 }} /> Vendeur : {order.sellerName || '—'}
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '7px' }}>
+            <Package size={12} style={{ color: '#f97316', flexShrink: 0, marginTop: '2px' }} />
+            <span style={{ color: '#334155', fontSize: '12px', lineHeight: 1.4 }}>
+              <strong>Vendeur :</strong> {order.sellerLocation?.address || 'Adresse non spécifiée'}
+              {order.sellerLocation?.isDefault && (
+                <span style={{ color: '#b45309', fontWeight: 600 }}> · ⚠️ position approximative</span>
+              )}
+              {!order.sellerLocation?.isDefault && order.sellerLocation?.locationSource === 'MANUAL_PIN' && (
+                <span style={{ color: '#10b981', fontWeight: 700 }}> · ✏️ Confirmée par le vendeur</span>
+              )}
             </span>
-            <a href={order.sellerPhone ? `tel:${order.sellerPhone}` : undefined} style={{ color: order.sellerPhone ? '#2563eb' : '#94a3b8', fontSize: '12px', fontWeight: 600, textDecoration: 'none' }}>
-              {order.sellerPhone || 'Pas de téléphone'}
-            </a>
           </div>
         </div>
 
@@ -483,11 +525,14 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
           </div>
           {/* 🐛 FIX : order.customerLocation.isDefault (posé au checkout) signale
               une position de repli, pas la vraie adresse du client — jusqu'ici
-              rien ne le distinguait d'une position GPS fiable côté livreur. */}
+              rien ne le distinguait d'une position GPS fiable côté livreur.
+              🐛 FIX texte — disait "appelez le client avant de vous fier à
+              l'itinéraire", un canal qu'on a retiré (voir plus haut) : le
+              livreur n'a plus de moyen d'appeler le client directement. */}
           {order.customerLocation?.isDefault && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '9px' }}>
               <AlertCircle size={13} style={{ color: '#b45309', flexShrink: 0 }} />
-              <span style={{ color: '#b45309', fontSize: '12px' }}>Position approximative — appelez le client avant de vous fier à l'itinéraire</span>
+              <span style={{ color: '#b45309', fontSize: '12px' }}>Position approximative — vérifie via le support avant de te fier à l'itinéraire</span>
             </div>
           )}
         </div>
@@ -521,20 +566,25 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
           </div>
         )}
 
-        {/* Action row 1 — contact client */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1.2fr', gap: '8px', marginBottom: '8px' }}>
-          <a href={`tel:${order.userPhone}`} style={btnStyle('#f1f5f9', '#3b82f6')}>
-            <Phone size={13} /> Appeler
-          </a>
-          <a href={`https://wa.me/${order.userPhone?.replace(/\D/g, '')}`} target="_blank" rel="noopener noreferrer" style={btnStyle('#dcfce7', '#059669')}>
-            💬 WhatsApp
-          </a>
-          {/* Désactivé tant que le vendeur n'a pas confirmé : marquer
-              "Livré" avant même 'en_livraison' n'a pas de sens. */}
+        {/* Action row 1 — statut livraison */}
+        {/* 🐛 FIX architecture confidentialité (v2) — abandon du plan
+            "proxy d'appel vers le client" : sur décision produit, le
+            livreur n'a JAMAIS besoin ni du numéro client, ni du numéro
+            vendeur, ni même d'un numéro masqué dédié à chaque commande.
+            S'il doit joindre quelqu'un, il passe par AgriMarché — et ce
+            canal existe déjà juste en dessous : le bouton "🆘 Support"
+            (wa.me/221779747073, numéro admin) fait exactement ce rôle.
+            Le bouton "Contacter le client" + contactClientViaProxy() +
+            /api/delivery/contact-client (stub) sont donc retirés :
+            inutiles, et ils auraient de toute façon fini par exposer un
+            canal de contact par commande, ce que l'archi "0 FCFA" veut
+            précisément éviter. Voir le "Support" plus bas, seul canal de
+            contact humain pour le livreur. */}
+        <div style={{ marginBottom: '8px' }}>
           <button
             onClick={() => onMarkDelivered(order.id)}
             disabled={isPendingSellerConfirm}
-            style={{ ...btnStyleBtn(isPendingSellerConfirm ? '#a7f3d0' : '#10b981', '#fff'), cursor: isPendingSellerConfirm ? 'default' : 'pointer' }}
+            style={{ ...btnStyleBtn(isPendingSellerConfirm ? '#a7f3d0' : '#10b981', '#fff'), width: '100%', cursor: isPendingSellerConfirm ? 'default' : 'pointer' }}
           >
             <CheckCircle size={13} /> Livré
           </button>
@@ -1109,193 +1159,51 @@ export default function DeliveryDashboard() {
   };
 
   // GPS
-  //
-  // ⚠️ Aligné sur lib/geolocation.ts (le wrapper unifié web/natif utilisé
-  // partout ailleurs dans l'app — LiveLocation.tsx, useUserLocation.ts,
-  // seller/dashboard, seller/register, product/page). Ce fichier appelait
-  // auparavant `@capacitor/geolocation` en direct : ça fonctionne sur
-  // natif, mais ça perd la normalisation d'erreurs (codes 1/2/3), le
-  // fallback web propre, et surtout ça désynchronise le SEUL flux vraiment
-  // temps-critique de l'app (position du livreur, affichée en direct au
-  // client ET à l'admin) du reste du système de géoloc. Un bug corrigé
-  // dans lib/geolocation.ts ne se serait jamais appliqué ici.
-  //
-  // Deux garde-fous supplémentaires, spécifiques au tracking livreur :
-  //  1. `MIN_ACCEPTABLE_ACCURACY_M` — un point GPS très imprécis (rebond
-  //     sur un bâtiment, cold start du GPS) ne doit jamais être écrit dans
-  //     `tracking.currentLocation` : ça ferait "sauter" le pin du livreur
-  //     sur la carte du client et fausserait l'ETA. On l'ignore pour
-  //     Firestore mais on garde `gpsAccuracy` à jour localement pour que le
-  //     livreur voie que son signal est mauvais (cf. affichage "±Nm").
-  //  2. `STALE_FIX_MAX_AGE_MS` — un fix dont le timestamp est trop vieux
-  //     (position mise en cache par l'OS) ne doit pas non plus être publié
-  //     comme position "en direct".
-  const MIN_ACCEPTABLE_ACCURACY_M = 150;
-  const STALE_FIX_MAX_AGE_MS = 30_000;
-  // Throttle de l'écriture users/{uid}.lat/lng — voir commentaire plus bas,
-  // c'est la correction du trou "livreur invisible en temps réel sur la
-  // carte admin".
-  const lastUserSyncRef = useRef(0);
-  // Dernier point GPS ACCEPTÉ (pas juste reçu) — sert au garde-fou
-  // anti-téléportation ci-dessous.
-  const lastAcceptedFixRef = useRef<{ lat: number; lng: number; t: number } | null>(null);
-  // Un livreur (moto/voiture) ne dépasse jamais ça en usage normal à Dakar.
-  // Un point impliquant une vitesse supérieure entre deux fixes acceptés
-  // est presque toujours un artefact GPS, pas un vrai déplacement.
-  const MAX_PLAUSIBLE_SPEED_KMH = 130;
-
   const startSharingLocation = useCallback(async () => {
-    const permission = await requestLocationPermission();
-    if (permission === 'denied') {
-      setLocationError('Accès à la position refusé. Activez la géolocalisation.');
-      return;
-    }
+    try {
+      const permission = await Geolocation.requestPermissions();
+      if (permission.location !== 'granted') {
+        setLocationError('Accès à la position refusé. Activez la géolocalisation.');
+        return;
+      }
+    } catch { /* web fallback */ }
 
     setSharingLocation(true);
     setLocationError(null);
 
-    const id = await watchPosition({ enableHighAccuracy: true, timeout: 10000 }, async (pos, err) => {
-      if (err || !pos) {
-        setLocationError(
-          err?.code === 1
-            ? 'Accès à la position refusé. Activez la géolocalisation.'
-            : err?.code === 3
-            ? 'Signal GPS trop faible pour vous localiser précisément.'
-            : 'Erreur de géolocalisation.'
-        );
-        if (err?.code === 1) setSharingLocation(false);
-        return;
-      }
-      const { latitude, longitude, accuracy, speed } = pos.coords;
+    const id = await Geolocation.watchPosition({ enableHighAccuracy: true, timeout: 10000 }, async (pos, err) => {
+      if (err || !pos) { setLocationError('Erreur de géolocalisation'); setSharingLocation(false); return; }
+      const { latitude, longitude, accuracy } = pos.coords;
       setCurrentLocation({ lat: latitude, lng: longitude });
       setGpsAccuracy(accuracy ?? null);
-
-      const isStale = Date.now() - pos.timestamp > STALE_FIX_MAX_AGE_MS;
-      const isTooImprecise = typeof accuracy === 'number' && accuracy > MIN_ACCEPTABLE_ACCURACY_M;
-      if (isStale || isTooImprecise) {
-        // On garde l'UI locale du livreur à jour (il voit sa précision se
-        // dégrader) mais on ne pollue pas le tracking public avec un point
-        // douteux — mieux vaut garder le dernier bon point affiché au
-        // client qu'en publier un mauvais.
-        return;
-      }
-
-      // ✅ Garde-fou anti-téléportation : si le point implique une vitesse
-      // physiquement impossible par rapport au dernier point ACCEPTÉ (pas
-      // juste reçu), c'est presque toujours un artefact GPS (multipath
-      // entre immeubles, réacquisition après tunnel/zone sans signal) et
-      // non un vrai déplacement. Le publier ferait "sauter" le pin du
-      // livreur sur la carte client et fausserait distance/ETA le temps
-      // d'un aller-retour de mesure. On l'ignore, sans pour autant bloquer
-      // le point suivant (pas de cascade : dès qu'un point plausible
-      // revient, le tracking reprend normalement).
-      const prevFix = lastAcceptedFixRef.current;
-      if (prevFix) {
-        const dtH = (pos.timestamp - prevFix.t) / 3_600_000;
-        if (dtH > 0) {
-          const jumpKm = haversineKm(prevFix, { lat: latitude, lng: longitude });
-          const impliedSpeedKmh = jumpKm / dtH;
-          if (impliedSpeedKmh > MAX_PLAUSIBLE_SPEED_KMH) {
-            return;
-          }
-        }
-      }
-      lastAcceptedFixRef.current = { lat: latitude, lng: longitude, t: pos.timestamp };
-
       const activeOrders = ordersRef.current.filter(o => o.status === 'en_livraison');
-
-      // ✅ CORRECTIF MAJEUR — trou trouvé sur la carte admin "Tous les
-      // utilisateurs" : celle-ci affiche users/{uid}.lat/lng, qui n'était
-      // mis à jour QUE quand le livreur visitait explicitement la page
-      // /main/location (LiveLocation.tsx) — jamais pendant une livraison
-      // réelle. Un livreur en train de rouler, tracké en direct sur SA
-      // commande active, restait donc affiché à l'admin à sa dernière
-      // position d'il y a potentiellement plusieurs jours. On synchronise
-      // maintenant users/{uid} avec le MÊME flux GPS que le tracking
-      // client, throttlé à 20s (plus réactif que le heartbeat 60s de
-      // LiveLocation.tsx : ici le livreur est activement en mouvement, la
-      // fraîcheur compte plus que l'économie d'écritures Firestore).
-      const USER_SYNC_THROTTLE_MS = 20_000;
-      if (user?.uid && Date.now() - lastUserSyncRef.current > USER_SYNC_THROTTLE_MS) {
-        lastUserSyncRef.current = Date.now();
-        updateDoc(doc(db, 'users', user.uid), {
-          lat: latitude,
-          lng: longitude,
-          geohash: computeGeohash(latitude, longitude),
-          locationAccuracy: accuracy ?? undefined,
-          locationSource: 'GPS',
-          locationUpdatedAt: serverTimestamp(),
-        }).catch(() => {});
-      }
-
       await Promise.all(activeOrders.map(order => {
         const payload: Record<string, any> = {
           'tracking.currentLocation': { lat: latitude, lng: longitude },
           'tracking.lastUpdate': serverTimestamp(),
           'tracking.enabled': true,
           'tracking.accuracy': accuracy,
-          // ✅ CORRECTIF — lue par app/tracking/page.tsx pour l'ETA client
-          // mais jamais écrite : l'ETA retombait donc TOUJOURS sur une
-          // estimation grossière à 3,5 min/km fixe, sans jamais utiliser la
-          // vraie vitesse GPS du livreur (pos.coords.speed, en m/s côté API
-          // Geolocation — convertie ici en km/h). `speed` peut être `null`
-          // (capteur indisponible) : dans ce cas on n'écrit rien plutôt que
-          // 0, pour laisser le fallback distance-based faire son travail
-          // au lieu d'afficher une vitesse de 0 km/h trompeuse.
-          ...(typeof speed === 'number' && speed >= 0 ? { 'tracking.speed': Math.round(speed * 3.6 * 10) / 10 } : {}),
         };
         // Premier point GPS reçu pour cette commande → passage automatique
-        // en 'en_route'. (L'horodatage tracking.enRouteAt n'est PAS écrit
-        // ici : voir le bloc "geofencing" ci-dessous pour l'explication —
-        // c'est functions/index.ts::notifyDeliveryPhaseChange qui en est
-        // désormais l'unique responsable, une fois déployé.)
+        // en 'en_route'. On ne touche PAS à la phase si elle est déjà plus
+        // avancée (le geofencing serveur peut déjà l'avoir mise à
+        // 'approaching', voire 'arrived' si le livreur a confirmé
+        // manuellement) — sinon un point GPS en retard pourrait faire
+        // régresser l'affichage côté acheteur.
         if (!order.tracking?.phase || order.tracking.phase === 'assigned') {
           payload['tracking.phase'] = 'en_route';
         }
-
-        // ⚠️ CORRECTIF DE MA PROPRE CORRECTION PRÉCÉDENTE : j'avais ajouté
-        // ici un geofencing 'approaching' + écriture manuelle des
-        // horodatages en pensant, à tort à ce moment-là (je n'avais pas
-        // encore le fichier functions/index.ts sous les yeux), qu'aucun
-        // geofencing serveur n'existait. En réalité il existe déjà, prêt à
-        // être déployé : functions/index.ts::checkDeliveryProximity
-        // (déclenché sur tout changement de tracking.currentLocation,
-        // seuil SEUIL_PROCHE_METRES = 500 m) + ::notifyDeliveryPhaseChange
-        // (qui horodate CHAQUE transition de phase — assigned, en_route,
-        // approaching, arrived — et envoie la notification push
-        // correspondante, avec idempotence).
-        //
-        // Dupliquer cette logique ici posait un vrai risque : mon seuil
-        // (400 m, choisi arbitrairement) divergeait du seuil serveur
-        // (500 m) — exactement la classe de bug ("deux systèmes qui
-        // recalculent la même chose différemment") qu'on corrige depuis le
-        // début de cette conversation. Toute divergence future entre les
-        // deux (si l'un des seuils est ajusté sans l'autre) serait
-        // silencieuse.
-        //
-        // Le client reste responsable UNIQUEMENT de la transition
-        // 'assigned' → 'en_route' (rien côté serveur ne la déclenche —
-        // c'est le premier point GPS reçu qui la justifie). La transition
-        // 'en_route' → 'approaching' est laissée entièrement au serveur,
-        // qui la calcule sur le MÊME point GPS (currentLocation) dès qu'il
-        // est écrit ici : aucune perte de réactivité, une seule source de
-        // vérité pour le seuil de proximité.
         return updateDoc(doc(db, 'orders', order.id), payload).catch(console.error);
       }));
     });
-    setWatchId(String(id));
+    setWatchId(id);
   }, []);
 
   const stopSharingLocation = useCallback(async () => {
-    if (watchId !== null) await clearWatch(watchId);
+    if (watchId !== null) await Geolocation.clearWatch({ id: watchId });
     setWatchId(null);
     setSharingLocation(false);
     setLocationError(null);
-    // Repart de zéro au prochain démarrage : sinon un long arrêt de
-    // partage (pause, changement de véhicule...) pourrait faire rejeter à
-    // tort le premier point GPS de la prochaine session comme "saut
-    // impossible" par rapport à une position vieille de plusieurs heures.
-    lastAcceptedFixRef.current = null;
     const activeOrders = ordersRef.current.filter(o => o.status === 'en_livraison');
     await Promise.all(activeOrders.map(order =>
       updateDoc(doc(db, 'orders', order.id), { 'tracking.enabled': false }).catch(console.error)
@@ -1304,11 +1212,6 @@ export default function DeliveryDashboard() {
 
   const markAsArrived = async (orderId: string) => {
     try {
-      // 'tracking.arrivedAt' n'est plus écrit ici : c'est
-      // functions/index.ts::notifyDeliveryPhaseChange qui en est
-      // responsable (horodate CHAQUE transition de phase, y compris
-      // 'arrived', dès que ce document change) — voir le commentaire
-      // détaillé dans startSharingLocation plus haut.
       const payload = { 'tracking.phase': 'arrived' as const };
       const batch = writeBatch(db);
       batch.set(doc(db, 'orders', orderId), payload, { merge: true });
@@ -1703,13 +1606,9 @@ export default function DeliveryDashboard() {
           {sharingLocation && currentLocation && (
             <div style={{ marginTop: '12px', padding: '10px 12px', background: '#f8fafc', borderRadius: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <Target size={13} color={gpsAccuracy && gpsAccuracy > MIN_ACCEPTABLE_ACCURACY_M ? '#f59e0b' : '#10b981'} />
+                <Target size={13} color="#10b981" />
                 <span style={{ color: '#475569', fontSize: '12px' }}>Position</span>
-                {gpsAccuracy && (
-                  <span style={{ color: gpsAccuracy > MIN_ACCEPTABLE_ACCURACY_M ? '#f59e0b' : '#94a3b8', fontSize: '10px', fontWeight: gpsAccuracy > MIN_ACCEPTABLE_ACCURACY_M ? 600 : 400 }}>
-                    ±{Math.round(gpsAccuracy)}m{gpsAccuracy > MIN_ACCEPTABLE_ACCURACY_M ? ' · signal faible, non partagé' : ''}
-                  </span>
-                )}
+                {gpsAccuracy && <span style={{ color: '#94a3b8', fontSize: '10px' }}>±{Math.round(gpsAccuracy)}m</span>}
               </div>
               <span style={{ color: '#1e293b', fontSize: '11px', fontFamily: 'monospace' }}>
                 {currentLocation.lat.toFixed(5)}°, {currentLocation.lng.toFixed(5)}°
@@ -1776,8 +1675,12 @@ export default function DeliveryDashboard() {
                       <p style={{ color: '#1e293b', fontSize: '14px', fontWeight: 600, fontFamily: 'monospace' }}>
                         #{order.orderNumber || order.id.slice(-6).toUpperCase()}
                       </p>
+                      {/* 🐛 FIX confidentialité — affichait order.sellerPhone
+                          en clair (`· ${order.sellerPhone}`). Retiré : le
+                          livreur n'a pas besoin du numéro direct pour un
+                          retrait en point de vente. */}
                       <p style={{ color: '#64748b', fontSize: '12px', marginTop: '2px' }}>
-                        Vendeur : {order.sellerName || '—'} {order.sellerPhone ? `· ${order.sellerPhone}` : ''}
+                        Vendeur : {order.sellerName || '—'}
                       </p>
                       {(order.sellerLocation?.address || order.customerLocation?.address) && (
                         <p style={{ color: '#94a3b8', fontSize: '11px', marginTop: '2px', display: 'flex', alignItems: 'center', gap: '4px' }}>
@@ -1785,32 +1688,14 @@ export default function DeliveryDashboard() {
                           {pickupDistanceKm !== null && <span style={{ color: '#2563eb', fontWeight: 700 }}>· {formatDistance(pickupDistanceKm)}</span>}
                         </p>
                       )}
-                      {/* ✅ NOUVEAU — avant, un seul signal binaire (isDefault)
-                          existait : soit "aucune position connue", soit rien
-                          du tout — une position GPS vieille de 6 mois et une
-                          position que le vendeur vient de confirmer à la main
-                          recevaient exactement le même traitement (aucun
-                          avertissement). Le livreur, qui est la personne qui
-                          se déplace réellement sur la foi de ce point, mérite
-                          de savoir laquelle des trois situations s'applique. */}
-                      {order.sellerLocation?.isDefault ? (
+                      {/* 🐛 FIX : sellerLocation.isDefault signale un point de
+                          pickup générique (le vendeur n'avait pas encore de
+                          position enregistrée), pas sa vraie adresse. */}
+                      {order.sellerLocation?.isDefault && (
                         <p style={{ color: '#b45309', fontSize: '11px', marginTop: '2px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                          <AlertCircle size={11} /> Position vendeur approximative — appelez avant de partir
+                          <AlertCircle size={11} /> Position vendeur approximative — vérifie via l'app avant de partir
                         </p>
-                      ) : order.sellerLocation?.locationSource === 'MANUAL_PIN' ? (
-                        <p style={{ color: '#059669', fontSize: '11px', marginTop: '2px', fontWeight: 600 }}>
-                          ✏️ Position confirmée par le vendeur
-                        </p>
-                      ) : (() => {
-                        const updatedAt = order.sellerLocation?.locationUpdatedAt;
-                        const stale = updatedAt && (Date.now() - new Date(updatedAt).getTime()) > 90 * 24 * 3600 * 1000;
-                        if (!stale) return null;
-                        return (
-                          <p style={{ color: '#b45309', fontSize: '11px', marginTop: '2px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                            <AlertCircle size={11} /> Position GPS non revérifiée depuis longtemps — appelez pour confirmer
-                          </p>
-                        );
-                      })()}
+                      )}
                     </div>
                     {/* ✅ FIX : c'était `order.total` (prix payé par le CLIENT,
                         produits + livraison) affiché ici — trompeur pour un

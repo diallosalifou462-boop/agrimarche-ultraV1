@@ -3359,6 +3359,14 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                                         <span style={{ color:'#4b5563', fontStyle:'italic' }}>Non renseignée</span>
                                       )}
                                     </div>
+                                    {/* ✅ NOUVEAU — même logique que le badge vendeur ci-dessus :
+                                        distingue une adresse client corrigée à la main (checkout,
+                                        "Livrer à une autre adresse") d'un simple GPS/IP. */}
+                                    {!order.customerLocation?.isDefault && order.customerLocation?.address && (
+                                      order.locationSource === 'MANUAL_PIN' || order.locationSource === 'MAP_SEARCH' ? (
+                                        <span style={{ fontSize:9, fontWeight:700, color:'#10b981', marginLeft:15 }}>✏️ Confirmée par le client</span>
+                                      ) : null
+                                    )}
                                   </div>
                                 </td>
                                 <td style={{ padding:'10px 8px', fontSize:12 }}>{order.sellerRegion ?? order.region ?? '—'}</td>

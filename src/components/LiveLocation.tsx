@@ -20,6 +20,8 @@ import {
   Home,
   Shield,
   Zap,
+  Edit3,
+  Lock,
 } from 'lucide-react';
 import {
   getCurrentPosition,
@@ -30,7 +32,7 @@ import {
 } from '@/lib/geolocation';
 import { useAuth } from '@/hooks/useAuth';
 import { db } from '@/lib/firebase/firebase';
-import { doc, updateDoc, Timestamp } from 'firebase/firestore';
+import { doc, updateDoc, getDoc, Timestamp } from 'firebase/firestore';
 import { distanceKm } from '@/lib/geo/distance';
 import { computeGeohash } from '@/lib/geo/geohash';
 import { setCachedLocation } from '@/lib/locationCache';
@@ -58,7 +60,7 @@ interface LocationData {
   };
   status: 'idle' | 'searching' | 'found' | 'error';
   errorMessage?: string;
-  source: 'gps' | 'ip' | 'cache';
+  source: 'gps' | 'ip' | 'cache' | 'manual';
 }
 
 interface BigDataCloudResponse {
@@ -119,15 +121,76 @@ export function LiveLocation() {
   const watchIdRef = useRef<string | number | null>(null);
   const historyMax = 10;
 
+  // ✅ NOUVEAU — Adresse saisie manuellement par le client.
+  // Tant que `isManualRef.current` est vrai, TOUTE écriture GPS/IP
+  // automatique (updateLocation, locateViaIP) est bloquée dès son entrée :
+  // c'est ce garde-fou, testé de façon synchrone via une ref (pas un state,
+  // qui serait asynchrone et pourrait laisser passer un tick GPS en vol),
+  // qui garantit que l'adresse manuelle reste intacte partout (Firestore
+  // users/{uid} → lu ensuite par admin, livreur, etc.) jusqu'à ce que le
+  // client choisisse explicitement de revenir en mode automatique.
+  const isManualRef = useRef(false);
+  const [isManualLocation, setIsManualLocation] = useState(false);
+  const [manualAddress, setManualAddress] = useState('');
+  const [manualInput, setManualInput] = useState('');
+  const [showManualForm, setShowManualForm] = useState(false);
+  const [savingManual, setSavingManual] = useState(false);
+  const [manualCheckDone, setManualCheckDone] = useState(false);
+
+  // Au montage : si le client avait déjà fixé une adresse manuelle
+  // auparavant (locationSource === 'MANUAL_PIN' sur son profil), on la
+  // recharge et on empêche toute détection GPS/IP automatique de la
+  // remplacer au chargement de la page.
+  useEffect(() => {
+    if (!user?.uid) {
+      setManualCheckDone(true);
+      return;
+    }
+    getDoc(doc(db, 'users', user.uid))
+      .then((snap) => {
+        const data = snap.data();
+        if (data?.locationSource === 'MANUAL_PIN' && data?.locationAddress) {
+          isManualRef.current = true;
+          setIsManualLocation(true);
+          setManualAddress(data.locationAddress);
+          setManualInput(data.locationAddress);
+          setStatus('found');
+          if (typeof data.lat === 'number' && typeof data.lng === 'number') {
+            setLocation({
+              lat: data.lat,
+              lng: data.lng,
+              accuracy: data.locationAccuracy ?? 0,
+              altitude: null,
+              speed: null,
+              heading: null,
+              timestamp: data.locationUpdatedAt?.toMillis?.() ?? Date.now(),
+              address: {
+                full: data.locationAddress, street: '', city: '', region: '',
+                country: 'Sénégal', postalCode: '', neighborhood: '', landmark: '',
+                locality: '', principalSubdivision: '', countryCode: 'SN',
+              },
+              status: 'found',
+              source: 'manual',
+            });
+          }
+        }
+      })
+      .catch(() => {})
+      .finally(() => setManualCheckDone(true));
+  }, [user?.uid]);
+
   // Vérifier la permission initiale (natif : @capacitor/geolocation ; web : Permissions API)
   useEffect(() => {
+    // ⛔ Une adresse manuelle est déjà active : on ne lance surtout pas de
+    // détection GPS/IP automatique qui viendrait l'écraser au chargement.
+    if (isManualRef.current) return;
     checkLocationPermission().then((state) => {
       setPermissionState(state);
       // ✅ Aucune permission requise pour afficher une position : si le GPS
       // n'est pas déjà autorisé, on affiche immédiatement une position
       // approximative par IP au lieu de laisser l'écran bloqué sur "En
       // attente de localisation" tant que l'utilisateur n'a pas cliqué.
-      if (state !== 'granted') {
+      if (state !== 'granted' && !isManualRef.current) {
         locateViaIP();
       }
     });
@@ -325,6 +388,8 @@ export function LiveLocation() {
   // de permission au navigateur. Utilisé automatiquement au chargement et
   // en repli si le GPS est refusé/indisponible.
   const locateViaIP = useCallback(async () => {
+    // ⛔ Adresse manuelle active : ne jamais l'écraser par une détection IP.
+    if (isManualRef.current) return;
     setStatus('searching');
     const locationData = await getLocationFromIP();
     if (!locationData) {
@@ -371,6 +436,8 @@ export function LiveLocation() {
   // Fonction principale de localisation
   // ============================================================
   const updateLocation = useCallback(async (position: UnifiedPosition, source: 'gps' | 'ip' = 'gps') => {
+    // ⛔ Adresse manuelle active : ne jamais l'écraser par un fix GPS.
+    if (isManualRef.current) return;
     const { latitude, longitude, accuracy, altitude, speed, heading } = position.coords;
 
     const address = await getAddressFromBigDataCloud(latitude, longitude);
@@ -447,6 +514,7 @@ export function LiveLocation() {
   }, [user?.uid]);
 
   const startLocationTracking = useCallback(async () => {
+    if (isManualRef.current) return;
     if (permissionState === 'denied') {
       // Le suivi en direct nécessite le GPS, mais l'absence de permission
       // ne doit jamais bloquer l'utilisateur : on affiche une position
@@ -562,6 +630,7 @@ export function LiveLocation() {
   }, []);
 
   const getSingleLocation = useCallback(async () => {
+    if (isManualRef.current) return;
     setStatus('searching');
     setErrorMessage(null);
     setIsLocating(true);
@@ -590,6 +659,96 @@ export function LiveLocation() {
       setIsLocating(false);
     }
   }, [updateLocation, locateViaIP]);
+
+  // ============================================================
+  // Adresse manuelle — enregistrement / retour au mode automatique
+  // ============================================================
+  // Enregistre l'adresse saisie à la main par le client. Dès l'appel :
+  //  1. tout suivi GPS en cours est arrêté (stopLocationTracking) ;
+  //  2. isManualRef passe à true, ce qui bloque immédiatement toute future
+  //     écriture GPS/IP (voir les gardes en tête de updateLocation /
+  //     locateViaIP / startLocationTracking / getSingleLocation) ;
+  //  3. Firestore users/{uid} est mis à jour avec locationSource:
+  //     'MANUAL_PIN' — c'est CE champ que lisent déjà l'admin (badge
+  //     "✏️ Manuelle") et, pour les commandes, checkout/page.tsx écrit le
+  //     même flag sur customerLocation, lu tel quel par livreur/admin/
+  //     tracking sans jamais être recalculé.
+  const saveManualLocation = useCallback(async () => {
+    const address = manualInput.trim();
+    if (!address || !user?.uid) return;
+
+    setSavingManual(true);
+    stopLocationTracking();
+    isManualRef.current = true;
+
+    try {
+      // On garde les dernières coordonnées connues (si on en a) pour ne pas
+      // perdre la position sur la carte admin/livreur — seule l'ADRESSE
+      // affichée change. Sans coordonnées connues, on ne touche pas lat/lng
+      // existants plutôt que d'écrire 0,0 (Golfe de Guinée).
+      const coords = location ? { lat: location.lat, lng: location.lng } : {};
+
+      await updateDoc(doc(db, 'users', user.uid), {
+        ...coords,
+        locationAddress: address,
+        locationSource: 'MANUAL_PIN',
+        locationUpdatedAt: Timestamp.now(),
+      });
+
+      setLocation(prev => ({
+        lat: prev?.lat ?? 0,
+        lng: prev?.lng ?? 0,
+        accuracy: prev?.accuracy ?? 0,
+        altitude: null,
+        speed: null,
+        heading: null,
+        timestamp: Date.now(),
+        address: {
+          full: address, street: '', city: '', region: '',
+          country: 'Sénégal', postalCode: '', neighborhood: '', landmark: '',
+          locality: '', principalSubdivision: '', countryCode: 'SN',
+        },
+        status: 'found',
+        source: 'manual',
+      }));
+      setStatus('found');
+      setLastUpdate(new Date());
+      setIsManualLocation(true);
+      setManualAddress(address);
+      setShowManualForm(false);
+
+      if (location) {
+        setCachedLocation({
+          lat: location.lat,
+          lng: location.lng,
+          city: address,
+          region: '',
+          country: 'Sénégal',
+          address,
+          detected: true,
+          // ✅ Adresse confirmée explicitement par le client : ce n'est PAS
+          // une position de repli, donc isDefault:false.
+          isDefault: false,
+        });
+      }
+    } catch (err) {
+      console.error('Erreur enregistrement adresse manuelle:', err);
+      isManualRef.current = false;
+    } finally {
+      setSavingManual(false);
+    }
+  }, [manualInput, user?.uid, location, stopLocationTracking]);
+
+  // Abandonne l'adresse manuelle et relance la détection automatique.
+  const resumeAutoLocation = useCallback(() => {
+    isManualRef.current = false;
+    setIsManualLocation(false);
+    setManualAddress('');
+    setManualInput('');
+    setStatus('idle');
+    setLocation(null);
+    startLocationTracking();
+  }, [startLocationTracking]);
 
   // ============================================================
   // Formateurs
@@ -688,7 +847,12 @@ export function LiveLocation() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            {isWatching ? (
+            {isManualLocation ? (
+              <span className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-500/30 backdrop-blur-sm rounded-full text-[10px] text-white font-medium border border-violet-400/30">
+                <Lock size={10} />
+                MANUELLE
+              </span>
+            ) : isWatching ? (
               <span className="flex items-center gap-1.5 px-3 py-1.5 bg-green-500/30 backdrop-blur-sm rounded-full text-[10px] text-white font-medium border border-green-400/30">
                 <span className="w-1.5 h-1.5 bg-green-300 rounded-full animate-pulse" />
                 EN DIRECT
@@ -725,37 +889,107 @@ export function LiveLocation() {
             </div>
           </div>
           <div className="flex gap-2 flex-wrap">
-            {/* Le GPS reste optionnel : ces boutons tentent une position
-               précise, mais s'ils échouent (permission refusée/indisponible),
-               locateViaIP() prend automatiquement le relais — aucun bouton
-               "obligatoire" à cliquer avant de voir une position. */}
-            {!isWatching ? (
-              <button
-                onClick={startLocationTracking}
-                disabled={isLocating}
-                className="px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-xl text-sm font-medium flex items-center gap-2 hover:shadow-lg hover:shadow-emerald-500/25 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {isLocating ? <Loader2 size={16} className="animate-spin" /> : <LocateFixed size={16} />}
-                {permissionState === 'denied' ? 'Position précise (GPS)' : 'Suivre en direct'}
-              </button>
+            {isManualLocation ? (
+              // ✅ Adresse manuelle active : le GPS est volontairement
+              // désactivé (voir isManualRef dans les fonctions ci-dessus)
+              // pour qu'il ne vienne jamais écraser l'adresse choisie par
+              // le client. Il faut explicitement "revenir à l'automatique"
+              // pour réactiver le GPS.
+              <>
+                <button
+                  onClick={() => setShowManualForm(true)}
+                  className="px-5 py-2.5 bg-violet-100 text-violet-700 rounded-xl text-sm font-medium flex items-center gap-2 hover:bg-violet-200 transition"
+                >
+                  <Edit3 size={16} />
+                  Modifier l'adresse
+                </button>
+                <button
+                  onClick={resumeAutoLocation}
+                  className="px-5 py-2.5 bg-gray-100 text-gray-700 rounded-xl text-sm font-medium flex items-center gap-2 hover:bg-gray-200 transition"
+                >
+                  <RefreshCw size={16} />
+                  Revenir au GPS auto
+                </button>
+              </>
             ) : (
-              <button
-                onClick={stopLocationTracking}
-                className="px-5 py-2.5 bg-red-500 text-white rounded-xl text-sm font-medium flex items-center gap-2 hover:bg-red-600 transition"
-              >
-                Arrêter
-              </button>
+              <>
+                {/* Le GPS reste optionnel : ces boutons tentent une position
+                   précise, mais s'ils échouent (permission refusée/indisponible),
+                   locateViaIP() prend automatiquement le relais — aucun bouton
+                   "obligatoire" à cliquer avant de voir une position. */}
+                {!isWatching ? (
+                  <button
+                    onClick={startLocationTracking}
+                    disabled={isLocating}
+                    className="px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-xl text-sm font-medium flex items-center gap-2 hover:shadow-lg hover:shadow-emerald-500/25 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isLocating ? <Loader2 size={16} className="animate-spin" /> : <LocateFixed size={16} />}
+                    {permissionState === 'denied' ? 'Position précise (GPS)' : 'Suivre en direct'}
+                  </button>
+                ) : (
+                  <button
+                    onClick={stopLocationTracking}
+                    className="px-5 py-2.5 bg-red-500 text-white rounded-xl text-sm font-medium flex items-center gap-2 hover:bg-red-600 transition"
+                  >
+                    Arrêter
+                  </button>
+                )}
+                <button
+                  onClick={getSingleLocation}
+                  disabled={isLocating}
+                  className="px-5 py-2.5 bg-gray-100 text-gray-700 rounded-xl text-sm font-medium flex items-center gap-2 hover:bg-gray-200 transition disabled:opacity-50"
+                >
+                  <RefreshCw size={16} className={isLocating ? 'animate-spin' : ''} />
+                  {isLocating ? 'Recherche...' : 'Une fois'}
+                </button>
+                <button
+                  onClick={() => { setManualInput(''); setShowManualForm(true); }}
+                  className="px-5 py-2.5 bg-gray-100 text-gray-700 rounded-xl text-sm font-medium flex items-center gap-2 hover:bg-gray-200 transition"
+                >
+                  <Edit3 size={16} />
+                  Saisir manuellement
+                </button>
+              </>
             )}
-            <button
-              onClick={getSingleLocation}
-              disabled={isLocating}
-              className="px-5 py-2.5 bg-gray-100 text-gray-700 rounded-xl text-sm font-medium flex items-center gap-2 hover:bg-gray-200 transition disabled:opacity-50"
-            >
-              <RefreshCw size={16} className={isLocating ? 'animate-spin' : ''} />
-              {isLocating ? 'Recherche...' : 'Une fois'}
-            </button>
           </div>
         </div>
+
+        {/* Formulaire de saisie manuelle */}
+        {showManualForm && (
+          <div className="bg-violet-50 border border-violet-100 rounded-xl p-4 space-y-3">
+            <p className="text-xs font-semibold text-violet-700 flex items-center gap-1.5">
+              <Edit3 size={13} />
+              Saisir mon adresse manuellement
+            </p>
+            <p className="text-[11px] text-violet-600/80">
+              Une fois confirmée, cette adresse sera utilisée partout (livreur, admin, suivi) et
+              le GPS automatique sera arrêté pour ne pas l'écraser.
+            </p>
+            <input
+              type="text"
+              value={manualInput}
+              onChange={(e) => setManualInput(e.target.value)}
+              placeholder="Ex : Villa 12, Cité Keur Gorgui, Dakar"
+              className="w-full text-sm rounded-lg border border-violet-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-violet-400"
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={saveManualLocation}
+                disabled={savingManual || !manualInput.trim()}
+                className="px-4 py-2 bg-violet-600 text-white rounded-lg text-sm font-medium hover:bg-violet-700 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {savingManual ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle size={14} />}
+                Confirmer cette adresse
+              </button>
+              <button
+                onClick={() => { setShowManualForm(false); setManualInput(manualAddress); }}
+                className="px-4 py-2 bg-white text-gray-600 rounded-lg text-sm font-medium border border-gray-200 hover:bg-gray-50 transition"
+              >
+                Annuler
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Affichage des coordonnées - Style Pro */}
         {location && (
@@ -793,6 +1027,11 @@ export function LiveLocation() {
                   </span>
                   {location.source === 'gps' && (
                     <span className="text-[8px] bg-green-100 text-green-700 px-2 py-0.5 rounded-full">GPS</span>
+                  )}
+                  {location.source === 'manual' && (
+                    <span className="text-[8px] bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full flex items-center gap-1">
+                      <Lock size={9} /> Saisie manuelle
+                    </span>
                   )}
                 </div>
                 <p className="text-sm font-semibold text-gray-800 mt-1">{location.address.full}</p>

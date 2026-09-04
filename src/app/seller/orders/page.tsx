@@ -16,6 +16,12 @@ import {
   normalizeStatus, statusTint, formatFCFA,
 } from '@/lib/orderStatus';
 import { inferBasePrice } from '@/lib/pricing';
+// ✅ NOUVEAU — capture la position EXACTE du vendeur au moment où il
+// accepte la commande (voir updateStatus ci-dessous). Même module que
+// checkout/page.tsx et useUserLocation.ts, pour rester sur une seule
+// implémentation GPS web/natif dans tout le projet.
+import { getCurrentPosition } from '@/lib/geolocation';
+import { reverseGeocode } from '@/lib/geo/geocode';
 
 interface Order {
   id: string;
@@ -165,6 +171,49 @@ export default function SellerOrdersPage() {
       // de préparation réel (createdAt → enPreparationAt) par vendeur.
       if (newStatus === 'en_preparation') {
         payload.enPreparationAt = Timestamp.now();
+
+        // 🐛 FIX localisation vendeur — jusqu'ici `sellerLocation` restait
+        // figé sur ce qui avait été écrit au checkout (checkout/page.tsx),
+        // à savoir la position enregistrée sur le PROFIL du vendeur
+        // (users/{sellerId}.latitude/longitude) — potentiellement absente
+        // (repli Dakar 14.7167/-17.4677, sellerLocation.isDefault:true) ou
+        // simplement périmée si le vendeur a changé de point de vente
+        // depuis. Le livreur recevait donc parfois un point de retrait
+        // inexact. On capture maintenant la position RÉELLE du vendeur à
+        // l'instant précis où il accepte la commande — c'est le moment où
+        // il est concrètement à l'endroit d'où il va préparer/remettre le
+        // colis. Best-effort : si la géoloc échoue (permission refusée,
+        // pas de GPS, offline...), on n'empêche jamais l'acceptation —
+        // sellerLocation garde alors la valeur déjà présente sur la
+        // commande plutôt que de bloquer le vendeur.
+        // ✅ NOUVEAU — si le vendeur a fixé sa position À LA MAIN sur son
+        // profil (locationSource:'MANUAL_PIN', voir seller/page.tsx), on
+        // réutilise CETTE adresse telle quelle au lieu de forcer une
+        // nouvelle lecture GPS qui l'écraserait pour cette commande.
+        // L'adresse manuelle doit rester intacte partout, y compris ici.
+        try {
+          const profileSnap = await getDoc(doc(db, 'users', user.uid));
+          const profile = profileSnap.data();
+          if (profile?.locationSource === 'MANUAL_PIN' && typeof profile?.lat === 'number' && typeof profile?.lng === 'number') {
+            payload.sellerLocation = {
+              lat: profile.lat,
+              lng: profile.lng,
+              address: profile.locationAddress || `${profile.lat.toFixed(5)}, ${profile.lng.toFixed(5)}`,
+              isDefault: false,
+              locationSource: 'MANUAL_PIN',
+            };
+          } else {
+            const position = await getCurrentPosition({ enableHighAccuracy: true, timeout: 10000 });
+            const { latitude, longitude } = position.coords;
+            const geocoded = await reverseGeocode(latitude, longitude).catch(() => null);
+            const address = geocoded
+              ? [geocoded.neighborhood, geocoded.city || geocoded.region].filter(Boolean).join(', ') || geocoded.displayName
+              : `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`;
+            payload.sellerLocation = { lat: latitude, lng: longitude, address, isDefault: false };
+          }
+        } catch (geoErr) {
+          console.warn("[seller] géoloc indisponible au moment d'accepter la commande :", geoErr);
+        }
       }
 
       const batch = writeBatch(db);

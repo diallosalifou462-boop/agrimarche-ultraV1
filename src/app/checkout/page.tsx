@@ -1139,24 +1139,36 @@ export default function CheckoutPage() {
                   <span className="card-header-title">Adresse de livraison</span>
                 </div>
                 <div className="card-body">
-                  <button className="location-btn" onClick={detectLocation}>
-                    <div style={{ display:'flex', alignItems:'center', gap:14 }}>
-                      <div className="icon-circle"><Navigation size={16} /></div>
-                      <div style={{ textAlign:'left' }}>
-                        <p style={{ fontSize:14, fontWeight:500, color:'var(--ink)', marginBottom:2 }}>Utiliser ma position GPS</p>
-                        {locationLoading
-                          ? <p style={{ fontSize:12, color:'var(--ink-lt)' }}>Détection en cours…</p>
-                          : location?.city
-                            ? <p style={{ fontSize:12, color:'var(--gold)' }}>{location.city}{location.region ? `, ${location.region}` : ''}</p>
-                            : <p style={{ fontSize:12, color:'var(--ink-lt)' }}>Cliquez pour détecter automatiquement</p>}
+                  {/* ✅ NOUVEAU — dès qu'une adresse manuelle est confirmée
+                      (manualLocation posé), le bouton de détection GPS est
+                      masqué : on ne veut plus qu'un clic accidentel relance
+                      le GPS et sème le doute, même si effectiveLocation
+                      privilégie déjà manualLocation à l'enregistrement. Le
+                      GPS est réellement "arrêté" tant que le client n'a pas
+                      cliqué sur "Modifier la position corrigée" ci-dessous. */}
+                  {!manualLocation && (
+                    <button className="location-btn" onClick={detectLocation}>
+                      <div style={{ display:'flex', alignItems:'center', gap:14 }}>
+                        <div className="icon-circle"><Navigation size={16} /></div>
+                        <div style={{ textAlign:'left' }}>
+                          <p style={{ fontSize:14, fontWeight:500, color:'var(--ink)', marginBottom:2 }}>Utiliser ma position GPS</p>
+                          {locationLoading
+                            ? <p style={{ fontSize:12, color:'var(--ink-lt)' }}>Détection en cours…</p>
+                            : location?.city
+                              ? <p style={{ fontSize:12, color:'var(--gold)' }}>{location.city}{location.region ? `, ${location.region}` : ''}</p>
+                              : <p style={{ fontSize:12, color:'var(--ink-lt)' }}>Cliquez pour détecter automatiquement</p>}
+                        </div>
                       </div>
-                    </div>
-                    <ChevronRight size={16} style={{ color:'var(--gold)', flexShrink:0 }} />
-                  </button>
+                      <ChevronRight size={16} style={{ color:'var(--gold)', flexShrink:0 }} />
+                    </button>
+                  )}
                   {manualLocation?.address ? (
                     <div style={{ marginTop:12, padding:'12px 16px', background:'rgba(16,185,129,.08)', borderRadius:10, border:'1px solid rgba(16,185,129,.3)', display:'flex', alignItems:'center', gap:8 }}>
                       <MapPin size={14} style={{ color:'#059669', flexShrink:0 }} />
-                      <span style={{ fontSize:13, color:'var(--ink-md)' }}>{manualLocation.address} <span style={{ color:'#059669', fontWeight:600 }}>(position corrigée)</span></span>
+                      <span style={{ fontSize:13, color:'var(--ink-md)' }}>
+                        {manualLocation.address} <span style={{ color:'#059669', fontWeight:600 }}>(position corrigée)</span>
+                        <br /><span style={{ fontSize:11, color:'var(--ink-lt)' }}>📍 GPS désactivé — cette adresse sera utilisée telle quelle</span>
+                      </span>
                     </div>
                   ) : location?.address && (
                     <div style={{ marginTop:12, padding:'12px 16px', background:'var(--ivory)', borderRadius:10, border:'1px solid var(--border)', display:'flex', alignItems:'center', gap:8 }}>
