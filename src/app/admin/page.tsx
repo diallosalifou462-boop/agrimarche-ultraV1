@@ -36,6 +36,7 @@ import { useFCMToken } from "@/hooks/useFCMToken"; // ⚠️ ajuste ce chemin ve
 import { notifyUser } from "@/lib/notifications/notifyUser";
 import { categoryLink } from "@/lib/categoryLink";
 import { OrderStatus, ORDER_STATUS_CONFIG, normalizeStatus, statusTint } from "@/lib/orderStatus";
+import { getDeliveryCodeAdmin, DeliveryCodeAdminInfo, DeliveryCodeError } from "@/lib/deliveryCodeActions";
 import FleetMap, { type FleetPoint } from "@/components/FleetMap";
 import { distanceKm, formatDistance, isValidCoordinate } from "@/lib/geo/distance";
 import {
@@ -164,6 +165,14 @@ interface Order {
   // où récupérer (vendeur) ni où livrer (client) pour une commande donnée.
   sellerLocation?: { lat?: number; lng?: number; address?: string; isDefault?: boolean };
   customerLocation?: { lat?: number; lng?: number; address?: string; isDefault?: boolean };
+  // ✅ NOUVEAU — onglet "Signalements". Écrits par le livreur depuis
+  // delivery/dashboard/page.tsx::reportProblem (motif + note libre), sur
+  // 'orders' ET 'seller_orders'. `problemResolvedAt` n'existe pas encore
+  // côté Firestore avant ce changement : c'est cette page qui l'écrit
+  // quand l'admin clôture un signalement (voir resolveProblem ci-dessous).
+  dateProbleme?: string;
+  noteProbleme?: string;
+  problemResolvedAt?: Timestamp | null;
 }
 
 interface UserProfile {
@@ -1535,6 +1544,49 @@ export default function AdminDashboard() {
     } catch { toast.error('Erreur mise à jour'); }
   };
 
+  // ✅ NOUVEAU — modale "Code de livraison" (support/litiges). code=null tant
+  // que rien n'a été chargé ; loading distingue "en cours" de "chargé mais
+  // vide" (ex: commande sans code, ancien système).
+  const [codeViewOrderId, setCodeViewOrderId] = useState<string | null>(null);
+  const [codeViewData, setCodeViewData] = useState<DeliveryCodeAdminInfo | null>(null);
+  const [codeViewLoading, setCodeViewLoading] = useState(false);
+  const [codeViewError, setCodeViewError] = useState<string | null>(null);
+
+  const viewDeliveryCode = async (orderId: string) => {
+    setCodeViewOrderId(orderId);
+    setCodeViewData(null);
+    setCodeViewError(null);
+    setCodeViewLoading(true);
+    try {
+      const info = await getDeliveryCodeAdmin(orderId);
+      setCodeViewData(info);
+    } catch (e: any) {
+      setCodeViewError(e instanceof DeliveryCodeError ? e.message : 'Erreur lors de la récupération du code.');
+    } finally {
+      setCodeViewLoading(false);
+    }
+  };
+
+  // ✅ NOUVEAU — onglet "Signalements livreurs". Clôture un signalement posé
+  // par un livreur (dateProbleme/noteProbleme, voir reportProblem dans
+  // delivery/dashboard/page.tsx) sans jamais toucher au `status` de la
+  // commande : un signalement est une alerte pour l'admin, pas une
+  // transition de statut. Même schéma orders + seller_orders en batch que
+  // les autres écritures de cette page.
+  const resolveProblem = async (orderId: string) => {
+    try {
+      const payload = { problemResolvedAt: Timestamp.now() };
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'orders', orderId), payload, { merge: true });
+      const sellerOrderSnap = await getDoc(doc(db, 'seller_orders', orderId));
+      if (sellerOrderSnap.exists()) {
+        batch.set(doc(db, 'seller_orders', orderId), payload, { merge: true });
+      }
+      await batch.commit();
+      toast.success('Signalement marqué comme résolu');
+    } catch { toast.error('Erreur lors de la résolution du signalement'); }
+  };
+
   const assignDelivery = async (orderId: string, deliveryId: string, deliveryName: string, deliveryPhone: string) => {
     try {
       // Même correctif que updateOrderStatus : synchroniser seller_orders et
@@ -2768,6 +2820,10 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
     { id:'reviews',        label:'Avis clients',         icon:<Star size={18}/>,            badge:reviews.filter(r=>r.rating<=2).length },
     { id:'notifications',  label:'Notifications',       icon:<BellRing size={18}/>,        badge:unreadCount },
     { id:'delivery',       label:'Livraisons',          icon:<Truck size={18}/>,           badge:0 },
+    // ✅ NOUVEAU — signalements posés par les livreurs (client absent,
+    // adresse incorrecte, etc. — voir reportProblem dans
+    // delivery/dashboard/page.tsx). Badge = signalements non résolus.
+    { id:'problems',       label:'Signalements livreurs', icon:<AlertTriangle size={18}/>, badge:orders.filter(o=>o.noteProbleme && !o.problemResolvedAt).length },
     { id:'logistics',      label:'Performance logistique', icon:<TrendingUp size={18}/>,   badge:0 },
     { id:'settings',       label:'Paramètres',          icon:<Settings size={18}/>,        badge:0 },
   ];
@@ -3401,6 +3457,15 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                                     {(order.status === 'en_attente' || (order.status === 'en_preparation' && !order.delivererId)) && (
                                       <button onClick={()=>{ setAssignOrderId(order.id!); setAssignOrderNumber(order.orderNumber); setShowAssignModal(true); }} className="btn-secondary" style={{ padding:'5px 10px', fontSize:11 }}>
                                         Assigner
+                                      </button>
+                                    )}
+                                    {/* ✅ NOUVEAU — support/litige : voir le code de livraison de référence
+                                        + l'historique des tentatives ratées (voir getDeliveryCodeAdmin).
+                                        Visible dès qu'un livreur a été affecté, peu importe le statut
+                                        actuel (utile même après coup pour trancher un litige). */}
+                                    {order.delivererId && (
+                                      <button onClick={()=>viewDeliveryCode(order.id!)} className="btn-secondary" style={{ padding:'5px 10px', fontSize:11 }} title="Voir le code de livraison">
+                                        🔐 Code
                                       </button>
                                     )}
                                   </div>
@@ -6011,6 +6076,94 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
               </div>
             )}
 
+            {/* ═══ SIGNALEMENTS LIVREURS ═══════════════════════
+                Écrits depuis delivery/dashboard/page.tsx::reportProblem
+                (client absent, adresse introuvable, colis refusé, etc.).
+                Les non-résolus (problemResolvedAt vide) remontent en
+                premier ; "Marquer résolu" appelle resolveProblem ci-dessus
+                sans jamais toucher au `status` de la commande. */}
+            {activeTab === 'problems' && (() => {
+              const reported = orders
+                .filter(o => o.noteProbleme)
+                .sort((a, b) => {
+                  if (!!a.problemResolvedAt !== !!b.problemResolvedAt) {
+                    return a.problemResolvedAt ? 1 : -1; // non-résolus d'abord
+                  }
+                  return (b.dateProbleme || '').localeCompare(a.dateProbleme || '');
+                });
+              const unresolvedCount = reported.filter(o => !o.problemResolvedAt).length;
+              return (
+                <div className="animate-fadeIn">
+                  <div className="glass-card" style={{ padding:16, marginBottom:16, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                    <div>
+                      <div style={{ fontSize:12, color:'#6b7280' }}>Signalements en attente</div>
+                      <div style={{ fontSize:22, fontWeight:800, color: unresolvedCount>0 ? '#dc2626' : '#10b981' }}>{unresolvedCount}</div>
+                    </div>
+                    <div style={{ fontSize:11, color:'#6b7280', textAlign:'right' }}>
+                      Total signalé : {reported.length}
+                    </div>
+                  </div>
+
+                  <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(320px,1fr))', gap:16 }}>
+                    {reported.map(order => {
+                      const cfg = ORDER_STATUS_CONFIG[normalizeStatus(order.status)];
+                      const resolved = !!order.problemResolvedAt;
+                      const dateStr = order.dateProbleme
+                        ? new Date(order.dateProbleme).toLocaleDateString('fr-FR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' })
+                        : '—';
+                      return (
+                        <div key={order.id} className="glass-card" style={{ padding:16, border: resolved ? undefined : '1px solid #fecaca' }}>
+                          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:8 }}>
+                            <div>
+                              <div style={{ fontSize:13, fontWeight:700 }}>Commande #{order.id.slice(0,8)}</div>
+                              <div style={{ fontSize:11, color:'#6b7280', marginTop:2 }}>{dateStr}</div>
+                            </div>
+                            <span style={{ fontSize:10, fontWeight:700, padding:'3px 8px', borderRadius:999, background: resolved ? '#dcfce7' : '#fee2e2', color: resolved ? '#15803d' : '#dc2626' }}>
+                              {resolved ? 'Résolu' : 'Non résolu'}
+                            </span>
+                          </div>
+
+                          <div style={{ background:'#fef2f2', border:'1px solid #fecaca', borderRadius:10, padding:'10px 12px', marginBottom:10 }}>
+                            <div style={{ fontSize:10, fontWeight:700, color:'#b91c1c', textTransform:'uppercase', letterSpacing:'0.04em', marginBottom:3 }}>⚠️ Problème signalé</div>
+                            <div style={{ fontSize:13, color:'#1A1A1A' }}>{order.noteProbleme}</div>
+                          </div>
+
+                          <div style={{ fontSize:12, color:'#374151', display:'flex', flexDirection:'column', gap:4, marginBottom:12 }}>
+                            <span>🚴 Livreur : {order.delivererName || '—'}{order.delivererPhone ? ` · ${order.delivererPhone}` : ''}</span>
+                            <span>👤 Client : {order.userName || '—'}</span>
+                            <span>Statut commande : <span style={{ color: cfg?.color, fontWeight:600 }}>{cfg?.label || order.status}</span></span>
+                          </div>
+
+                          {!resolved && (
+                            <div style={{ display:'flex', gap:8 }}>
+                              {order.delivererId && (
+                                <button
+                                  onClick={() => viewDeliveryCode(order.id)}
+                                  style={{ flex:'0 0 auto', padding:'8px 12px', borderRadius:10, background:'#f3f4f6', color:'#374151', fontSize:13, fontWeight:600, border:'none', cursor:'pointer' }}
+                                  title="Voir le code de livraison et l'historique des tentatives"
+                                >
+                                  🔐 Code
+                                </button>
+                              )}
+                              <button
+                                onClick={() => resolveProblem(order.id)}
+                                style={{ flex:1, padding:'8px 12px', borderRadius:10, background:'#10b981', color:'#fff', fontSize:13, fontWeight:600, border:'none', cursor:'pointer' }}
+                              >
+                                ✅ Marquer résolu
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {reported.length===0 && (
+                      <div className="glass-card" style={{ padding:40, textAlign:'center', gridColumn:'1/-1', color:'#6b7280' }}>Aucun signalement pour le moment</div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* ═══ PARAMÈTRES ═════════════════════════════════ */}
             {activeTab === 'settings' && (
               <div className="glass-card animate-fadeIn" style={{ padding:20 }}>
@@ -6912,6 +7065,58 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
       </div>
 
       {/* ══ MODALS ══════════════════════════════════════════════ */}
+
+      {/* ✅ NOUVEAU — Code de livraison (support/litige) */}
+      {codeViewOrderId && (
+        <div onClick={()=>setCodeViewOrderId(null)} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,.8)', backdropFilter:'blur(8px)', zIndex:1000, display:'flex', alignItems:'center', justifyContent:'center' }}>
+          <div onClick={e=>e.stopPropagation()} className="glass-card" style={{ width:420, maxWidth:'90%', padding:24 }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
+              <h3 style={{ fontSize:17, fontWeight:600 }}>🔐 Code de livraison</h3>
+              <button onClick={()=>setCodeViewOrderId(null)} style={{ background:'none', border:'none', color:'#6b7280', cursor:'pointer' }}><X size={20}/></button>
+            </div>
+
+            {codeViewLoading && (
+              <div style={{ textAlign:'center', padding:'20px 0', color:'#6b7280', fontSize:13 }}>Chargement…</div>
+            )}
+
+            {codeViewError && (
+              <div style={{ background:'rgba(239,68,68,.1)', border:'1px solid rgba(239,68,68,.3)', borderRadius:10, padding:12, color:'#ef4444', fontSize:13 }}>{codeViewError}</div>
+            )}
+
+            {!codeViewLoading && !codeViewError && codeViewData && (
+              <>
+                {codeViewData.hasCode ? (
+                  <div style={{ background:'#f9fafb', border:'1px solid #e5e7eb', borderRadius:12, padding:'16px', textAlign:'center', marginBottom:16 }}>
+                    <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.08em', color:'#6b7280', textTransform:'uppercase', marginBottom:6 }}>Code de référence (celui du client)</div>
+                    <div style={{ fontSize:32, fontWeight:800, letterSpacing:10, fontFamily:'monospace' }}>{codeViewData.code ?? '—'}</div>
+                    <div style={{ fontSize:11, color:'#6b7280', marginTop:8 }}>
+                      {codeViewData.usedAt ? '✅ Déjà utilisé pour confirmer cette livraison' : `${codeViewData.attempts} tentative(s) ratée(s) sur cette commande`}
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ background:'#fffbeb', border:'1px solid #fde68a', borderRadius:10, padding:12, fontSize:13, color:'#92400e', marginBottom:16 }}>
+                    Cette commande n'a jamais eu de code généré (commande antérieure à ce système, ou livreur assigné directement par l'admin) — confirmDeliveryWithCode aurait donc laissé passer n'importe quelle saisie sans vérification.
+                  </div>
+                )}
+
+                {codeViewData.failedAttempts.length > 0 && (
+                  <div>
+                    <div style={{ fontSize:11, fontWeight:700, color:'#6b7280', textTransform:'uppercase', letterSpacing:'0.04em', marginBottom:8 }}>Historique des tentatives refusées</div>
+                    <div style={{ display:'flex', flexDirection:'column', gap:6, maxHeight:180, overflowY:'auto' }}>
+                      {[...codeViewData.failedAttempts].reverse().map((a, i) => (
+                        <div key={i} style={{ display:'flex', justifyContent:'space-between', fontSize:12, background:'#f9fafb', borderRadius:8, padding:'6px 10px' }}>
+                          <span style={{ fontFamily:'monospace', fontWeight:700, letterSpacing:2 }}>{a.code}</span>
+                          <span style={{ color:'#9ca3af' }}>{new Date(a.at).toLocaleString('fr-FR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Assigner livreur */}
       {showAssignModal && (

@@ -84,6 +84,7 @@ export {
   claimOrder,
   confirmDeliveryWithCode,
   getDeliveryCode,
+  getDeliveryCodeAdmin,
   findGuestOrders,
   claimGuestOrderSession,
   startGuestCheckoutSession,

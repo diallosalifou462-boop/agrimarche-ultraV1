@@ -363,7 +363,7 @@ service cloud.firestore {
         'delivererId', 'delivererName', 'delivererPhone', 'delivererAssignedAt',
         'status', 'statusLabel', 'updatedAt', 'deliveredAt', 'tracking',
         'dateDepart', 'dateArrivee', 'dateRetour', 'dateLivree',
-        'dateProbleme', 'noteProbleme',
+        'dateProbleme', 'noteProbleme', 'problemResolvedAt',
       ]);
     }
 
@@ -383,8 +383,35 @@ service cloud.firestore {
     function isDelivererTrackingUpdate() {
       return onlyChanges([
         'tracking', 'updatedAt', 'dateDepart', 'dateArrivee', 'dateRetour',
-        'dateProbleme', 'noteProbleme',
+        // 🔒 FIX (session signalements) : reportProblem() écrit désormais
+        // aussi `problemResolvedAt: null` sur CHAQUE signalement (voir
+        // delivery/dashboard/page.tsx) — pour qu'un nouveau signalement ne
+        // reste pas masqué par la résolution d'un signalement précédent
+        // dans l'onglet admin "Signalements livreurs" (admin/page.tsx::
+        // resolveProblem). Sans ce champ ici, onlyChanges() rejette TOUT
+        // le batch (orders ET seller_orders) dès qu'un livreur signale un
+        // problème — le champ 'problemResolvedAt' n'étant écrit QUE par
+        // le livreur (toujours à `null`, jamais une autre valeur) ou par
+        // l'admin (bypass total via isAdmin() ci-dessous), l'ouvrir ici ne
+        // permet pas au livreur de se marquer lui-même "résolu" avec autre
+        // chose que null.
+        'dateProbleme', 'noteProbleme', 'problemResolvedAt',
       ]);
+    }
+
+    // 🔒 FIX (session "vendeur ne marque plus livré") : le bouton "Marquer
+    // comme livrée" a été retiré de seller/orders/page.tsx — mais retirer
+    // un bouton ne bloque qu'un clic dans l'UI, pas une écriture directe
+    // (devtools, requête réseau manuelle...). Sans cette garde, la règle
+    // `isSeller() && resource.data.sellerId == ...` ci-dessous n'imposait
+    // AUCUNE restriction de champ/valeur : le vendeur pouvait toujours
+    // écrire status:'livre' lui-même, exactement ce que ce changement de
+    // produit visait à interdire. Seule confirmDeliveryWithCode (livreur +
+    // code du client, Cloud Function Admin SDK) peut désormais faire
+    // passer une commande à 'livre'.
+    function isSellerOrderUpdate() {
+      return request.resource.data.get('status', resource.data.get('status', null)) != 'livre'
+          || resource.data.get('status', null) == 'livre';
     }
 
     match /orders/{orderId} {
@@ -438,7 +465,7 @@ service cloud.firestore {
       // isOrderCompletionUpdate() reste : c'est le checkout (finalisation
       // immédiate après création), sans rapport avec ce changement.
       allow update: if (isOwner(resource.data.userId) && isOrderCompletionUpdate())
-                    || (isSeller() && resource.data.sellerId == request.auth.uid)
+                    || (isSeller() && resource.data.sellerId == request.auth.uid && isSellerOrderUpdate())
                     // 🔐 Depuis claimOrder/confirmDeliveryWithCode (Cloud
                     // Functions, Admin SDK) : plus de branche "commande libre,
                     // le livreur se l'assigne en écrivant directement" — ce
@@ -519,7 +546,7 @@ service cloud.firestore {
       // qu'/orders ci-dessus, pour la même raison : soit le livreur déjà
       // assigné à cette commande, soit une commande encore libre qu'il est
       // en train de réclamer.
-      allow update: if (isSeller() && resource.data.sellerId == request.auth.uid)
+      allow update: if (isSeller() && resource.data.sellerId == request.auth.uid && isSellerOrderUpdate())
                     // 🔐 Même durcissement que sur /orders ci-dessus : plus de
                     // branche "commande libre, auto-assignation directe".
                     || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid && isDelivererTrackingUpdate())

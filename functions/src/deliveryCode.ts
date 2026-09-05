@@ -224,8 +224,35 @@ export const confirmDeliveryWithCode = onCall({ region: REGION }, async (request
 
     const submitted = hashCode(String(code).trim(), order.deliveryCodeSalt);
     if (submitted !== order.deliveryCodeHash) {
-      tx.set(orderRef, { deliveryCodeAttempts: attempts + 1 }, { merge: true });
-      throw new HttpsError('invalid-argument', 'Code incorrect.');
+      const nextAttempts = attempts + 1;
+      tx.set(orderRef, { deliveryCodeAttempts: nextAttempts }, { merge: true });
+      // 🔎 Journal des tentatives ratées (code EN CLAIR + horodatage),
+      // uniquement dans la sous-collection déjà réservée à l'admin/au
+      // propriétaire (jamais lisible par le livreur). Avant ce changement,
+      // un signalement du type "le code était bon et ça a refusé" était
+      // impossible à trancher : on ne savait ni ce qui avait été réellement
+      // tapé, ni si ça correspondait au bon code. getDeliveryCodeAdmin
+      // (ci-dessous) expose ce journal pour que l'admin puisse comparer
+      // objectivement au lieu de deviner.
+      tx.set(
+        orderRef.collection('secure').doc('delivery'),
+        { failedAttempts: admin.firestore.FieldValue.arrayUnion({ code: String(code).trim(), at: new Date().toISOString() }) },
+        { merge: true }
+      );
+      // ✅ NOUVEAU — le livreur ne savait jamais combien d'essais il lui
+      // restait avant blocage (5 tentatives, cf. MAX_CODE_ATTEMPTS) : un
+      // message générique "Code incorrect." après une 4e tentative ratée
+      // ne prévient de rien, l'échec suivant tombe sans avertissement.
+      // remainingAttempts voyage dans `details` (lu côté client via
+      // toDeliveryCodeError, voir lib/deliveryCodeActions.ts) pour que la
+      // modale affiche un avertissement progressif.
+      const remaining = MAX_CODE_ATTEMPTS - nextAttempts;
+      const suffix = remaining <= 0
+        ? ' Prochain échec : blocage.'
+        : remaining === 1
+          ? ' Attention : dernier essai avant blocage.'
+          : ` (${remaining} essais restants)`;
+      throw new HttpsError('invalid-argument', `Code incorrect.${suffix}`, { remainingAttempts: Math.max(remaining, 0) });
     }
 
     payload.deliveryCodeUsedAt = now;
@@ -240,6 +267,55 @@ export const confirmDeliveryWithCode = onCall({ region: REGION }, async (request
   // automatiquement par l'écriture status → 'livre' ci-dessus. Rien à
   // envoyer manuellement ici.
   return { success: true };
+});
+
+// ============================================================
+//   1bis. LECTURE DU CODE PAR L'ADMIN (support / litiges)
+// ============================================================
+// Cas d'usage réel qui a motivé cet ajout : un livreur affirme avoir saisi
+// le bon code et se voir répondre "Code incorrect." — sans preuve d'aucun
+// côté, impossible de trancher (erreur de saisie ? mauvaise commande ?
+// vrai bug ?). Cette fonction donne à l'admin : le code de référence, et
+// l'historique EXACT de ce qui a été soumis et refusé (voir
+// confirmDeliveryWithCode ci-dessus), pour comparer plutôt que deviner.
+// Volontairement séparée de getDeliveryCode (qui reste réservée au
+// propriétaire) : pas question d'assouplir la règle "le livreur ne voit
+// jamais le code" pour un usage différent.
+export const getDeliveryCodeAdmin = onCall({ region: REGION }, async (request) => {
+  const uid = request.auth?.uid;
+  if (!uid) throw new HttpsError('unauthenticated', 'Connectez-vous.');
+
+  const callerSnap = await db().collection('users').doc(uid).get();
+  const caller = callerSnap.data() as any;
+  if (!callerSnap.exists || caller?.role !== 'admin') {
+    throw new HttpsError('permission-denied', 'Réservé aux administrateurs.');
+  }
+
+  const { orderId } = (request.data || {}) as { orderId?: string };
+  if (!orderId) throw new HttpsError('invalid-argument', 'orderId manquant.');
+
+  const orderRef = db().collection('orders').doc(orderId);
+  const orderSnap = await orderRef.get();
+  if (!orderSnap.exists) throw new HttpsError('not-found', 'Commande introuvable.');
+  const order = orderSnap.data() as any;
+
+  const secureSnap = await orderRef.collection('secure').doc('delivery').get();
+  const secure = secureSnap.exists ? (secureSnap.data() as any) : null;
+
+  // Audit trail : on journalise QUI a consulté le code de QUELLE commande —
+  // c'est un accès sensible (le code appartient au client), même pour un
+  // admin légitime.
+  console.log(`🔐 [admin] Code consulté par ${uid} pour la commande ${orderId}`);
+
+  return {
+    code: secure?.code ?? null,
+    hasCode: !!order.deliveryCodeHash,
+    attempts: order.deliveryCodeAttempts ?? 0,
+    usedAt: order.deliveryCodeUsedAt ? true : false,
+    // Chaque entrée : { code, at } — ce qui a été RÉELLEMENT tapé et refusé,
+    // dans l'ordre chronologique.
+    failedAttempts: (secure?.failedAttempts ?? []) as { code: string; at: string }[],
+  };
 });
 
 // ============================================================

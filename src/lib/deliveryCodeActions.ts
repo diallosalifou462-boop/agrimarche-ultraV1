@@ -20,9 +20,11 @@ const functions = getFunctions(app, 'us-central1');
 
 export class DeliveryCodeError extends Error {
   code: string;
-  constructor(code: string, message: string) {
+  details?: any;
+  constructor(code: string, message: string, details?: any) {
     super(message);
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -36,7 +38,11 @@ function toDeliveryCodeError(e: any): DeliveryCodeError {
     'functions/invalid-argument': e?.message || 'Code incorrect.',
     'functions/resource-exhausted': e?.message || 'Trop de tentatives — réessayez plus tard.',
   };
-  return new DeliveryCodeError(code, messages[code] ?? "😊 Petit souci technique — réessayez dans un instant.");
+  // ✅ NOUVEAU — `details` (ex: { remainingAttempts }) transmis par
+  // confirmDeliveryWithCode via le 3e argument de HttpsError. Transporté
+  // tel quel pour que l'UI (DeliveryCodeModal) puisse afficher un compteur
+  // distinct plutôt que de reparser le texte du message.
+  return new DeliveryCodeError(code, messages[code] ?? "😊 Petit souci technique — réessayez dans un instant.", e?.details);
 }
 
 /** Livreur : accepte une commande 'en_preparation'. Génère le code côté serveur. */
@@ -77,6 +83,27 @@ export async function getDeliveryCode(orderId: string): Promise<string | null> {
     const fn = httpsCallable<{ orderId: string }, { code: string | null; reason: 'ok' | 'not_generated' }>(functions, 'getDeliveryCode');
     const res = await callWithRetry(() => fn({ orderId }));
     return res.data.code;
+  } catch (e: any) {
+    throw toDeliveryCodeError(e);
+  }
+}
+
+export interface DeliveryCodeAdminInfo {
+  code: string | null;
+  hasCode: boolean;
+  attempts: number;
+  usedAt: boolean;
+  failedAttempts: { code: string; at: string }[];
+}
+
+/** Admin uniquement : code de référence + historique des tentatives ratées,
+ * pour trancher un litige "le code était bon et ça a refusé" avec des faits
+ * plutôt qu'en devinant (voir getDeliveryCodeAdmin côté serveur). */
+export async function getDeliveryCodeAdmin(orderId: string): Promise<DeliveryCodeAdminInfo> {
+  try {
+    const fn = httpsCallable<{ orderId: string }, DeliveryCodeAdminInfo>(functions, 'getDeliveryCodeAdmin');
+    const res = await callWithRetry(() => fn({ orderId }));
+    return res.data;
   } catch (e: any) {
     throw toDeliveryCodeError(e);
   }

@@ -406,9 +406,14 @@ export default function SellerOrdersPage() {
                         )}
                       </p>
                     )}
+                    {/* 🔒 FIX SÉCURITÉ : le vendeur voyait aussi le téléphone
+                        du livreur (order.delivererPhone) — même problème que
+                        pour le client (voir account/orders/page.tsx). Le nom
+                        suffit pour identifier qui a pris la commande ; tout
+                        contact direct doit rester hors de question. */}
                     {order.delivererId && (
                       <p className="text-sm text-blue-600 flex items-center gap-1 mt-1">
-                        🚴 Livreur : {order.delivererName || '—'}{order.delivererPhone ? ` · ${order.delivererPhone}` : ''}
+                        🚴 Livreur : {order.delivererName || '—'}
                       </p>
                     )}
                   </div>
@@ -487,33 +492,25 @@ export default function SellerOrdersPage() {
                       </>
                     )}
 
+                    {/* 🔒 FIX SÉCURITÉ/INTÉGRITÉ : le vendeur pouvait
+                        auparavant clôturer lui-même la livraison ("Marquer
+                        comme livrée"), sans aucune preuve que le colis avait
+                        réellement été remis. C'est hors de question : seule
+                        la confirmation par code (le livreur saisit le code
+                        que le client lui donne de vive voix — voir
+                        delivery/dashboard/page.tsx::markAsDelivered et
+                        lib/deliveryCodeActions.ts) peut faire passer une
+                        commande à 'livre'. Le vendeur n'a donc plus qu'un
+                        statut en lecture seule ici. */}
                     {order.status === 'en_livraison' && (
-                      <button
-                        onClick={() => updateStatus(order.id, 'livre', 'Livrée')}
-                        disabled={isUpdating}
-                        className="px-4 py-2 bg-green-500 text-white rounded-xl text-sm font-medium hover:bg-green-600 transition disabled:opacity-50"
-                      >
-                        {isUpdating ? '…' : '✅ Marquer comme livrée'}
-                      </button>
+                      <span className="px-4 py-2 bg-purple-50 text-purple-700 rounded-xl text-sm font-medium flex items-center gap-2">
+                        <Truck size={15} /> En livraison — en attente du code de confirmation (livreur + client)
+                      </span>
                     )}
 
                     {/* ✅ FIX : le lien WhatsApp direct exposait le numéro du client
                         (visible dans le lien et dans la conversation WhatsApp
                         ouverte). Retiré : le vendeur ne doit voir que le nom. */}
-
-                    {order.status === 'en_livraison' && (
-                      <>{/* ⚠️ FIX cohérence inter-pages : il y avait ici un second
-                          bouton <DeliveryUpdateButton/> qui écrivait
-                          deliveryStatus:'delivered' (vocabulaire séparé) SANS
-                          jamais toucher au champ canonique `status`. Le bouton
-                          "Marquer comme livrée" ci-dessus est la SEULE action
-                          valide : il met à jour status + deliveryStatus (via
-                          STATUS_TO_DELIVERY) + seller_orders en un seul batch.
-                          L'ancien bouton restait accessible en parallèle et
-                          bloquait silencieusement la commande à 'en_livraison'
-                          pour le livreur/l'admin/le client si le vendeur
-                          cliquait dessus par erreur. */}</>
-                    )}
                   </div>
                 )}
 

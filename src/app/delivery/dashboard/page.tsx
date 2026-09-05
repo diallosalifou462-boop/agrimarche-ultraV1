@@ -373,7 +373,11 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
       const note = problemReason === 'Autre'
         ? (problemNote.trim() || 'Problème signalé (motif non précisé)')
         : problemNote.trim() ? `${problemReason} — ${problemNote.trim()}` : problemReason;
-      const payload = { dateProbleme: nowLocal(), noteProbleme: note };
+      // problemResolvedAt: null — si ce signalement réutilise une commande
+      // dont un signalement précédent avait déjà été clôturé côté admin
+      // (voir resolveProblem dans admin/page.tsx), il ne faut pas que
+      // l'ancien statut "résolu" masque ce nouveau signalement.
+      const payload = { dateProbleme: nowLocal(), noteProbleme: note, problemResolvedAt: null };
       const batch = writeBatch(db);
       batch.set(doc(db, 'orders', order.id), payload, { merge: true });
       const sellerOrderSnap = await getDoc(doc(db, 'seller_orders', order.id));

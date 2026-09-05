@@ -22,6 +22,12 @@ import { ORDER_STATUS_CONFIG, normalizeStatus, statusTint, formatFCFA, canClient
 // `updateOrderStatus` (transaction atomique côté serveur), plus par une
 // écriture Firestore directe — voir src/lib/orderActions.ts pour le détail.
 import { confirmOrderDelivery, cancelClientOrder, OrderActionError } from '@/lib/orderActions';
+// ✅ NOUVEAU — même code de livraison que app/account/orders/page.tsx,
+// affiché ici aussi (page compte, aperçu des 3 dernières commandes).
+// Avant, ce code n'était visible que sur la page "Toutes mes commandes" :
+// un client qui suivait sa livraison depuis l'écran d'accueil du compte
+// n'avait aucun moyen d'y accéder sans naviguer ailleurs.
+import { getDeliveryCode, DeliveryCodeError } from '@/lib/deliveryCodeActions';
 // ✅ Même cloche de notifications que l'espace vendeur (voir seller/layout.tsx) :
 // affiche en temps réel commandes, avis, messages... pour le client aussi.
 import { NotificationBell } from '@/components/NotificationBell';
@@ -68,6 +74,14 @@ export default function AccountPage() {
   const [loadingOrders, setLoadingOrders] = useState(true);
   const [updating, setUpdating] = useState<string | null>(null);
   const [sellerRatings, setSellerRatings] = useState<Map<string, SellerRating>>(new Map());
+  // 🔐 Code de livraison — même règle que app/account/orders/page.tsx :
+  // récupéré via getDeliveryCode (jamais lu directement en Firestore, qui
+  // ne stocke que le hash), un par commande affichée, dès qu'un livreur a
+  // été assigné. Map<orderId, code> plutôt qu'un seul état, puisque
+  // plusieurs commandes de la liste peuvent être 'en_livraison' en même
+  // temps ici.
+  const [deliveryCodes, setDeliveryCodes] = useState<Map<string, string>>(new Map());
+  const [deliveryCodesLoading, setDeliveryCodesLoading] = useState<Set<string>>(new Set());
   const [formData, setFormData] = useState<UserFormData>({
     displayName: '', phone: '', city: '', address: '',
   });
@@ -104,6 +118,36 @@ export default function AccountPage() {
 
     return () => unsubs.forEach(unsub => unsub());
   }, [orders, user]);
+
+  // ── Récupération des codes de livraison (aperçu des 3 dernières
+  // commandes seulement — pas besoin de charger ceux des commandes non
+  // affichées ici) ──────────────────────────────────────────────────────
+  useEffect(() => {
+    const preview = orders.slice(0, 3);
+    const targets = preview.filter(
+      (o: any) => o.status === 'en_livraison' && o.delivererId && !deliveryCodes.has(o.id) && !deliveryCodesLoading.has(o.id)
+    );
+    if (targets.length === 0) return;
+
+    targets.forEach((order: any) => {
+      setDeliveryCodesLoading(prev => new Set(prev).add(order.id));
+      getDeliveryCode(order.id)
+        .then((code) => {
+          if (code) setDeliveryCodes(prev => new Map(prev).set(order.id, code));
+        })
+        .catch((e) => {
+          console.error('Erreur récupération code de livraison', e instanceof DeliveryCodeError ? e.message : e);
+        })
+        .finally(() => {
+          setDeliveryCodesLoading(prev => {
+            const next = new Set(prev);
+            next.delete(order.id);
+            return next;
+          });
+        });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orders]);
 
   // ── Sync temps réel des commandes (orders + seller_orders fusionnés) ──────
   useEffect(() => {
@@ -458,6 +502,34 @@ export default function AccountPage() {
                             <p className="text-xs font-bold text-rose-700">Commande refusée par le vendeur</p>
                             <p className="text-[11px] text-rose-500 mt-0.5">Le vendeur n'a pas pu traiter votre commande.</p>
                           </div>
+                        </div>
+                      )}
+
+                      {/* 🔐 Code de livraison — même règle que app/account/orders/page.tsx :
+                          affiché uniquement au propriétaire de la commande, jamais par SMS.
+                          C'est ce code, et lui seul, que le livreur doit recevoir de vive
+                          voix pour pouvoir clôturer la livraison. */}
+                      {order.status === 'en_livraison' && order.delivererId && (
+                        <div className="mx-4 mb-3 rounded-xl px-4 py-3 text-center" style={{ background: 'linear-gradient(135deg, #1A1A1A, #2d2d2d)' }}>
+                          <p className="text-[10px] font-bold tracking-widest uppercase" style={{ color: '#C9A96E' }}>
+                            🔐 Code de livraison
+                          </p>
+                          {deliveryCodesLoading.has(order.id) ? (
+                            <p className="text-xs text-gray-400 mt-2">Chargement…</p>
+                          ) : deliveryCodes.has(order.id) ? (
+                            <>
+                              <p className="text-white font-mono font-extrabold mt-1.5 mb-1" style={{ fontSize: 28, letterSpacing: 8 }}>
+                                {deliveryCodes.get(order.id)}
+                              </p>
+                              <p className="text-[11px] text-gray-300">
+                                Donnez ce code au livreur pour confirmer la réception de votre commande.
+                              </p>
+                            </>
+                          ) : (
+                            <p className="text-[11px] text-gray-300 mt-2">
+                              Le code apparaîtra ici dès que le livreur aura pris en charge votre commande.
+                            </p>
+                          )}
                         </div>
                       )}
 
