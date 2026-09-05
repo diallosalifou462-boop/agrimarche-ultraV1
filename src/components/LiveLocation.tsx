@@ -35,7 +35,8 @@ import { db } from '@/lib/firebase/firebase';
 import { doc, updateDoc, getDoc, Timestamp } from 'firebase/firestore';
 import { distanceKm } from '@/lib/geo/distance';
 import { computeGeohash } from '@/lib/geo/geohash';
-import { setCachedLocation } from '@/lib/locationCache';
+import { setCachedLocation, getAnyCachedLocation } from '@/lib/locationCache';
+import { saveManualAddress, clearManualAddress } from '@/lib/manualLocation';
 
 interface LocationData {
   lat: number;
@@ -684,16 +685,22 @@ export function LiveLocation() {
     try {
       // On garde les dernières coordonnées connues (si on en a) pour ne pas
       // perdre la position sur la carte admin/livreur — seule l'ADRESSE
-      // affichée change. Sans coordonnées connues, on ne touche pas lat/lng
-      // existants plutôt que d'écrire 0,0 (Golfe de Guinée).
-      const coords = location ? { lat: location.lat, lng: location.lng } : {};
+      // affichée change. Sans coordonnées connues, on retombe sur celles
+      // déjà en cache, sinon le centre de Dakar plutôt que 0,0 (Golfe de
+      // Guinée) — jamais bloquant, l'objet affiché reste `address`, pas
+      // les coordonnées.
+      const fallbackCoords = getAnyCachedLocation();
+      const lat = location?.lat ?? fallbackCoords?.lat ?? 14.7167;
+      const lng = location?.lng ?? fallbackCoords?.lng ?? -17.4677;
 
-      await updateDoc(doc(db, 'users', user.uid), {
-        ...coords,
-        locationAddress: address,
-        locationSource: 'MANUAL_PIN',
-        locationUpdatedAt: Timestamp.now(),
-      });
+      // 🔗 FIX ARCHITECTURAL — passe désormais par lib/manualLocation.ts,
+      // la même fonction utilisée par checkout et seller/dashboard : c'est
+      // ce qui garantit qu'une adresse fixée ICI apparaît aussi partout
+      // ailleurs (catalogue, checkout, tableau de bord vendeur), et
+      // inversement. Avant, cette page écrivait son propre
+      // updateDoc+setCachedLocation en double, désynchronisé des deux
+      // autres écrans qui faisaient chacun la même chose à leur façon.
+      await saveManualAddress({ uid: user.uid, lat, lng, address });
 
       setLocation(prev => ({
         lat: prev?.lat ?? 0,
@@ -716,27 +723,13 @@ export function LiveLocation() {
       setIsManualLocation(true);
       setManualAddress(address);
       setShowManualForm(false);
-
-      if (location) {
-        setCachedLocation({
-          lat: location.lat,
-          lng: location.lng,
-          city: address,
-          region: '',
-          country: 'Sénégal',
-          address,
-          detected: true,
-          // ✅ Adresse confirmée explicitement par le client : ce n'est PAS
-          // une position de repli, donc isDefault:false.
-          isDefault: false,
-        });
-      }
     } catch (err) {
       console.error('Erreur enregistrement adresse manuelle:', err);
       isManualRef.current = false;
     } finally {
       setSavingManual(false);
     }
+
   }, [manualInput, user?.uid, location, stopLocationTracking]);
 
   // Abandonne l'adresse manuelle et relance la détection automatique.
@@ -747,8 +740,16 @@ export function LiveLocation() {
     setManualInput('');
     setStatus('idle');
     setLocation(null);
+    // 🔗 FIX ARCHITECTURAL — clearManualAddress() (lib/manualLocation.ts)
+    // efface le cache local ET remet locationSource:'GPS' sur Firestore en
+    // un seul appel, cohérent avec saveManualAddress() utilisé ci-dessus :
+    // sans la remise à zéro Firestore, le prochain montage de cette page
+    // (ou de seller/dashboard) relisait locationSource:'MANUAL_PIN' et
+    // réactivait le mode manuel tout seul, rendant ce bouton sans effet
+    // durable.
+    clearManualAddress(user?.uid);
     startLocationTracking();
-  }, [startLocationTracking]);
+  }, [startLocationTracking, user?.uid]);
 
   // ============================================================
   // Formateurs

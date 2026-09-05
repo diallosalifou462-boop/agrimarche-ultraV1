@@ -51,7 +51,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.startGuestCheckoutSession = exports.claimGuestOrderSession = exports.findGuestOrders = exports.getDeliveryCode = exports.confirmDeliveryWithCode = exports.claimOrder = void 0;
+exports.startGuestCheckoutSession = exports.claimGuestOrderSession = exports.findGuestOrders = exports.getDeliveryCode = exports.getDeliveryCodeAdmin = exports.confirmDeliveryWithCode = exports.claimOrder = void 0;
 const crypto = __importStar(require("crypto"));
 const https_1 = require("firebase-functions/v2/https");
 const admin = __importStar(require("firebase-admin"));
@@ -238,8 +238,31 @@ exports.confirmDeliveryWithCode = (0, https_1.onCall)({ region: REGION }, async 
         }
         const submitted = hashCode(String(code).trim(), order.deliveryCodeSalt);
         if (submitted !== order.deliveryCodeHash) {
-            tx.set(orderRef, { deliveryCodeAttempts: attempts + 1 }, { merge: true });
-            throw new https_1.HttpsError('invalid-argument', 'Code incorrect.');
+            const nextAttempts = attempts + 1;
+            tx.set(orderRef, { deliveryCodeAttempts: nextAttempts }, { merge: true });
+            // 🔎 Journal des tentatives ratées (code EN CLAIR + horodatage),
+            // uniquement dans la sous-collection déjà réservée à l'admin/au
+            // propriétaire (jamais lisible par le livreur). Avant ce changement,
+            // un signalement du type "le code était bon et ça a refusé" était
+            // impossible à trancher : on ne savait ni ce qui avait été réellement
+            // tapé, ni si ça correspondait au bon code. getDeliveryCodeAdmin
+            // (ci-dessous) expose ce journal pour que l'admin puisse comparer
+            // objectivement au lieu de deviner.
+            tx.set(orderRef.collection('secure').doc('delivery'), { failedAttempts: admin.firestore.FieldValue.arrayUnion({ code: String(code).trim(), at: new Date().toISOString() }) }, { merge: true });
+            // ✅ NOUVEAU — le livreur ne savait jamais combien d'essais il lui
+            // restait avant blocage (5 tentatives, cf. MAX_CODE_ATTEMPTS) : un
+            // message générique "Code incorrect." après une 4e tentative ratée
+            // ne prévient de rien, l'échec suivant tombe sans avertissement.
+            // remainingAttempts voyage dans `details` (lu côté client via
+            // toDeliveryCodeError, voir lib/deliveryCodeActions.ts) pour que la
+            // modale affiche un avertissement progressif.
+            const remaining = MAX_CODE_ATTEMPTS - nextAttempts;
+            const suffix = remaining <= 0
+                ? ' Prochain échec : blocage.'
+                : remaining === 1
+                    ? ' Attention : dernier essai avant blocage.'
+                    : ` (${remaining} essais restants)`;
+            throw new https_1.HttpsError('invalid-argument', `Code incorrect.${suffix}`, { remainingAttempts: Math.max(remaining, 0) });
         }
         payload.deliveryCodeUsedAt = now;
         const sellerOrderSnap = await tx.get(sellerOrderRef);
@@ -253,6 +276,52 @@ exports.confirmDeliveryWithCode = (0, https_1.onCall)({ region: REGION }, async 
     // automatiquement par l'écriture status → 'livre' ci-dessus. Rien à
     // envoyer manuellement ici.
     return { success: true };
+});
+// ============================================================
+//   1bis. LECTURE DU CODE PAR L'ADMIN (support / litiges)
+// ============================================================
+// Cas d'usage réel qui a motivé cet ajout : un livreur affirme avoir saisi
+// le bon code et se voir répondre "Code incorrect." — sans preuve d'aucun
+// côté, impossible de trancher (erreur de saisie ? mauvaise commande ?
+// vrai bug ?). Cette fonction donne à l'admin : le code de référence, et
+// l'historique EXACT de ce qui a été soumis et refusé (voir
+// confirmDeliveryWithCode ci-dessus), pour comparer plutôt que deviner.
+// Volontairement séparée de getDeliveryCode (qui reste réservée au
+// propriétaire) : pas question d'assouplir la règle "le livreur ne voit
+// jamais le code" pour un usage différent.
+exports.getDeliveryCodeAdmin = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    var _a, _b, _c, _d;
+    const uid = (_a = request.auth) === null || _a === void 0 ? void 0 : _a.uid;
+    if (!uid)
+        throw new https_1.HttpsError('unauthenticated', 'Connectez-vous.');
+    const callerSnap = await db().collection('users').doc(uid).get();
+    const caller = callerSnap.data();
+    if (!callerSnap.exists || (caller === null || caller === void 0 ? void 0 : caller.role) !== 'admin') {
+        throw new https_1.HttpsError('permission-denied', 'Réservé aux administrateurs.');
+    }
+    const { orderId } = (request.data || {});
+    if (!orderId)
+        throw new https_1.HttpsError('invalid-argument', 'orderId manquant.');
+    const orderRef = db().collection('orders').doc(orderId);
+    const orderSnap = await orderRef.get();
+    if (!orderSnap.exists)
+        throw new https_1.HttpsError('not-found', 'Commande introuvable.');
+    const order = orderSnap.data();
+    const secureSnap = await orderRef.collection('secure').doc('delivery').get();
+    const secure = secureSnap.exists ? secureSnap.data() : null;
+    // Audit trail : on journalise QUI a consulté le code de QUELLE commande —
+    // c'est un accès sensible (le code appartient au client), même pour un
+    // admin légitime.
+    console.log(`🔐 [admin] Code consulté par ${uid} pour la commande ${orderId}`);
+    return {
+        code: (_b = secure === null || secure === void 0 ? void 0 : secure.code) !== null && _b !== void 0 ? _b : null,
+        hasCode: !!order.deliveryCodeHash,
+        attempts: (_c = order.deliveryCodeAttempts) !== null && _c !== void 0 ? _c : 0,
+        usedAt: order.deliveryCodeUsedAt ? true : false,
+        // Chaque entrée : { code, at } — ce qui a été RÉELLEMENT tapé et refusé,
+        // dans l'ordre chronologique.
+        failedAttempts: ((_d = secure === null || secure === void 0 ? void 0 : secure.failedAttempts) !== null && _d !== void 0 ? _d : []),
+    };
 });
 // ============================================================
 //   2. LECTURE DU CODE PAR LE PROPRIÉTAIRE

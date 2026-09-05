@@ -31,6 +31,21 @@ export interface CachedUserLocation {
   detected?: boolean;
   /** true = position de repli (IP/défaut Dakar), jamais aussi fiable qu'un vrai fix GPS. */
   isDefault?: boolean;
+  /**
+   * 🔒 NOUVEAU — true = adresse choisie explicitement par le client (voir
+   * LiveLocation.tsx::saveManualLocation). Avant ce champ, RIEN ne
+   * distinguait un choix manuel d'une simple détection GPS passée : passé
+   * LOCATION_STALE_MS (10 min), isLocationStale() la déclarait périmée
+   * comme n'importe quelle autre position, et la prochaine page qui
+   * redétecte automatiquement (ex: useUserLocation.ts au checkout)
+   * l'écrasait en silence par un vrai fix GPS — l'utilisateur voyait alors
+   * une adresse différente de celle qu'il venait de saisir, sans avoir
+   * rien changé lui-même. isManual:true rend cette position increvable
+   * par expiration : voir isLocationStale() ci-dessous, elle ne redevient
+   * modifiable qu'en repassant explicitement en mode auto (bouton "Revenir
+   * au GPS auto", qui efface ce flag).
+   */
+  isManual?: boolean;
   /** Horodatage de mise en cache — c'est ce champ qui permet l'expiration. */
   cachedAt: number;
 }
@@ -40,6 +55,10 @@ export function getFreshCachedLocation(): CachedUserLocation | null {
   const parsed = readRaw();
   if (!parsed) return null;
   if (parsed.isDefault) return null;
+  // 🔒 Une adresse manuelle ne "périme" jamais d'elle-même — voir isManual
+  // sur CachedUserLocation et isLocationStale() ci-dessous pour le
+  // problème concret que ça corrige.
+  if (parsed.isManual) return parsed;
   if (Date.now() - parsed.cachedAt > LOCATION_STALE_MS) return null;
   return parsed;
 }
@@ -54,9 +73,20 @@ export function getAnyCachedLocation(): CachedUserLocation | null {
   return readRaw();
 }
 
-export function isLocationStale(loc: Pick<CachedUserLocation, 'cachedAt' | 'isDefault'> | null): boolean {
+export function isLocationStale(loc: Pick<CachedUserLocation, 'cachedAt' | 'isDefault' | 'isManual'> | null): boolean {
   if (!loc) return true;
   if (loc.isDefault) return true;
+  // 🔒 FIX — avant ce garde, une adresse saisie manuellement (LiveLocation.tsx
+  // ::saveManualLocation) redevenait "périmée" après LOCATION_STALE_MS
+  // (10 min) exactement comme un vrai fix GPS. Toute page qui redétecte
+  // automatiquement dans ce cas (ex: useUserLocation.ts au checkout, via
+  // detectLocation()) écrasait alors silencieusement le choix explicite du
+  // client par une position GPS/IP réelle — symptôme observé : l'adresse
+  // manuelle ("Diamaguene") remplacée par une adresse géocodée ("Dakar,
+  // département de ...") sans qu'il ait rien changé lui-même. Une position
+  // manuelle ne périme plus jamais tant qu'elle n'a pas été explicitement
+  // abandonnée (bouton "Revenir au GPS auto", qui efface isManual).
+  if (loc.isManual) return false;
   return Date.now() - loc.cachedAt > LOCATION_STALE_MS;
 }
 

@@ -17,6 +17,7 @@ import { onAuthStateChanged } from 'firebase/auth';
 // cohérent (même fournisseur, même UX de correction).
 import { searchPlaces, reverseGeocode } from '@/lib/geo/geocode';
 import { computeGeohash } from '@/lib/geo/geohash';
+import { saveManualAddress } from '@/lib/manualLocation';
 import { isPlausibleSenegalCoordinate } from '@/lib/geo/distance';
 import type { GeocodeResult } from '@/lib/geo/types';
 import LocationPicker from '@/components/LocationPicker';
@@ -155,24 +156,16 @@ export default function SellerDashboard() {
         [geocoded?.neighborhood, geocoded?.city].filter(Boolean).join(', ') ||
         `${manualPin.lat.toFixed(5)}, ${manualPin.lng.toFixed(5)}`;
 
-      // 🔗 FIX RACINE : ces trois champs (lat/lng/locationAddress) sont
-      // exactement ceux que app/admin/page.tsx lit pour chaque utilisateur
-      // (isValidCoordinate(user.lat, user.lng), user.locationAddress) —
-      // voir l'interface UserProfile là-bas. Le code précédent écrivait
-      // `latitude`/`longitude` (aucun champ `locationAddress` du tout), des
-      // noms que l'admin ne lit jamais : la position du vendeur pouvait donc
-      // être enregistrée avec succès sans JAMAIS apparaître dans l'onglet
-      // Utilisateurs. `locationSource: 'MANUAL_PIN'` reprend la valeur déjà
-      // utilisée par seller/register.tsx pour une saisie manuelle, afin de
-      // rester cohérent dans toute l'app.
-      await setDoc(doc(db, 'users', sellerUid), {
-        lat: manualPin.lat,
-        lng: manualPin.lng,
-        geohash: computeGeohash(manualPin.lat, manualPin.lng),
-        locationAddress: address,
-        locationSource: 'MANUAL_PIN',
-        locationUpdatedAt: new Date().toISOString(),
-      }, { merge: true });
+      // 🔗 FIX ARCHITECTURAL — passe désormais par lib/manualLocation.ts,
+      // la même fonction utilisée par LiveLocation.tsx (/main/location) et
+      // le checkout. Avant, cette page écrivait Firestore toute seule
+      // (avec un `locationUpdatedAt` en string ISO, incompatible avec le
+      // `.toMillis()` attendu par LiveLocation.tsx au montage) et ne
+      // touchait JAMAIS le cache local partagé (lib/locationCache.ts) : la
+      // position boutique du vendeur pouvait donc être enregistrée avec
+      // succès sans jamais apparaître ailleurs dans l'app tant qu'un
+      // aller-retour Firestore n'avait pas eu lieu.
+      await saveManualAddress({ uid: sellerUid, lat: manualPin.lat, lng: manualPin.lng, address });
 
       setSellerLocation(address);
       setSellerLocationSource('MANUAL_PIN');

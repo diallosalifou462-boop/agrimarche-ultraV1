@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { useCart } from '@/hooks/useCart';
 import { useAuth } from '@/hooks/useAuth';
 import { useUserLocation } from '@/hooks/useUserLocation';
+import { saveManualAddress } from '@/lib/manualLocation';
 import LocationPicker from '@/components/LocationPicker';
 import { reverseGeocode, searchPlaces } from '@/lib/geo/geocode';
 import type { GeocodeResult } from '@/lib/geo/types';
@@ -541,17 +542,27 @@ export default function CheckoutPage() {
   }, [placeQuery]);
 
   const pickSearchedPlace = useCallback((r: GeocodeResult) => {
+    const address = [r.address, r.city].filter(Boolean).join(', ') || r.displayName;
     setManualPin({ lat: r.latitude, lng: r.longitude });
     setManualLocation({
       lat: r.latitude,
       lng: r.longitude,
-      address: [r.address, r.city].filter(Boolean).join(', ') || r.displayName,
+      address,
       source: 'MAP_SEARCH',
     });
     setPlaceQuery('');
     setPlaceResults([]);
     setShowLocationPicker(false);
-  }, []);
+    // 🔗 FIX ARCHITECTURAL — sans cet appel, une adresse choisie ici ne
+    // vivait que pour la commande en cours (state React local, jamais
+    // persisté). Fermer le checkout ou revenir au catalogue faisait
+    // réapparaître l'ancienne position GPS/IP comme si de rien n'était.
+    // saveManualAddress() (lib/manualLocation.ts) en fait la MÊME adresse
+    // manuelle que celle gérée par LiveLocation.tsx et le tableau de bord
+    // vendeur — elle apparaît désormais partout, jusqu'à modification ou
+    // retour explicite au GPS.
+    saveManualAddress({ uid: user?.uid, lat: r.latitude, lng: r.longitude, address });
+  }, [user?.uid]);
 
   const confirmManualLocation = useCallback(async () => {
     if (!manualPin) return;
@@ -563,13 +574,19 @@ export default function CheckoutPage() {
         : `${manualPin.lat.toFixed(5)}, ${manualPin.lng.toFixed(5)}`;
       setManualLocation({ lat: manualPin.lat, lng: manualPin.lng, address, source: 'MANUAL_PIN' });
       setShowLocationPicker(false);
+      // 🔗 FIX ARCHITECTURAL — voir le commentaire dans pickSearchedPlace
+      // ci-dessus : même correction, pour le pin posé à la main sur la
+      // carte plutôt que via la recherche de lieu nommé.
+      await saveManualAddress({ uid: user?.uid, lat: manualPin.lat, lng: manualPin.lng, address });
     } catch {
-      setManualLocation({ lat: manualPin.lat, lng: manualPin.lng, address: `${manualPin.lat.toFixed(5)}, ${manualPin.lng.toFixed(5)}`, source: 'MANUAL_PIN' });
+      const address = `${manualPin.lat.toFixed(5)}, ${manualPin.lng.toFixed(5)}`;
+      setManualLocation({ lat: manualPin.lat, lng: manualPin.lng, address, source: 'MANUAL_PIN' });
       setShowLocationPicker(false);
+      await saveManualAddress({ uid: user?.uid, lat: manualPin.lat, lng: manualPin.lng, address });
     } finally {
       setManualLocationLoading(false);
     }
-  }, [manualPin]);
+  }, [manualPin, user?.uid]);
 
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
