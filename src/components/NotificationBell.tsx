@@ -24,6 +24,7 @@ import {
   Star,
   AlertCircle,
   Info,
+  Leaf,
 } from 'lucide-react';
 import { useNotifications } from '@/components/NotificationProvider';
 
@@ -31,12 +32,18 @@ const TYPE_STYLES: Record<
   string,
   { icon: React.ElementType; bg: string; fg: string }
 > = {
-  order:    { icon: CheckCircle,   bg: 'bg-emerald-50', fg: 'text-emerald-600' },
-  shipping: { icon: Truck,         bg: 'bg-blue-50',    fg: 'text-blue-600' },
-  message:  { icon: MessageCircle, bg: 'bg-violet-50',  fg: 'text-violet-600' },
-  review:   { icon: Star,          bg: 'bg-amber-50',   fg: 'text-amber-600' },
-  alert:    { icon: AlertCircle,   bg: 'bg-red-50',     fg: 'text-red-600' },
-  info:     { icon: Info,          bg: 'bg-gray-100',   fg: 'text-gray-500' },
+  order:        { icon: CheckCircle,   bg: 'bg-emerald-50', fg: 'text-emerald-600' },
+  shipping:     { icon: Truck,         bg: 'bg-blue-50',    fg: 'text-blue-600' },
+  message:      { icon: MessageCircle, bg: 'bg-violet-50',  fg: 'text-violet-600' },
+  review:       { icon: Star,          bg: 'bg-amber-50',   fg: 'text-amber-600' },
+  alert:        { icon: AlertCircle,   bg: 'bg-red-50',     fg: 'text-red-600' },
+  // ⚠️ FIX : 'new_product' et 'promotion' n'avaient pas d'entrée ici et
+  // retombaient donc sur l'icône ℹ️ grise générique de 'info' — sans
+  // rapport avec "🌾 Nouveau produit disponible". Repêché seulement quand
+  // la notif n'a pas de photo (le thumbnail produit prend le dessus sinon).
+  new_product:  { icon: Leaf,          bg: 'bg-emerald-50', fg: 'text-emerald-600' },
+  promotion:    { icon: Leaf,          bg: 'bg-emerald-50', fg: 'text-emerald-600' },
+  info:         { icon: Info,          bg: 'bg-gray-100',   fg: 'text-gray-500' },
 };
 
 function formatRelativeTime(date: Date): string {
@@ -120,9 +127,12 @@ export function NotificationBell({
 
           <div className="max-h-[70vh] overflow-y-auto">
             {notifications.length === 0 ? (
-              <div className="p-8 text-center text-gray-400">
-                <Bell size={32} className="mx-auto mb-2 opacity-40" />
-                <p className="text-sm">Aucune notification pour le moment</p>
+              <div className="p-8 text-center">
+                <div className="w-14 h-14 mx-auto mb-3 rounded-full bg-emerald-50 flex items-center justify-center">
+                  <Bell size={24} className="text-emerald-300" />
+                </div>
+                <p className="text-sm text-gray-500">Aucune notification pour le moment</p>
+                <p className="text-[11px] text-gray-400 mt-1">Les nouveautés du marché arriveront ici</p>
               </div>
             ) : (
               notifications.map((notif) => {
@@ -136,9 +146,17 @@ export function NotificationBell({
                       notif.read ? '' : 'bg-emerald-50/40'
                     }`}
                   >
-                    <div className={`flex-shrink-0 w-9 h-9 rounded-full flex items-center justify-center ${style.bg}`}>
-                      <Icon size={16} className={style.fg} />
-                    </div>
+                    {(notif as any).image ? (
+                      <img
+                        src={(notif as any).image}
+                        alt=""
+                        className="flex-shrink-0 w-11 h-11 rounded-xl object-cover shadow-sm"
+                      />
+                    ) : (
+                      <div className={`flex-shrink-0 w-9 h-9 rounded-full flex items-center justify-center ${style.bg}`}>
+                        <Icon size={16} className={style.fg} />
+                      </div>
+                    )}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-start justify-between gap-2">
                         <p className={`text-sm truncate ${notif.read ? 'text-gray-700 font-normal' : 'text-gray-900 font-semibold'}`}>

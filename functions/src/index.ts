@@ -143,7 +143,7 @@ export const processEmailQueue = functions.firestore.onDocumentCreated(
 // ============================================================
 async function writeNotification(
   userId: string,
-  payload: { title: string; body: string; type: string; icon?: string; link?: string; priority?: string; urgent?: boolean; data?: Record<string, string> }
+  payload: { title: string; body: string; type: string; icon?: string; link?: string; priority?: string; urgent?: boolean; image?: string; data?: Record<string, string> }
 ) {
   try {
     // ⚠️ FIX critique : ce chemin était auparavant
@@ -169,6 +169,7 @@ async function writeNotification(
       deepLink: payload.link ?? '/account/orders', // conservé pour compat avec le champ lu par la route client
       priority: payload.priority ?? 'medium',
       urgent: payload.urgent ?? false,
+      ...(payload.image ? { image: payload.image } : {}),
       data: payload.data ?? {},
       read: false,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -486,6 +487,19 @@ export const onUserTokenSync = functions.firestore.onDocumentCreated(
   }
 );
 
+// Duplique volontairement src/lib/categoryLink.ts : ce fichier tourne côté
+// Cloud Functions (Node), il ne peut pas importer un module du dossier
+// src/ de l'app Next.js. La logique DOIT rester identique à celle du
+// frontend (src/app/category/page.tsx filtre avec le même slug), sinon la
+// notif mène vers une page catégorie qui affiche "Aucun produit trouvé".
+function categorySlug(category?: string | null): string {
+  return (category || '').toLowerCase().trim().replace(/\s+/g, '-');
+}
+function categoryLink(category?: string | null): string {
+  const slug = categorySlug(category);
+  return slug ? `/category?category=${encodeURIComponent(slug)}` : '/main/products';
+}
+
 export const notifyNewProduct = functions.firestore.onDocumentCreated(
   { document: 'products/{productId}', region: 'us-central1' },
   async (event) => {
@@ -497,23 +511,113 @@ export const notifyNewProduct = functions.firestore.onDocumentCreated(
       ? `${product.price.toLocaleString('fr-FR')} FCFA/${product.unit ?? 'unité'}`
       : undefined;
     const image = Array.isArray(product.images) ? product.images[0] : undefined;
+    const title = `🌾 Nouveau : ${product.name} !`;
+    const sellerLabel = product.sellerName ?? 'un producteur local';
+    const body = priceLabel
+      ? `Disponible dès maintenant chez ${sellerLabel}${product.region ? ` (${product.region})` : ''} — ${priceLabel}`
+      : `${product.name} est maintenant disponible sur AgriMarché`;
+    // ⚠️ FIX : pointait vers `/product?id=...` — la fiche de CE seul
+    // produit. Un acheteur qui reçoit "🌾 Nouveau : Bananes !" et tape
+    // sur la notif doit atterrir sur le rayon Fruits en entier (mêmes
+    // bananes, plus tout le reste de la catégorie), pas être enfermé sur
+    // une fiche unique.
+    const link = categoryLink(product.category);
 
+    // ── 0. Anti-spam en rafale : un vendeur qui publie tout son catalogue
+    //    d'un coup (10-20 produits en quelques secondes) ne doit pas faire
+    //    vibrer le téléphone de chaque acheteur 10-20 fois de suite. On
+    //    garde une notification PAR produit dans l'historique in-app (rien
+    //    n'est perdu — l'acheteur peut tout consulter dans la cloche 🔔),
+    //    mais on ne renvoie un push qui interrompt réellement l'utilisateur
+    //    que si le dernier produit de ce vendeur date d'il y a plus de 3
+    //    minutes. "Fail open" volontaire, même logique qu'alreadyProcessed
+    //    ci-dessus : si cette vérification échoue, on préfère un push en
+    //    trop plutôt qu'aucun.
+    const BURST_WINDOW_MS = 3 * 60 * 1000;
+    let skipPush = false;
+    if (product.sellerId) {
+      try {
+        const throttleRef = admin.firestore().collection('_sellerNewProductThrottle').doc(product.sellerId);
+        await admin.firestore().runTransaction(async (tx) => {
+          const snap = await tx.get(throttleRef);
+          const lastAt = snap.exists ? ((snap.data() as any)?.lastPushAt?.toMillis?.() ?? 0) : 0;
+          skipPush = Date.now() - lastAt < BURST_WINDOW_MS;
+          if (!skipPush) {
+            tx.set(throttleRef, { lastPushAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          }
+        });
+      } catch (err) {
+        console.error('❌ Erreur vérification anti-spam nouveau produit:', err);
+      }
+    }
+
+    // ── 1. Push instantané, par topic (efficace à grande échelle : un seul
+    //    appel FCM touche tous les acheteurs abonnés, sans lire leurs
+    //    tokens un par un — voir onUserTokenSync ci-dessus). Sauté en cas
+    //    de rafale (voir étape 0), l'écriture in-app ci-dessous a lieu
+    //    dans tous les cas. ─────────────────────────────────────────────
+    if (!skipPush) {
+      try {
+        await admin.messaging().send({
+          topic: 'buyers',
+          notification: { title, body, ...(image ? { imageUrl: image } : {}) },
+          data: { type: 'new_product', productId: event.params.productId, link },
+          ...buildPushConfig({ imageUrl: image }),
+        });
+        console.log(`📣 Push "nouveau produit" envoyé pour ${product.name}`);
+      } catch (err) {
+        console.error('❌ Erreur push nouveau produit:', err);
+      }
+    } else {
+      console.log(`⏭️ Push "nouveau produit" sauté (rafale du vendeur) pour ${product.name} — conservé dans l'historique in-app`);
+    }
+
+    // ── 2. Historique in-app (cloche de notifications), avec la photo.
+    //    ⚠️ FIX : avant cette conversation, un nouveau produit déclenchait
+    //    DEUX envois séparés — ce trigger (push topic uniquement, pas
+    //    d'historique) ET un notifyAllUsers() côté client dans
+    //    seller/products/add/page.tsx (historique in-app, mais sans
+    //    photo et sans le fix de lien catégorie, en plus d'un aller-retour
+    //    réseau évitable). Un acheteur recevait donc deux notifications
+    //    "nouveau produit" pour une seule publication. L'appel client a
+    //    été supprimé : ce trigger serveur — automatique, fiable même si
+    //    le vendeur ferme l'app juste après publication, et déjà protégé
+    //    par alreadyProcessed() contre les rejouements Eventarc — est
+    //    maintenant l'unique source, pour le push ET l'historique. ──────
     try {
-      await admin.messaging().send({
-        topic: 'buyers',
-        notification: {
-          title: `🌾 Nouveau : ${product.name} !`,
-          body: priceLabel
-            ? `Disponible dès maintenant chez ${product.sellerName ?? 'un producteur local'} — ${priceLabel}`
-            : `${product.name} est maintenant disponible sur AgriMarché`,
-          ...(image ? { imageUrl: image } : {}),
-        },
-        data: { type: 'new_product', productId: event.params.productId, link: `/product?id=${event.params.productId}` },
-        ...buildPushConfig({ imageUrl: image }),
-      });
-      console.log(`📣 Diffusion "nouveau produit" envoyée pour ${product.name}`);
+      const usersSnap = await admin.firestore().collection('users').select('role').get();
+      // Même audience que le topic "buyers" côté onUserTokenSync : tout le
+      // monde sauf les vendeurs (un rôle absent/inconnu est traité comme
+      // acheteur, exactement comme `role === 'seller' ? 'sellers' : 'buyers'`).
+      const buyerIds = usersSnap.docs
+        .filter((d) => (d.data() as any)?.role !== 'seller')
+        .map((d) => d.id);
+
+      for (const idsChunk of chunk(buyerIds, 450)) {
+        const batch = admin.firestore().batch();
+        idsChunk.forEach((userId) => {
+          const ref = admin.firestore().collection('notifications').doc();
+          batch.set(ref, {
+            userId,
+            type: 'new_product',
+            title,
+            body,
+            icon: '🌾',
+            link,
+            deepLink: link,
+            priority: 'medium',
+            urgent: false,
+            ...(image ? { image } : {}),
+            data: { type: 'new_product', productId: event.params.productId },
+            read: false,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        });
+        await batch.commit();
+      }
+      console.log(`🗂️ Historique in-app écrit pour ${buyerIds.length} acheteur(s)`);
     } catch (err) {
-      console.error('❌ Erreur diffusion nouveau produit:', err);
+      console.error('❌ Erreur écriture historique nouveau produit:', err);
     }
   }
 );

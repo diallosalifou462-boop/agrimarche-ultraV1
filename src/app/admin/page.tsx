@@ -9,6 +9,8 @@ import { apiUrl } from "@/lib/api-config";
 import { computeDisplayPrice, computeAdminMargin, inferBasePrice, ADMIN_MARGIN_RATE } from "@/lib/pricing";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 import {
   UserCheck, X, Truck, TrendingUp, TrendingDown, RefreshCw,
   Download, Bell, Search, ChevronLeft, ChevronRight,
@@ -20,7 +22,7 @@ import {
   HelpCircle, Menu, Moon, Sun, Monitor, Database, Cloud, Server, Megaphone,
   ShieldCheck, Fingerprint, Key, Lock, Unlock, Gift, Heart, ThumbsUp,
   Send, Globe, Pencil, Trash2, Loader2, ImagePlus, RadioTower,
-  Filter, ArrowUpDown, PackageX, Layers, Smartphone, History, Store
+  Filter, ArrowUpDown, PackageX, Layers, Smartphone, History, Store, FileText
 } from "lucide-react";
 import { db, auth } from "@/lib/firebase/firebase";
 import {
@@ -918,6 +920,12 @@ export default function AdminDashboard() {
   // ── MODALS ────────────────────────────────────────────────
   const [selectedUser, setSelectedUser]     = useState<UserProfile | null>(null);
   const [selectedLoan, setSelectedLoan]     = useState<Loan | null>(null);
+  // Onglet "Marché & Intelligence" — sous-section active (Offre / Demande / Qualité / Logistique / Finance / Confiance).
+  const [marketIntelSubTab, setMarketIntelSubTab] = useState<'offre'|'demande'|'qualite'|'logistique'|'finance'|'confiance'>('offre');
+  const [marketIntelTrustFilter, setMarketIntelTrustFilter] = useState<'producteurs'|'acheteurs'|'transporteurs'>('producteurs');
+  const [marketIntelTrustSearch, setMarketIntelTrustSearch] = useState('');
+  // Fiche individuelle — producteur, acheteur ou transporteur sélectionné pour un export ciblé
+  const [selectedPerson, setSelectedPerson] = useState<{ type: 'producteur' | 'acheteur' | 'transporteur'; id: string; name: string } | null>(null);
   const [showLoanForm, setShowLoanForm]     = useState(false);
   const [showAssignModal, setShowAssignModal]   = useState(false);
   const [assignOrderId, setAssignOrderId]   = useState<string | null>(null);
@@ -2793,6 +2801,776 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
   const topRegions = useMemo(() => regionStats.filter(r => r.isActive).slice(0, 5), [regionStats]);
   const topRegionMaxRevenue = topRegions[0]?.revenue || 1;
 
+  // ══════════════════════════════════════════════════════════════
+  // ── MARCHÉ & INTELLIGENCE ────────────────────────────────────
+  // Reconstitue, à partir des données déjà chargées (products, orders,
+  // reviews, loans, deliveryPersons), les 5 dimensions demandées :
+  // Offre / Demande / Qualité / Logistique / Finance — puis un score de
+  // confiance composite par producteur, acheteur et transporteur.
+  // ⚠️ Le modèle de données actuel ne contient PAS de champ calibre,
+  // certification, ni stockage — ces signaux sont explicitement affichés
+  // comme "non disponibles" plutôt qu'inventés. Les scores de confiance
+  // sont calculés uniquement sur les signaux réellement présents ; un
+  // signal absent (ex: aucun avis) est exclu de la moyenne au lieu de
+  // compter comme 0, pour ne pas punir un compte simplement récent.
+  const marketIntel = useMemo(() => {
+    // ── OFFRE : qui produit, quoi, où, combien, depuis quand ──
+    const offerBySeller = new Map<string, {
+      sellerId: string; sellerName: string; region: string;
+      productCount: number; totalStock: number; categories: Set<string>; lastMoveMs: number | null;
+    }>();
+    products.forEach(p => {
+      const key = p.sellerId || p.sellerName || 'inconnu';
+      const entry = offerBySeller.get(key) ?? {
+        sellerId: p.sellerId || '', sellerName: usersById.get(p.sellerId)?.displayName || p.sellerName || 'Producteur inconnu',
+        region: p.region || usersById.get(p.sellerId)?.region || '—',
+        productCount: 0, totalStock: 0, categories: new Set<string>(), lastMoveMs: null,
+      };
+      entry.productCount += 1;
+      entry.totalStock += p.stock || 0;
+      if (p.category) entry.categories.add(p.category);
+      const h = (p.harvestDate ? toMillisSafe(p.harvestDate) : null) ?? toMillisSafe(p.createdAt);
+      if (h && (!entry.lastMoveMs || h > entry.lastMoveMs)) entry.lastMoveMs = h;
+      offerBySeller.set(key, entry);
+    });
+    const offerRows = Array.from(offerBySeller.values())
+      .map(e => ({ ...e, categories: Array.from(e.categories) }))
+      .sort((a, b) => b.totalStock - a.totalStock);
+
+    const offerByCategory = new Map<string, { category: string; producers: Set<string>; totalStock: number; priceSum: number; priceCount: number; regions: Set<string> }>();
+    products.forEach(p => {
+      const cat = p.category || 'Autre';
+      const entry = offerByCategory.get(cat) ?? { category: cat, producers: new Set<string>(), totalStock: 0, priceSum: 0, priceCount: 0, regions: new Set<string>() };
+      entry.producers.add(p.sellerId || p.sellerName || 'inconnu');
+      entry.totalStock += p.stock || 0;
+      if (p.price) { entry.priceSum += p.price; entry.priceCount += 1; }
+      if (p.region) entry.regions.add(p.region);
+      offerByCategory.set(cat, entry);
+    });
+    const offerCategoryRows = Array.from(offerByCategory.values())
+      .map(e => ({ category: e.category, producerCount: e.producers.size, totalStock: e.totalStock, avgPrice: e.priceCount ? Math.round(e.priceSum / e.priceCount) : 0, regionCount: e.regions.size }))
+      .sort((a, b) => b.totalStock - a.totalStock);
+
+    // ── DEMANDE : qui achète, combien, à quel prix, à quelle fréquence ──
+    const demandByBuyer = new Map<string, { buyerId: string; buyerName: string; orderCount: number; totalQty: number; totalAmount: number; firstMs: number | null; lastMs: number | null }>();
+    orders.forEach(o => {
+      const key = o.userId || o.userName || 'inconnu';
+      const name = usersById.get(o.userId || '')?.displayName || o.userName || 'Acheteur inconnu';
+      const entry = demandByBuyer.get(key) ?? { buyerId: o.userId || '', buyerName: name, orderCount: 0, totalQty: 0, totalAmount: 0, firstMs: null, lastMs: null };
+      entry.orderCount += 1;
+      entry.totalAmount += o.amount || 0;
+      entry.totalQty += (o.items?.length ? o.items.reduce((s, i) => s + (i.quantity || 0), 0) : (o.qty || 0));
+      const t = toMillisSafe(o.createdAt);
+      if (t) { if (!entry.firstMs || t < entry.firstMs) entry.firstMs = t; if (!entry.lastMs || t > entry.lastMs) entry.lastMs = t; }
+      demandByBuyer.set(key, entry);
+    });
+    const demandRows = Array.from(demandByBuyer.values()).map(e => {
+      const spanDays = e.firstMs && e.lastMs && e.lastMs > e.firstMs ? (e.lastMs - e.firstMs) / 86400000 : null;
+      const freqDays = spanDays && e.orderCount > 1 ? Math.round((spanDays / (e.orderCount - 1)) * 10) / 10 : null;
+      return { ...e, avgOrderValue: e.orderCount ? Math.round(e.totalAmount / e.orderCount) : 0, freqDays };
+    }).sort((a, b) => b.totalAmount - a.totalAmount);
+
+    const demandByCategory = new Map<string, { category: string; qty: number; amount: number; orders: number }>();
+    orders.forEach(o => {
+      (o.items || []).forEach(i => {
+        const cat = i.category || 'Autre';
+        const entry = demandByCategory.get(cat) ?? { category: cat, qty: 0, amount: 0, orders: 0 };
+        entry.qty += i.quantity || 0;
+        entry.amount += i.total ?? ((i.productPrice || 0) * (i.quantity || 0));
+        entry.orders += 1;
+        demandByCategory.set(cat, entry);
+      });
+    });
+    const demandCategoryRows = Array.from(demandByCategory.values()).sort((a, b) => b.amount - a.amount);
+
+    // ── QUALITÉ : notes clients par vendeur — seul signal qualité réellement
+    // collecté aujourd'hui. Calibre et certification : aucun champ existant.
+    const qualityBySeller = new Map<string, { sellerId: string; sellerName: string; ratingSum: number; count: number; lowCount: number }>();
+    reviews.forEach(r => {
+      const key = r.sellerId;
+      if (!key) return;
+      const entry = qualityBySeller.get(key) ?? { sellerId: key, sellerName: r.sellerName || usersById.get(key)?.displayName || 'Vendeur', ratingSum: 0, count: 0, lowCount: 0 };
+      entry.ratingSum += r.rating || 0;
+      entry.count += 1;
+      if ((r.rating || 0) <= 2) entry.lowCount += 1;
+      qualityBySeller.set(key, entry);
+    });
+    const qualityRows = Array.from(qualityBySeller.values())
+      .map(e => ({ ...e, avgRating: e.count ? Math.round((e.ratingSum / e.count) * 10) / 10 : 0 }))
+      .sort((a, b) => b.avgRating - a.avgRating);
+
+    // ── LOGISTIQUE : localisation, coût transport, aucune donnée de stockage ──
+    const feesKnown = orders.filter(o => o.deliveryFee != null);
+    const avgDeliveryFee = feesKnown.length ? Math.round(feesKnown.reduce((s, o) => s + (o.deliveryFee || 0), 0) / feesKnown.length) : null;
+    const logisticsByRegion = new Map<string, { region: string; sellers: Set<string>; buyers: Set<string>; delivered: number; total: number }>();
+    orders.forEach(o => {
+      const region = o.sellerRegion || o.region || '—';
+      const entry = logisticsByRegion.get(region) ?? { region, sellers: new Set<string>(), buyers: new Set<string>(), delivered: 0, total: 0 };
+      if (o.sellerId) entry.sellers.add(o.sellerId);
+      if (o.userId) entry.buyers.add(o.userId);
+      entry.total += 1;
+      if (o.status === 'livre') entry.delivered += 1;
+      logisticsByRegion.set(region, entry);
+    });
+    const logisticsRows = Array.from(logisticsByRegion.values())
+      .map(e => ({ region: e.region, sellerCount: e.sellers.size, buyerCount: e.buyers.size, delivered: e.delivered, total: e.total }))
+      .sort((a, b) => b.total - a.total);
+    const geolocatedSellers = users.filter(u => u.role === 'seller' && isValidCoordinate(u.lat, u.lng)).length;
+    const totalSellers = users.filter(u => u.role === 'seller').length;
+
+    // ── FINANCE : paiements des commandes + historique des financements ──
+    const paymentStatusCounts = { paid: 0, pending: 0, failed: 0, inconnu: 0 };
+    orders.forEach(o => {
+      if (o.paymentStatus === 'paid') paymentStatusCounts.paid++;
+      else if (o.paymentStatus === 'pending') paymentStatusCounts.pending++;
+      else if (o.paymentStatus === 'failed') paymentStatusCounts.failed++;
+      else paymentStatusCounts.inconnu++;
+    });
+    const loanFinanceStats = {
+      pending: loans.filter(l => l.status === 'pending').length,
+      active: loans.filter(l => l.status === 'active' || l.status === 'approved').length,
+      paid: loans.filter(l => l.status === 'paid').length,
+      defaulted: loans.filter(l => l.status === 'defaulted').length,
+      totalVolume: loans.reduce((s, l) => s + (l.amount || 0), 0),
+    };
+
+    // ── SCORES DE CONFIANCE — Producteurs ──
+    // Moyenne des signaux disponibles uniquement (livraisons, note moyenne,
+    // absence de litige = peu d'avis ≤2, faible taux d'annulation).
+    const producerScores = offerRows.map(seller => {
+      const sellerOrders = orders.filter(o => (o.sellerId || o.farmerId) === seller.sellerId && seller.sellerId);
+      const delivered = sellerOrders.filter(o => o.status === 'livre').length;
+      const cancelled = sellerOrders.filter(o => o.status === 'annule').length;
+      const deliveryRate = sellerOrders.length ? delivered / sellerOrders.length : null;
+      const cancelRatio = sellerOrders.length ? cancelled / sellerOrders.length : null;
+      const q = qualityBySeller.get(seller.sellerId);
+      const avgRating = q ? q.ratingSum / q.count : null;
+      const disputeRatio = q && q.count ? q.lowCount / q.count : null;
+      const parts: number[] = [];
+      if (deliveryRate !== null) parts.push(deliveryRate * 100);
+      if (avgRating !== null) parts.push((avgRating / 5) * 100);
+      if (disputeRatio !== null) parts.push((1 - disputeRatio) * 100);
+      if (cancelRatio !== null) parts.push((1 - cancelRatio) * 100);
+      const score = parts.length ? Math.round(parts.reduce((s, v) => s + v, 0) / parts.length) : null;
+      return {
+        id: seller.sellerId, name: seller.sellerName, region: seller.region, score, sampleSize: parts.length,
+        deliveryRate, avgRating, disputeRatio, cancelRatio, ordersCount: sellerOrders.length,
+      };
+    }).sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+
+    // ── SCORES DE CONFIANCE — Acheteurs ──
+    // Paiement effectif, volume relatif au meilleur acheteur, faible taux d'annulation.
+    const maxBuyerVolume = Math.max(1, ...demandRows.map(d => d.totalAmount));
+    const buyerScores = demandRows.map(b => {
+      const buyerOrders = orders.filter(o => o.userId === b.buyerId && b.buyerId);
+      const withPaymentStatus = buyerOrders.filter(o => !!o.paymentStatus);
+      const paid = withPaymentStatus.filter(o => o.paymentStatus === 'paid').length;
+      const paymentRate = withPaymentStatus.length ? paid / withPaymentStatus.length : null;
+      const cancelled = buyerOrders.filter(o => o.status === 'annule').length;
+      const cancelRatio = buyerOrders.length ? cancelled / buyerOrders.length : null;
+      const volumeScore = b.totalAmount / maxBuyerVolume;
+      const parts: number[] = [volumeScore * 100];
+      if (paymentRate !== null) parts.push(paymentRate * 100);
+      if (cancelRatio !== null) parts.push((1 - cancelRatio) * 100);
+      const score = Math.round(parts.reduce((s, v) => s + v, 0) / parts.length);
+      return { id: b.buyerId, name: b.buyerName, score, paymentRate, cancelRatio, totalAmount: b.totalAmount, orderCount: b.orderCount };
+    }).sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+
+    // ── SCORES DE CONFIANCE — Transporteurs ──
+    // Taux de livraisons abouties sur les courses assignées + disponibilité déclarée.
+    const transporterScores = deliveryPersons.map(dp => {
+      const assigned = orders.filter(o => o.delivererId === dp.uid);
+      const delivered = assigned.filter(o => o.status === 'livre');
+      const completionRate = assigned.length ? delivered.length / assigned.length : null;
+      const durationsMin = delivered
+        .filter(o => o.delivererAssignedAt && o.deliveredAt)
+        .map(o => ((o.deliveredAt!.toMillis?.() ?? 0) - (o.delivererAssignedAt!.toMillis?.() ?? 0)) / 60000)
+        .filter(m => m > 0 && m < 24 * 60);
+      const avgMinutes = durationsMin.length ? Math.round(durationsMin.reduce((s, m) => s + m, 0) / durationsMin.length) : null;
+      const parts: number[] = [];
+      if (completionRate !== null) parts.push(completionRate * 100);
+      if (dp.isAvailable !== undefined) parts.push(dp.isAvailable ? 100 : 50);
+      const score = parts.length ? Math.round(parts.reduce((s, v) => s + v, 0) / parts.length) : null;
+      return { id: dp.uid, name: dp.displayName || 'Livreur', score, completionRate, avgMinutes, assignedCount: assigned.length, isAvailable: dp.isAvailable };
+    }).sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+
+    // ── FINANÇABILITÉ PAR PRODUCTEUR ──
+    // Combine score de confiance, historique de commandes et absence de défaut de remboursement.
+    const financeBySeller = offerRows.map(seller => {
+      const p = producerScores.find(s => s.id === seller.sellerId);
+      const sellerLoans = loans.filter(l => l.sellerId === seller.sellerId);
+      const hasDefault = sellerLoans.some(l => l.status === 'defaulted');
+      const ordersCount = p?.ordersCount ?? 0;
+      const financable = !hasDefault && ordersCount >= 3 && (p?.score ?? 0) >= 60;
+      return { sellerId: seller.sellerId, sellerName: seller.sellerName, trustScore: p?.score ?? null, ordersCount, loansCount: sellerLoans.length, hasDefault, financable };
+    }).sort((a, b) => (b.trustScore ?? -1) - (a.trustScore ?? -1));
+
+    // ── TENSION DE MARCHÉ : croise Offre et Demande par catégorie ──
+    // C'est le cœur de l'avantage recherché : détecter, catégorie par
+    // catégorie, où la demande dépasse largement l'offre disponible
+    // (opportunité de sourcing / pénurie à venir) et où l'offre dépasse
+    // largement la demande (risque de mévente / surplus à écouler).
+    // Le "ratio" est demande / offre : >1.4 = tension, <0.6 = surplus,
+    // sinon équilibré. Calculé uniquement quand l'offre et/ou la demande
+    // existent réellement pour la catégorie (jamais une division par 0 cachée).
+    const allCategories = new Set<string>([
+      ...offerCategoryRows.map(o => o.category),
+      ...demandCategoryRows.map(d => d.category),
+    ]);
+    const categoryTension = Array.from(allCategories).map(category => {
+      const offer = offerCategoryRows.find(o => o.category === category);
+      const demand = demandCategoryRows.find(d => d.category === category);
+      const offerQty = offer?.totalStock ?? 0;
+      const demandQty = demand?.qty ?? 0;
+      let status: 'tension' | 'surplus' | 'equilibre' | 'indetermine';
+      let ratio: number | null = null;
+      if (offerQty === 0 && demandQty > 0) status = 'tension';
+      else if (demandQty === 0 && offerQty > 0) status = 'surplus';
+      else if (offerQty === 0 && demandQty === 0) status = 'indetermine';
+      else {
+        ratio = demandQty / offerQty;
+        status = ratio > 1.4 ? 'tension' : ratio < 0.6 ? 'surplus' : 'equilibre';
+      }
+      return {
+        category, offerQty, demandQty, ratio, status,
+        producerCount: offer?.producerCount ?? 0, avgPrice: offer?.avgPrice ?? 0,
+        demandAmount: demand?.amount ?? 0,
+      };
+    }).sort((a, b) => (b.ratio ?? (b.status==='tension'?99:0)) - (a.ratio ?? (a.status==='tension'?99:0)));
+
+    return {
+      offerRows, offerCategoryRows,
+      demandRows, demandCategoryRows,
+      qualityRows,
+      avgDeliveryFee, logisticsRows, geolocatedSellers, totalSellers,
+      paymentStatusCounts, loanFinanceStats, financeBySeller,
+      producerScores, buyerScores, transporterScores,
+      categoryTension,
+    };
+  }, [products, orders, reviews, loans, deliveryPersons, users, usersById]);
+
+  // Export complet "Marché & Intelligence" en un classeur Excel multi-feuilles
+  // (une feuille par dimension), pour partager l'intelligence de marché
+  // hors de l'admin — banques partenaires, acheteurs institutionnels, etc.
+  const handleExportMarketIntel = useCallback(() => {
+    const wb = XLSX.utils.book_new();
+    const addSheet = (name: string, rows: any[]) => {
+      if (!rows.length) return;
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), name.slice(0, 31));
+    };
+    addSheet('Offre par producteur', marketIntel.offerRows.map(r => ({ Producteur:r.sellerName, Region:r.region, Produits:r.productCount, Stock:r.totalStock, Categories:r.categories.join(', ') })));
+    addSheet('Offre par categorie', marketIntel.offerCategoryRows);
+    addSheet('Demande par acheteur', marketIntel.demandRows.map(r => ({ Acheteur:r.buyerName, Commandes:r.orderCount, MontantTotal:r.totalAmount, PanierMoyen:r.avgOrderValue, FrequenceJours:r.freqDays })));
+    addSheet('Demande par categorie', marketIntel.demandCategoryRows);
+    addSheet('Tension de marche', marketIntel.categoryTension);
+    addSheet('Qualite par vendeur', marketIntel.qualityRows.map(r => ({ Vendeur:r.sellerName, NoteMoyenne:r.avgRating, AvisRecus:r.count, AvisFaibles:r.lowCount })));
+    addSheet('Logistique par region', marketIntel.logisticsRows);
+    addSheet('Finance producteurs', marketIntel.financeBySeller.map(r => ({ Producteur:r.sellerName, ScoreConfiance:r.trustScore, Commandes:r.ordersCount, Prets:r.loansCount, Defaut:r.hasDefault, Financable:r.financable })));
+    addSheet('Confiance producteurs', marketIntel.producerScores.map(r => ({ Producteur:r.name, Region:r.region, Score:r.score, TauxLivraison:r.deliveryRate, NoteMoyenne:r.avgRating, TauxLitige:r.disputeRatio, TauxAnnulation:r.cancelRatio })));
+    addSheet('Confiance acheteurs', marketIntel.buyerScores.map(r => ({ Acheteur:r.name, Score:r.score, TauxPaiement:r.paymentRate, MontantTotal:r.totalAmount, Commandes:r.orderCount, TauxAnnulation:r.cancelRatio })));
+    addSheet('Confiance transporteurs', marketIntel.transporterScores.map(r => ({ Transporteur:r.name, Score:r.score, TauxCompletion:r.completionRate, DelaiMoyenMin:r.avgMinutes, CoursesAssignees:r.assignedCount })));
+    XLSX.writeFile(wb, `agrimarche_intelligence_marche_${Date.now()}.xlsx`);
+    toast.success('Export Excel généré');
+  }, [marketIntel]);
+
+  // ══════════════════════════════════════════════════════════════
+  // ── EXPORTS PAR SECTION — Marché & Intelligence (PDF + Excel) ──
+  // Rapport PDF blanc professionnel avec bandeau de marque émeraude,
+  // pensé pour être partagé tel quel hors de l'admin (banques,
+  // acheteurs institutionnels, partenaires). Un couple PDF/Excel par
+  // sous-onglet, en plus de l'export Excel global déjà existant.
+  // ══════════════════════════════════════════════════════════════
+  type PdfKpi = { label: string; value: string; color?: [number, number, number] };
+  type PdfSection = { heading: string; head: string[]; body: (string | number)[][] };
+
+  const fmtFCFA = (n: number) => `${Math.round(n || 0).toLocaleString('fr-FR')} FCFA`;
+
+  const generateIntelPDF = useCallback((opts: { title: string; subtitle: string; kpis: PdfKpi[]; sections: PdfSection[]; filename: string }) => {
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const now = new Date();
+    const HEADER_H = 74;
+    const EMERALD: [number, number, number] = [16, 185, 129];
+    const GOLD: [number, number, number] = [217, 164, 65];
+
+    const drawHeader = () => {
+      doc.setFillColor(6, 78, 59);
+      doc.rect(0, 0, pageWidth, HEADER_H, 'F');
+      doc.setFillColor(EMERALD[0], EMERALD[1], EMERALD[2]);
+      doc.rect(0, HEADER_H, pageWidth, 3, 'F');
+      doc.setFillColor(GOLD[0], GOLD[1], GOLD[2]);
+      doc.rect(0, HEADER_H + 3, pageWidth, 1, 'F');
+      doc.setTextColor(255, 255, 255);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(19);
+      doc.text('AgriMarché', 28, 32);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9.5);
+      doc.setTextColor(110, 231, 183);
+      doc.text('Intelligence de marché — rapport confidentiel', 28, 48);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(14);
+      doc.setTextColor(255, 255, 255);
+      doc.text(opts.title, pageWidth - 28, 30, { align: 'right' });
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9.5);
+      doc.setTextColor(209, 250, 229);
+      doc.text(opts.subtitle, pageWidth - 28, 46, { align: 'right' });
+      doc.setFontSize(8);
+      doc.setTextColor(167, 243, 208);
+      doc.text(
+        `Généré le ${now.toLocaleDateString('fr-FR')} à ${now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`,
+        pageWidth - 28, 60, { align: 'right' }
+      );
+    };
+
+    const drawFooter = (page: number, total: number) => {
+      doc.setDrawColor(229, 231, 235);
+      doc.setLineWidth(0.5);
+      doc.line(28, pageHeight - 30, pageWidth - 28, pageHeight - 30);
+      doc.setFontSize(7.5);
+      doc.setTextColor(120, 113, 108);
+      doc.text('AgriMarché — document généré automatiquement à partir des données de la plateforme', 28, pageHeight - 16);
+      doc.setTextColor(107, 114, 128);
+      doc.text(`Page ${page} / ${total}`, pageWidth - 28, pageHeight - 16, { align: 'right' });
+    };
+
+    drawHeader();
+    let y = HEADER_H + 34;
+
+    if (opts.kpis.length) {
+      const margin = 28, gap = 10;
+      const cardW = (pageWidth - margin * 2 - gap * (opts.kpis.length - 1)) / opts.kpis.length;
+      const cardH = 48;
+      opts.kpis.forEach((k, i) => {
+        const x = margin + i * (cardW + gap);
+        doc.setFillColor(247, 250, 249);
+        doc.roundedRect(x, y, cardW, cardH, 6, 6, 'F');
+        doc.setDrawColor(220, 227, 224);
+        doc.roundedRect(x, y, cardW, cardH, 6, 6, 'S');
+        doc.setFontSize(7.5);
+        doc.setTextColor(107, 114, 128);
+        doc.text(k.label, x + 10, y + 17, { maxWidth: cardW - 20 });
+        const c = k.color || EMERALD;
+        doc.setTextColor(c[0], c[1], c[2]);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(14);
+        doc.text(String(k.value), x + 10, y + 36);
+        doc.setFont('helvetica', 'normal');
+      });
+      y += cardH + 26;
+    }
+
+    opts.sections.forEach(sec => {
+      if (y > pageHeight - 140) { doc.addPage(); y = HEADER_H + 34; }
+      doc.setFontSize(11.5);
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(17, 24, 39);
+      doc.text(sec.heading, 28, y);
+      doc.setDrawColor(EMERALD[0], EMERALD[1], EMERALD[2]);
+      doc.setLineWidth(1.5);
+      doc.line(28, y + 4, 66, y + 4);
+      y += 16;
+      autoTable(doc, {
+        startY: y,
+        head: [sec.head],
+        body: sec.body,
+        margin: { left: 28, right: 28, top: HEADER_H + 16, bottom: 40 },
+        styles: { fontSize: 8, cellPadding: 5, textColor: [55, 65, 81], lineColor: [229, 231, 235], lineWidth: 0.5, font: 'helvetica' },
+        headStyles: { fillColor: EMERALD, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8.5 },
+        alternateRowStyles: { fillColor: [247, 250, 249] },
+        theme: 'grid',
+      });
+      y = (doc as any).lastAutoTable.finalY + 26;
+    });
+
+    const pageCount = doc.getNumberOfPages();
+    for (let i = 1; i <= pageCount; i++) {
+      doc.setPage(i);
+      if (i > 1) drawHeader();
+      drawFooter(i, pageCount);
+    }
+    doc.save(opts.filename);
+    toast.success('PDF généré');
+  }, []);
+
+  // ── OFFRE ──────────────────────────────────────────────────
+  const handleExportOffrePDF = useCallback(() => {
+    generateIntelPDF({
+      title: 'Offre',
+      subtitle: 'Qui produit, quoi, où, combien',
+      kpis: [
+        { label: 'Producteurs actifs', value: String(marketIntel.offerRows.length) },
+        { label: 'Produits référencés', value: products.length.toLocaleString('fr-FR'), color: [6, 182, 212] },
+        { label: 'Stock total (unités)', value: marketIntel.offerRows.reduce((s, r) => s + r.totalStock, 0).toLocaleString('fr-FR'), color: [245, 158, 11] },
+        { label: 'Catégories', value: String(marketIntel.offerCategoryRows.length), color: [139, 92, 246] },
+      ],
+      sections: [
+        {
+          heading: 'Tension de marché — offre vs demande par catégorie',
+          head: ['Catégorie', 'Offre (stock)', 'Demande (qté)', 'Statut'],
+          body: marketIntel.categoryTension.map(r => [
+            r.category, r.offerQty.toLocaleString('fr-FR'), r.demandQty.toLocaleString('fr-FR'),
+            r.status === 'tension' ? `Tension${r.ratio ? ` (×${r.ratio.toFixed(1)})` : ''}` : r.status === 'surplus' ? 'Surplus' : r.status === 'equilibre' ? 'Équilibré' : 'Indéterminé',
+          ]),
+        },
+        {
+          heading: 'Offre par catégorie',
+          head: ['Catégorie', 'Producteurs', 'Régions couvertes', 'Stock disponible', 'Prix moyen'],
+          body: marketIntel.offerCategoryRows.map(r => [r.category, r.producerCount, r.regionCount, r.totalStock.toLocaleString('fr-FR'), r.avgPrice ? fmtFCFA(r.avgPrice) : '—']),
+        },
+        {
+          heading: 'Offre par producteur',
+          head: ['Producteur', 'Région', 'Produits', 'Stock total', 'Catégories', 'Dernier mouvement'],
+          body: marketIntel.offerRows.slice(0, 200).map(r => [
+            r.sellerName, r.region, r.productCount, r.totalStock.toLocaleString('fr-FR'),
+            r.categories.slice(0, 3).join(', ') || '—', r.lastMoveMs ? new Date(r.lastMoveMs).toLocaleDateString('fr-FR') : '—',
+          ]),
+        },
+      ],
+      filename: `agrimarche_offre_${Date.now()}.pdf`,
+    });
+  }, [generateIntelPDF, marketIntel, products.length]);
+
+  const handleExportOffreExcel = useCallback(() => {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
+      { Indicateur: 'Producteurs actifs', Valeur: marketIntel.offerRows.length },
+      { Indicateur: 'Produits référencés', Valeur: products.length },
+      { Indicateur: 'Stock total', Valeur: marketIntel.offerRows.reduce((s, r) => s + r.totalStock, 0) },
+      { Indicateur: 'Catégories', Valeur: marketIntel.offerCategoryRows.length },
+    ]), 'Résumé');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(marketIntel.categoryTension), 'Tension de marché');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(marketIntel.offerCategoryRows), 'Offre par categorie');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(marketIntel.offerRows.map(r => ({ Producteur: r.sellerName, Region: r.region, Produits: r.productCount, Stock: r.totalStock, Categories: r.categories.join(', ') }))), 'Offre par producteur');
+    XLSX.writeFile(wb, `agrimarche_offre_${Date.now()}.xlsx`);
+    toast.success('Export Excel généré');
+  }, [marketIntel, products.length]);
+
+  // ── DEMANDE ────────────────────────────────────────────────
+  const handleExportDemandePDF = useCallback(() => {
+    generateIntelPDF({
+      title: 'Demande',
+      subtitle: 'Qui achète, combien, à quel prix, à quelle fréquence',
+      kpis: [
+        { label: 'Acheteurs actifs', value: String(marketIntel.demandRows.length), color: [6, 182, 212] },
+        { label: 'Commandes totales', value: orders.length.toLocaleString('fr-FR') },
+        { label: 'Montant total demandé', value: fmtFCFA(marketIntel.demandRows.reduce((s, r) => s + r.totalAmount, 0)), color: [245, 158, 11] },
+        { label: 'Panier moyen', value: marketIntel.demandRows.length ? fmtFCFA(marketIntel.demandRows.reduce((s, r) => s + r.avgOrderValue, 0) / marketIntel.demandRows.length) : '—', color: [139, 92, 246] },
+      ],
+      sections: [
+        {
+          heading: 'Demande par catégorie',
+          head: ['Catégorie', 'Quantité demandée', 'Lignes de commande', 'Montant total'],
+          body: marketIntel.demandCategoryRows.map(r => [r.category, r.qty.toLocaleString('fr-FR'), r.orders, fmtFCFA(r.amount)]),
+        },
+        {
+          heading: 'Demande par acheteur',
+          head: ['Acheteur', 'Commandes', 'Montant total', 'Panier moyen', 'Fréquence moyenne'],
+          body: marketIntel.demandRows.slice(0, 200).map(r => [r.buyerName, r.orderCount, fmtFCFA(r.totalAmount), fmtFCFA(r.avgOrderValue), r.freqDays ? `tous les ${r.freqDays} j` : '—']),
+        },
+      ],
+      filename: `agrimarche_demande_${Date.now()}.pdf`,
+    });
+  }, [generateIntelPDF, marketIntel, orders.length]);
+
+  const handleExportDemandeExcel = useCallback(() => {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
+      { Indicateur: 'Acheteurs actifs', Valeur: marketIntel.demandRows.length },
+      { Indicateur: 'Commandes totales', Valeur: orders.length },
+      { Indicateur: 'Montant total demandé', Valeur: marketIntel.demandRows.reduce((s, r) => s + r.totalAmount, 0) },
+    ]), 'Résumé');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(marketIntel.demandCategoryRows), 'Demande par categorie');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(marketIntel.demandRows.map(r => ({ Acheteur: r.buyerName, Commandes: r.orderCount, MontantTotal: r.totalAmount, PanierMoyen: r.avgOrderValue, FrequenceJours: r.freqDays }))), 'Demande par acheteur');
+    XLSX.writeFile(wb, `agrimarche_demande_${Date.now()}.xlsx`);
+    toast.success('Export Excel généré');
+  }, [marketIntel, orders.length]);
+
+  // ── QUALITÉ ────────────────────────────────────────────────
+  const handleExportQualitePDF = useCallback(() => {
+    const totalAvis = marketIntel.qualityRows.reduce((s, r) => s + r.count, 0);
+    const noteGlobale = totalAvis ? (marketIntel.qualityRows.reduce((s, r) => s + r.ratingSum, 0) / totalAvis) : 0;
+    generateIntelPDF({
+      title: 'Qualité',
+      subtitle: 'Notes clients par producteur — seul signal qualité collecté aujourd\u2019hui',
+      kpis: [
+        { label: 'Producteurs notés', value: String(marketIntel.qualityRows.length) },
+        { label: 'Note moyenne globale', value: totalAvis ? `${noteGlobale.toFixed(1)}/5` : '—', color: [245, 158, 11] },
+        { label: 'Avis reçus au total', value: totalAvis.toLocaleString('fr-FR'), color: [6, 182, 212] },
+        { label: 'Avis ≤2★ (litiges)', value: marketIntel.qualityRows.reduce((s, r) => s + r.lowCount, 0).toLocaleString('fr-FR'), color: [239, 68, 68] },
+      ],
+      sections: [
+        {
+          heading: 'Qualité perçue par producteur',
+          head: ['Producteur', 'Note moyenne', 'Avis reçus', 'Avis ≤2★ (signal de litige)'],
+          body: marketIntel.qualityRows.map(r => [r.sellerName, `${r.avgRating}/5`, r.count, r.lowCount]),
+        },
+      ],
+      filename: `agrimarche_qualite_${Date.now()}.pdf`,
+    });
+  }, [generateIntelPDF, marketIntel]);
+
+  const handleExportQualiteExcel = useCallback(() => {
+    const wb = XLSX.utils.book_new();
+    const totalAvis = marketIntel.qualityRows.reduce((s, r) => s + r.count, 0);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
+      { Indicateur: 'Producteurs notés', Valeur: marketIntel.qualityRows.length },
+      { Indicateur: 'Avis reçus au total', Valeur: totalAvis },
+      { Indicateur: 'Avis ≤2★', Valeur: marketIntel.qualityRows.reduce((s, r) => s + r.lowCount, 0) },
+    ]), 'Résumé');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(marketIntel.qualityRows.map(r => ({ Vendeur: r.sellerName, NoteMoyenne: r.avgRating, AvisRecus: r.count, AvisFaibles: r.lowCount }))), 'Qualite par vendeur');
+    XLSX.writeFile(wb, `agrimarche_qualite_${Date.now()}.xlsx`);
+    toast.success('Export Excel généré');
+  }, [marketIntel]);
+
+  // ── LOGISTIQUE ─────────────────────────────────────────────
+  const handleExportLogistiquePDF = useCallback(() => {
+    generateIntelPDF({
+      title: 'Logistique',
+      subtitle: 'Localisation, coût de transport, flux par région',
+      kpis: [
+        { label: 'Coût de transport moyen', value: marketIntel.avgDeliveryFee ? fmtFCFA(marketIntel.avgDeliveryFee) : '—' },
+        { label: 'Producteurs géolocalisés', value: `${marketIntel.geolocatedSellers}/${marketIntel.totalSellers}`, color: [6, 182, 212] },
+        { label: 'Régions actives', value: String(marketIntel.logisticsRows.length), color: [139, 92, 246] },
+      ],
+      sections: [
+        {
+          heading: 'Flux logistique par région',
+          head: ['Région', 'Producteurs', 'Acheteurs', 'Commandes livrées', 'Commandes totales'],
+          body: marketIntel.logisticsRows.map(r => [r.region, r.sellerCount, r.buyerCount, r.delivered, r.total]),
+        },
+      ],
+      filename: `agrimarche_logistique_${Date.now()}.pdf`,
+    });
+  }, [generateIntelPDF, marketIntel]);
+
+  const handleExportLogistiqueExcel = useCallback(() => {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
+      { Indicateur: 'Coût de transport moyen', Valeur: marketIntel.avgDeliveryFee },
+      { Indicateur: 'Producteurs géolocalisés', Valeur: marketIntel.geolocatedSellers },
+      { Indicateur: 'Total producteurs', Valeur: marketIntel.totalSellers },
+    ]), 'Résumé');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(marketIntel.logisticsRows), 'Logistique par region');
+    XLSX.writeFile(wb, `agrimarche_logistique_${Date.now()}.xlsx`);
+    toast.success('Export Excel généré');
+  }, [marketIntel]);
+
+  // ── FINANCE ────────────────────────────────────────────────
+  const handleExportFinancePDF = useCallback(() => {
+    generateIntelPDF({
+      title: 'Finance',
+      subtitle: 'Paiements, financements, finançabilité des producteurs',
+      kpis: [
+        { label: 'Paiements réussis', value: String(marketIntel.paymentStatusCounts.paid) },
+        { label: 'Paiements en attente', value: String(marketIntel.paymentStatusCounts.pending), color: [245, 158, 11] },
+        { label: 'Paiements échoués', value: String(marketIntel.paymentStatusCounts.failed), color: [239, 68, 68] },
+        { label: 'Volume financé (prêts)', value: fmtFCFA(marketIntel.loanFinanceStats.totalVolume), color: [139, 92, 246] },
+      ],
+      sections: [
+        {
+          heading: 'Finançabilité par producteur',
+          head: ['Producteur', 'Score de confiance', 'Commandes', 'Prêts liés', 'Finançable'],
+          body: marketIntel.financeBySeller.slice(0, 200).map(r => [
+            r.sellerName, r.trustScore !== null ? `${r.trustScore}/100` : '—', r.ordersCount,
+            r.loansCount + (r.hasDefault ? ' ⚠️' : ''), r.financable ? 'Oui' : 'Pas encore',
+          ]),
+        },
+      ],
+      filename: `agrimarche_finance_${Date.now()}.pdf`,
+    });
+  }, [generateIntelPDF, marketIntel]);
+
+  const handleExportFinanceExcel = useCallback(() => {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
+      { Indicateur: 'Paiements réussis', Valeur: marketIntel.paymentStatusCounts.paid },
+      { Indicateur: 'Paiements en attente', Valeur: marketIntel.paymentStatusCounts.pending },
+      { Indicateur: 'Paiements échoués', Valeur: marketIntel.paymentStatusCounts.failed },
+      { Indicateur: 'Volume financé', Valeur: marketIntel.loanFinanceStats.totalVolume },
+    ]), 'Résumé');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(marketIntel.financeBySeller.map(r => ({ Producteur: r.sellerName, ScoreConfiance: r.trustScore, Commandes: r.ordersCount, Prets: r.loansCount, Defaut: r.hasDefault, Financable: r.financable }))), 'Finance producteurs');
+    XLSX.writeFile(wb, `agrimarche_finance_${Date.now()}.xlsx`);
+    toast.success('Export Excel généré');
+  }, [marketIntel]);
+
+  // ── SCORES DE CONFIANCE ────────────────────────────────────
+  const handleExportConfiancePDF = useCallback(() => {
+    generateIntelPDF({
+      title: 'Scores de confiance',
+      subtitle: 'Producteurs, acheteurs, transporteurs',
+      kpis: [
+        { label: 'Producteurs évalués', value: String(marketIntel.producerScores.length) },
+        { label: 'Acheteurs évalués', value: String(marketIntel.buyerScores.length), color: [6, 182, 212] },
+        { label: 'Transporteurs évalués', value: String(marketIntel.transporterScores.length), color: [245, 158, 11] },
+      ],
+      sections: [
+        {
+          heading: 'Score de confiance — Producteurs',
+          head: ['Producteur', 'Région', 'Score', 'Livraisons', 'Qualité', 'Litiges', 'Annulations'],
+          body: marketIntel.producerScores.slice(0, 200).map(r => [
+            r.name, r.region, r.score !== null ? `${r.score}/100` : '—',
+            r.deliveryRate !== null ? `${Math.round(r.deliveryRate * 100)}%` : '—',
+            r.avgRating !== null ? `${r.avgRating.toFixed(1)}/5` : '—',
+            r.disputeRatio !== null ? `${Math.round(r.disputeRatio * 100)}%` : '—',
+            r.cancelRatio !== null ? `${Math.round(r.cancelRatio * 100)}%` : '—',
+          ]),
+        },
+        {
+          heading: 'Score de confiance — Acheteurs',
+          head: ['Acheteur', 'Score', 'Paiement', 'Volume total', 'Commandes', 'Annulations'],
+          body: marketIntel.buyerScores.slice(0, 200).map(r => [
+            r.name, r.score !== null ? `${r.score}/100` : '—',
+            r.paymentRate !== null ? `${Math.round(r.paymentRate * 100)}%` : '—',
+            fmtFCFA(r.totalAmount), r.orderCount,
+            r.cancelRatio !== null ? `${Math.round(r.cancelRatio * 100)}%` : '—',
+          ]),
+        },
+        {
+          heading: 'Score de confiance — Transporteurs',
+          head: ['Transporteur', 'Score', 'Livraisons abouties', 'Délai moyen', 'Courses assignées', 'Disponible'],
+          body: marketIntel.transporterScores.slice(0, 200).map(r => [
+            r.name, r.score !== null ? `${r.score}/100` : '—',
+            r.completionRate !== null ? `${Math.round(r.completionRate * 100)}%` : '—',
+            r.avgMinutes !== null ? `${r.avgMinutes} min` : '—', r.assignedCount,
+            r.isAvailable === undefined ? '—' : (r.isAvailable ? 'Oui' : 'Non'),
+          ]),
+        },
+      ],
+      filename: `agrimarche_confiance_${Date.now()}.pdf`,
+    });
+  }, [generateIntelPDF, marketIntel]);
+
+  const handleExportConfianceExcel = useCallback(() => {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(marketIntel.producerScores.map(r => ({ Producteur: r.name, Region: r.region, Score: r.score, TauxLivraison: r.deliveryRate, NoteMoyenne: r.avgRating, TauxLitige: r.disputeRatio, TauxAnnulation: r.cancelRatio }))), 'Confiance producteurs');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(marketIntel.buyerScores.map(r => ({ Acheteur: r.name, Score: r.score, TauxPaiement: r.paymentRate, MontantTotal: r.totalAmount, Commandes: r.orderCount, TauxAnnulation: r.cancelRatio }))), 'Confiance acheteurs');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(marketIntel.transporterScores.map(r => ({ Transporteur: r.name, Score: r.score, TauxCompletion: r.completionRate, DelaiMoyenMin: r.avgMinutes, CoursesAssignees: r.assignedCount }))), 'Confiance transporteurs');
+    XLSX.writeFile(wb, `agrimarche_confiance_${Date.now()}.xlsx`);
+    toast.success('Export Excel généré');
+  }, [marketIntel]);
+
+  // ══════════════════════════════════════════════════════════════
+  // ── FICHE INDIVIDUELLE — export ciblé d'une personne ──────────
+  // Rassemble, pour un producteur / acheteur / transporteur précis,
+  // toutes les données déjà calculées dans marketIntel (offre,
+  // qualité, demande, confiance, finance) en une fiche unique,
+  // affichable dans une modale et exportable indépendamment du
+  // reste (PDF ou Excel), sans avoir à télécharger tout le tableau.
+  // ══════════════════════════════════════════════════════════════
+  type PersonField = { label: string; value: string };
+  type PersonProfile = { title: string; subtitle: string; kpis: PdfKpi[]; fields: PersonField[] };
+
+  const buildPersonProfile = useCallback((type: 'producteur' | 'acheteur' | 'transporteur', id: string, name: string): PersonProfile => {
+    const pct = (v: number | null | undefined) => (v !== null && v !== undefined) ? `${Math.round(v * 100)}%` : '—';
+
+    if (type === 'producteur') {
+      const offer = marketIntel.offerRows.find(r => r.sellerId === id) || marketIntel.offerRows.find(r => r.sellerName === name);
+      const quality = marketIntel.qualityRows.find(r => r.sellerId === id);
+      const trust = marketIntel.producerScores.find(r => r.id === id) || marketIntel.producerScores.find(r => r.name === name);
+      const finance = marketIntel.financeBySeller.find(r => r.sellerId === id) || marketIntel.financeBySeller.find(r => r.sellerName === name);
+      return {
+        title: name,
+        subtitle: `Producteur · ${offer?.region || trust?.region || 'Région inconnue'}`,
+        kpis: [
+          { label: 'Score de confiance', value: trust?.score != null ? `${trust.score}/100` : '—' },
+          { label: 'Note moyenne', value: quality ? `${quality.avgRating}/5` : '—', color: [245, 158, 11] },
+          { label: 'Stock total', value: offer ? offer.totalStock.toLocaleString('fr-FR') : '—', color: [6, 182, 212] },
+          { label: 'Commandes', value: trust ? String(trust.ordersCount) : '—', color: [139, 92, 246] },
+        ],
+        fields: [
+          { label: 'Région', value: offer?.region || trust?.region || '—' },
+          { label: 'Produits référencés', value: offer ? String(offer.productCount) : '—' },
+          { label: 'Stock total', value: offer ? offer.totalStock.toLocaleString('fr-FR') : '—' },
+          { label: 'Catégories', value: offer && offer.categories.length ? offer.categories.join(', ') : '—' },
+          { label: 'Dernier mouvement', value: offer?.lastMoveMs ? new Date(offer.lastMoveMs).toLocaleDateString('fr-FR') : '—' },
+          { label: 'Note moyenne (avis clients)', value: quality ? `${quality.avgRating}/5` : 'Aucun avis' },
+          { label: 'Avis reçus', value: quality ? String(quality.count) : '0' },
+          { label: 'Avis ≤2★ (signal de litige)', value: quality ? String(quality.lowCount) : '0' },
+          { label: 'Score de confiance global', value: trust?.score != null ? `${trust.score}/100` : 'Données insuffisantes' },
+          { label: 'Taux de livraison', value: pct(trust?.deliveryRate) },
+          { label: 'Taux de litige', value: pct(trust?.disputeRatio) },
+          { label: "Taux d'annulation", value: pct(trust?.cancelRatio) },
+          { label: 'Prêts liés', value: finance ? String(finance.loansCount) : '0' },
+          { label: 'Défaut de remboursement', value: finance?.hasDefault ? 'Oui ⚠️' : 'Non' },
+          { label: 'Finançable', value: finance?.financable ? 'Oui ✅' : 'Pas encore' },
+        ],
+      };
+    }
+
+    if (type === 'acheteur') {
+      const demand = marketIntel.demandRows.find(r => r.buyerId === id) || marketIntel.demandRows.find(r => r.buyerName === name);
+      const trust = marketIntel.buyerScores.find(r => r.id === id) || marketIntel.buyerScores.find(r => r.name === name);
+      return {
+        title: name,
+        subtitle: 'Acheteur',
+        kpis: [
+          { label: 'Score de confiance', value: trust?.score != null ? `${trust.score}/100` : '—' },
+          { label: 'Montant total', value: demand ? fmtFCFA(demand.totalAmount) : '—', color: [245, 158, 11] },
+          { label: 'Commandes', value: demand ? String(demand.orderCount) : '—', color: [6, 182, 212] },
+          { label: 'Panier moyen', value: demand ? fmtFCFA(demand.avgOrderValue) : '—', color: [139, 92, 246] },
+        ],
+        fields: [
+          { label: 'Commandes', value: demand ? String(demand.orderCount) : '0' },
+          { label: 'Montant total', value: demand ? fmtFCFA(demand.totalAmount) : '—' },
+          { label: 'Panier moyen', value: demand ? fmtFCFA(demand.avgOrderValue) : '—' },
+          { label: 'Fréquence moyenne', value: demand?.freqDays ? `Tous les ${demand.freqDays} j` : '—' },
+          { label: 'Score de confiance', value: trust?.score != null ? `${trust.score}/100` : 'Données insuffisantes' },
+          { label: 'Taux de paiement', value: pct(trust?.paymentRate) },
+          { label: "Taux d'annulation", value: pct(trust?.cancelRatio) },
+        ],
+      };
+    }
+
+    // transporteur
+    const t = marketIntel.transporterScores.find(r => r.id === id) || marketIntel.transporterScores.find(r => r.name === name);
+    return {
+      title: name,
+      subtitle: 'Transporteur',
+      kpis: [
+        { label: 'Score de confiance', value: t?.score != null ? `${t.score}/100` : '—' },
+        { label: 'Taux de complétion', value: pct(t?.completionRate), color: [245, 158, 11] },
+        { label: 'Délai moyen', value: t?.avgMinutes != null ? `${t.avgMinutes} min` : '—', color: [6, 182, 212] },
+        { label: 'Courses assignées', value: t ? String(t.assignedCount) : '—', color: [139, 92, 246] },
+      ],
+      fields: [
+        { label: 'Score de confiance', value: t?.score != null ? `${t.score}/100` : 'Données insuffisantes' },
+        { label: 'Livraisons abouties (taux)', value: pct(t?.completionRate) },
+        { label: 'Délai moyen', value: t?.avgMinutes != null ? `${t.avgMinutes} min` : '—' },
+        { label: 'Courses assignées', value: t ? String(t.assignedCount) : '0' },
+        { label: 'Disponible actuellement', value: t?.isAvailable === undefined ? '—' : (t.isAvailable ? 'Oui 🟢' : 'Non 🔴') },
+      ],
+    };
+  }, [marketIntel]);
+
+  const selectedPersonProfile = useMemo(() => {
+    if (!selectedPerson) return null;
+    return buildPersonProfile(selectedPerson.type, selectedPerson.id, selectedPerson.name);
+  }, [selectedPerson, buildPersonProfile]);
+
+  const handleExportPersonPDF = useCallback((type: 'producteur' | 'acheteur' | 'transporteur', id: string, name: string) => {
+    const profile = buildPersonProfile(type, id, name);
+    generateIntelPDF({
+      title: profile.title,
+      subtitle: profile.subtitle,
+      kpis: profile.kpis,
+      sections: [{ heading: 'Fiche détaillée', head: ['Champ', 'Valeur'], body: profile.fields.map(f => [f.label, f.value]) }],
+      filename: `agrimarche_${type}_${name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}_${Date.now()}.pdf`,
+    });
+  }, [buildPersonProfile, generateIntelPDF]);
+
+  const handleExportPersonExcel = useCallback((type: 'producteur' | 'acheteur' | 'transporteur', id: string, name: string) => {
+    const profile = buildPersonProfile(type, id, name);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(profile.fields.map(f => ({ Champ: f.label, Valeur: f.value }))), 'Fiche');
+    XLSX.writeFile(wb, `agrimarche_${type}_${name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}_${Date.now()}.xlsx`);
+    toast.success('Export Excel généré');
+  }, [buildPersonProfile]);
+
+
+
   // ── KPIs ──────────────────────────────────────────────────
   const kpis = [
     { label:"Chiffre d'affaires",  value:totalRevenue,    change:revenueChange,    icon:<TrendingUp size={20} color="#06b6d4"/>,  color:'#06b6d4' },
@@ -2825,6 +3603,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
     // delivery/dashboard/page.tsx). Badge = signalements non résolus.
     { id:'problems',       label:'Signalements livreurs', icon:<AlertTriangle size={18}/>, badge:orders.filter(o=>o.noteProbleme && !o.problemResolvedAt).length },
     { id:'logistics',      label:'Performance logistique', icon:<TrendingUp size={18}/>,   badge:0 },
+    { id:'market-intel',   label:'Marché & Intelligence', icon:<Database size={18}/>,      badge:0 },
     { id:'settings',       label:'Paramètres',          icon:<Settings size={18}/>,        badge:0 },
   ];
 
@@ -4424,6 +5203,607 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                       </table>
                     </div>
                   </div>
+                )}
+              </div>
+            )}
+
+
+            {/* ═══ MARCHÉ & INTELLIGENCE ═══════════════════════
+                Offre / Demande / Qualité / Logistique / Finance
+                + Scores de confiance (producteurs / acheteurs / transporteurs) */}
+            {activeTab === 'market-intel' && (
+              <div className="animate-fadeIn">
+                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:16, marginBottom:20, padding:16, borderRadius:14, background:'rgba(16,185,129,.06)', border:'1px solid rgba(16,185,129,.2)' }}>
+                  <div style={{ fontSize:13, color:'#9ca3af', lineHeight:1.6 }}>
+                    <strong style={{ color:'#10b981' }}>C'est là que se construit notre avantage.</strong>{' '}
+                    Cette vue reconstitue progressivement l'offre, la demande, la qualité, la logistique et le financement du marché
+                    agricole à partir des données réellement collectées par AgriMarché, puis calcule un score de confiance par
+                    producteur, acheteur et transporteur.
+                  </div>
+                  <button onClick={handleExportMarketIntel} className="btn-primary" style={{ padding:'8px 16px', fontSize:12.5, whiteSpace:'nowrap', flexShrink:0 }}>
+                    <Download size={14}/> Exporter tout (Excel)
+                  </button>
+                </div>
+
+                {/* Sous-onglets */}
+                <div style={{ display:'flex', gap:8, marginBottom:20, flexWrap:'wrap' }}>
+                  {([
+                    { id:'offre',      label:'Offre',       icon:<Package size={14}/> },
+                    { id:'demande',    label:'Demande',     icon:<Store size={14}/> },
+                    { id:'qualite',    label:'Qualité',     icon:<Star size={14}/> },
+                    { id:'logistique', label:'Logistique',  icon:<Truck size={14}/> },
+                    { id:'finance',    label:'Finance',     icon:<Wallet size={14}/> },
+                    { id:'confiance',  label:'Scores de confiance', icon:<ShieldCheck size={14}/> },
+                  ] as const).map(t => (
+                    <button key={t.id} onClick={() => setMarketIntelSubTab(t.id)} className="btn-secondary"
+                      style={{ padding:'8px 14px', fontSize:12.5, fontWeight:600,
+                        background: marketIntelSubTab===t.id ? 'rgba(16,185,129,.15)' : undefined,
+                        borderColor: marketIntelSubTab===t.id ? 'rgba(16,185,129,.4)' : undefined,
+                        color: marketIntelSubTab===t.id ? '#10b981' : undefined }}>
+                      {t.icon} {t.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* ── OFFRE ─────────────────────────────────── */}
+                {marketIntelSubTab === 'offre' && (
+                  <>
+                    <div style={{ display:'flex', justifyContent:'flex-end', gap:8, marginBottom:14 }}>
+                      <button onClick={handleExportOffrePDF} className="btn-secondary" style={{ padding:'7px 14px', fontSize:12, fontWeight:600 }}>
+                        <FileText size={13}/> PDF
+                      </button>
+                      <button onClick={handleExportOffreExcel} className="btn-secondary" style={{ padding:'7px 14px', fontSize:12, fontWeight:600 }}>
+                        <Download size={13}/> Excel
+                      </button>
+                    </div>
+                    <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:16, marginBottom:20 }}>
+                      {[
+                        ['Producteurs actifs', marketIntel.offerRows.length, '#10b981'],
+                        ['Produits référencés', products.length, '#06b6d4'],
+                        ['Stock total (unités)', marketIntel.offerRows.reduce((s,r)=>s+r.totalStock,0).toLocaleString(), '#f59e0b'],
+                        ['Catégories', marketIntel.offerCategoryRows.length, '#8b5cf6'],
+                      ].map(([label,val,color])=>(
+                        <div key={label as string} className="glass-card" style={{ padding:16 }}>
+                          <div style={{ fontSize:11, color:'#6b7280', marginBottom:6 }}>{label}</div>
+                          <div style={{ fontSize:22, fontWeight:700, color:color as string }}>{val}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="glass-card" style={{ padding:20, marginBottom:20 }}>
+                      <h3 style={{ fontSize:15, fontWeight:600, marginBottom:6, display:'flex', alignItems:'center', gap:8 }}>
+                        <Target size={17} color="#ec4899"/> Tension de marché — où l'avantage se joue
+                      </h3>
+                      <div style={{ fontSize:12, color:'#6b7280', marginBottom:14 }}>
+                        Croise l'offre disponible et la demande exprimée, catégorie par catégorie. 🔴 Tension = la demande dépasse
+                        largement l'offre (opportunité de sourcing). 🔵 Surplus = l'offre dépasse largement la demande (risque de mévente).
+                      </div>
+                      {marketIntel.categoryTension.length > 0 && (
+                        <div style={{ width:'100%', height:220, marginBottom:16 }}>
+                          <ResponsiveContainer>
+                            <ComposedChart data={marketIntel.categoryTension.slice(0,8)}>
+                              <CartesianGrid strokeDasharray="3 3" stroke="#1f2127"/>
+                              <XAxis dataKey="category" tick={{ fill:'#6b7280', fontSize:10 }}/>
+                              <YAxis tick={{ fill:'#6b7280', fontSize:10 }}/>
+                              <Tooltip contentStyle={{ background:'#111317', border:'1px solid #1f2127', borderRadius:8, fontSize:12 }}/>
+                              <Bar dataKey="offerQty" name="Offre (stock)" fill="#10b981" radius={[4,4,0,0]}/>
+                              <Bar dataKey="demandQty" name="Demande (qté)" fill="#06b6d4" radius={[4,4,0,0]}/>
+                            </ComposedChart>
+                          </ResponsiveContainer>
+                        </div>
+                      )}
+                      <div style={{ overflowX:'auto' }}>
+                        <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+                          <thead><tr style={{ borderBottom:'1px solid #1f2127' }}>
+                            {['Catégorie','Offre (stock)','Demande (qté)','Statut'].map(h=>(
+                              <th key={h} style={{ padding:'8px 10px', textAlign:'left', color:'#6b7280' }}>{h}</th>
+                            ))}
+                          </tr></thead>
+                          <tbody>
+                            {marketIntel.categoryTension.map(r=>(
+                              <tr key={r.category} style={{ borderBottom:'1px solid #1a1c22' }}>
+                                <td style={{ padding:'8px 10px', fontWeight:600 }}>{r.category}</td>
+                                <td style={{ padding:'8px 10px' }}>{r.offerQty.toLocaleString()}</td>
+                                <td style={{ padding:'8px 10px' }}>{r.demandQty.toLocaleString()}</td>
+                                <td style={{ padding:'8px 10px' }}>
+                                  {r.status==='tension' && <span style={{ color:'#ef4444', fontWeight:600 }}>🔴 Tension {r.ratio ? `(×${r.ratio.toFixed(1)})` : ''}</span>}
+                                  {r.status==='surplus' && <span style={{ color:'#06b6d4', fontWeight:600 }}>🔵 Surplus</span>}
+                                  {r.status==='equilibre' && <span style={{ color:'#10b981' }}>🟢 Équilibré</span>}
+                                  {r.status==='indetermine' && <span style={{ color:'#6b7280' }}>Pas encore de données</span>}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    <div className="glass-card" style={{ padding:20, marginBottom:20 }}>
+                      <h3 style={{ fontSize:15, fontWeight:600, marginBottom:14, display:'flex', alignItems:'center', gap:8 }}>
+                        <Layers size={17} color="#10b981"/> Offre par catégorie — quoi, où, combien
+                      </h3>
+                      <div style={{ overflowX:'auto' }}>
+                        <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+                          <thead><tr style={{ borderBottom:'1px solid #1f2127' }}>
+                            {['Catégorie','Producteurs','Régions couvertes','Stock disponible','Prix moyen'].map(h=>(
+                              <th key={h} style={{ padding:'8px 10px', textAlign:'left', color:'#6b7280' }}>{h}</th>
+                            ))}
+                          </tr></thead>
+                          <tbody>
+                            {marketIntel.offerCategoryRows.map(r=>(
+                              <tr key={r.category} style={{ borderBottom:'1px solid #1a1c22' }}>
+                                <td style={{ padding:'8px 10px', fontWeight:600 }}>{r.category}</td>
+                                <td style={{ padding:'8px 10px' }}>{r.producerCount}</td>
+                                <td style={{ padding:'8px 10px' }}>{r.regionCount}</td>
+                                <td style={{ padding:'8px 10px', color:'#10b981' }}>{r.totalStock.toLocaleString()}</td>
+                                <td style={{ padding:'8px 10px' }}>{r.avgPrice ? `${r.avgPrice.toLocaleString()} FCFA` : '—'}</td>
+                              </tr>
+                            ))}
+                            {marketIntel.offerCategoryRows.length===0 && (
+                              <tr><td colSpan={5} style={{ padding:20, textAlign:'center', color:'#6b7280' }}>Aucune donnée d'offre pour l'instant</td></tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    <div className="glass-card" style={{ padding:20 }}>
+                      <h3 style={{ fontSize:15, fontWeight:600, marginBottom:14, display:'flex', alignItems:'center', gap:8 }}>
+                        <Leaf size={17} color="#10b981"/> Offre par producteur — qui, où, depuis quand
+                      </h3>
+                      <div style={{ overflowX:'auto', maxHeight:420, overflowY:'auto' }}>
+                        <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+                          <thead style={{ position:'sticky', top:0, background:'#111317' }}><tr style={{ borderBottom:'1px solid #1f2127' }}>
+                            {['Producteur','Région','Produits','Stock total','Catégories','Dernier mouvement',''].map(h=>(
+                              <th key={h} style={{ padding:'8px 10px', textAlign:'left', color:'#6b7280' }}>{h}</th>
+                            ))}
+                          </tr></thead>
+                          <tbody>
+                            {marketIntel.offerRows.slice(0,100).map(r=>(
+                              <tr key={r.sellerId || r.sellerName} style={{ borderBottom:'1px solid #1a1c22' }}>
+                                <td onClick={()=>setSelectedPerson({ type:'producteur', id:r.sellerId, name:r.sellerName })} style={{ padding:'8px 10px', fontWeight:600, cursor:'pointer', color:'#10b981' }} title="Voir la fiche">{r.sellerName}</td>
+                                <td style={{ padding:'8px 10px' }}>{r.region}</td>
+                                <td style={{ padding:'8px 10px' }}>{r.productCount}</td>
+                                <td style={{ padding:'8px 10px', color:'#10b981' }}>{r.totalStock.toLocaleString()}</td>
+                                <td style={{ padding:'8px 10px', color:'#6b7280' }}>{r.categories.slice(0,3).join(', ') || '—'}</td>
+                                <td style={{ padding:'8px 10px', color:'#6b7280' }}>{r.lastMoveMs ? new Date(r.lastMoveMs).toLocaleDateString('fr-FR') : '—'}</td>
+                                <td style={{ padding:'8px 10px' }}>
+                                  <button onClick={()=>handleExportPersonPDF('producteur', r.sellerId, r.sellerName)} title="Exporter sa fiche en PDF" style={{ background:'none', border:'none', color:'#6b7280', cursor:'pointer', padding:4 }}>
+                                    <Download size={13}/>
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                            {marketIntel.offerRows.length===0 && (
+                              <tr><td colSpan={7} style={{ padding:20, textAlign:'center', color:'#6b7280' }}>Aucun producteur actif</td></tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {/* ── DEMANDE ───────────────────────────────── */}
+                {marketIntelSubTab === 'demande' && (
+                  <>
+                    <div style={{ display:'flex', justifyContent:'flex-end', gap:8, marginBottom:14 }}>
+                      <button onClick={handleExportDemandePDF} className="btn-secondary" style={{ padding:'7px 14px', fontSize:12, fontWeight:600 }}>
+                        <FileText size={13}/> PDF
+                      </button>
+                      <button onClick={handleExportDemandeExcel} className="btn-secondary" style={{ padding:'7px 14px', fontSize:12, fontWeight:600 }}>
+                        <Download size={13}/> Excel
+                      </button>
+                    </div>
+                    <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:16, marginBottom:20 }}>
+                      {[
+                        ['Acheteurs actifs', marketIntel.demandRows.length, '#06b6d4'],
+                        ['Commandes totales', orders.length, '#10b981'],
+                        ['Montant total demandé', `${marketIntel.demandRows.reduce((s,r)=>s+r.totalAmount,0).toLocaleString()} FCFA`, '#f59e0b'],
+                        ['Panier moyen', marketIntel.demandRows.length ? `${Math.round(marketIntel.demandRows.reduce((s,r)=>s+r.avgOrderValue,0)/marketIntel.demandRows.length).toLocaleString()} FCFA` : '—', '#8b5cf6'],
+                      ].map(([label,val,color])=>(
+                        <div key={label as string} className="glass-card" style={{ padding:16 }}>
+                          <div style={{ fontSize:11, color:'#6b7280', marginBottom:6 }}>{label}</div>
+                          <div style={{ fontSize:22, fontWeight:700, color:color as string }}>{val}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="glass-card" style={{ padding:20, marginBottom:20 }}>
+                      <h3 style={{ fontSize:15, fontWeight:600, marginBottom:14, display:'flex', alignItems:'center', gap:8 }}>
+                        <Layers size={17} color="#06b6d4"/> Demande par catégorie
+                      </h3>
+                      <div style={{ overflowX:'auto' }}>
+                        <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+                          <thead><tr style={{ borderBottom:'1px solid #1f2127' }}>
+                            {['Catégorie','Quantité demandée','Lignes de commande','Montant total'].map(h=>(
+                              <th key={h} style={{ padding:'8px 10px', textAlign:'left', color:'#6b7280' }}>{h}</th>
+                            ))}
+                          </tr></thead>
+                          <tbody>
+                            {marketIntel.demandCategoryRows.map(r=>(
+                              <tr key={r.category} style={{ borderBottom:'1px solid #1a1c22' }}>
+                                <td style={{ padding:'8px 10px', fontWeight:600 }}>{r.category}</td>
+                                <td style={{ padding:'8px 10px' }}>{r.qty.toLocaleString()}</td>
+                                <td style={{ padding:'8px 10px' }}>{r.orders}</td>
+                                <td style={{ padding:'8px 10px', color:'#10b981' }}>{r.amount.toLocaleString()} FCFA</td>
+                              </tr>
+                            ))}
+                            {marketIntel.demandCategoryRows.length===0 && (
+                              <tr><td colSpan={4} style={{ padding:20, textAlign:'center', color:'#6b7280' }}>Aucune donnée de demande pour l'instant</td></tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    <div className="glass-card" style={{ padding:20 }}>
+                      <h3 style={{ fontSize:15, fontWeight:600, marginBottom:14, display:'flex', alignItems:'center', gap:8 }}>
+                        <Store size={17} color="#06b6d4"/> Demande par acheteur — combien, à quel prix, à quelle fréquence
+                      </h3>
+                      <div style={{ overflowX:'auto', maxHeight:420, overflowY:'auto' }}>
+                        <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+                          <thead style={{ position:'sticky', top:0, background:'#111317' }}><tr style={{ borderBottom:'1px solid #1f2127' }}>
+                            {['Acheteur','Commandes','Montant total','Panier moyen','Fréquence moyenne',''].map(h=>(
+                              <th key={h} style={{ padding:'8px 10px', textAlign:'left', color:'#6b7280' }}>{h}</th>
+                            ))}
+                          </tr></thead>
+                          <tbody>
+                            {marketIntel.demandRows.slice(0,100).map(r=>(
+                              <tr key={r.buyerId || r.buyerName} style={{ borderBottom:'1px solid #1a1c22' }}>
+                                <td onClick={()=>setSelectedPerson({ type:'acheteur', id:r.buyerId, name:r.buyerName })} style={{ padding:'8px 10px', fontWeight:600, cursor:'pointer', color:'#06b6d4' }} title="Voir la fiche">{r.buyerName}</td>
+                                <td style={{ padding:'8px 10px' }}>{r.orderCount}</td>
+                                <td style={{ padding:'8px 10px', color:'#10b981' }}>{r.totalAmount.toLocaleString()} FCFA</td>
+                                <td style={{ padding:'8px 10px' }}>{r.avgOrderValue.toLocaleString()} FCFA</td>
+                                <td style={{ padding:'8px 10px', color:'#6b7280' }}>{r.freqDays ? `tous les ${r.freqDays} j` : '—'}</td>
+                                <td style={{ padding:'8px 10px' }}>
+                                  <button onClick={()=>handleExportPersonPDF('acheteur', r.buyerId, r.buyerName)} title="Exporter sa fiche en PDF" style={{ background:'none', border:'none', color:'#6b7280', cursor:'pointer', padding:4 }}>
+                                    <Download size={13}/>
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                            {marketIntel.demandRows.length===0 && (
+                              <tr><td colSpan={6} style={{ padding:20, textAlign:'center', color:'#6b7280' }}>Aucun acheteur actif</td></tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {/* ── QUALITÉ ───────────────────────────────── */}
+                {marketIntelSubTab === 'qualite' && (
+                  <>
+                    <div style={{ display:'flex', justifyContent:'flex-end', gap:8, marginBottom:14 }}>
+                      <button onClick={handleExportQualitePDF} className="btn-secondary" style={{ padding:'7px 14px', fontSize:12, fontWeight:600 }}>
+                        <FileText size={13}/> PDF
+                      </button>
+                      <button onClick={handleExportQualiteExcel} className="btn-secondary" style={{ padding:'7px 14px', fontSize:12, fontWeight:600 }}>
+                        <Download size={13}/> Excel
+                      </button>
+                    </div>
+                    <div style={{ marginBottom:16, padding:14, borderRadius:12, background:'rgba(245,158,11,.06)', border:'1px solid rgba(245,158,11,.2)', fontSize:12.5, color:'#9ca3af' }}>
+                      ⚠️ Seule la note client (avis 1-5★) est aujourd'hui collectée dans AgriMarché. <strong>Calibre</strong> et{' '}
+                      <strong>certification</strong> ne sont pas encore des champs suivis dans le système — ils apparaîtront ici
+                      dès que la saisie produit les capturera.
+                    </div>
+                    <div className="glass-card" style={{ padding:20 }}>
+                      <h3 style={{ fontSize:15, fontWeight:600, marginBottom:14, display:'flex', alignItems:'center', gap:8 }}>
+                        <Star size={17} color="#f59e0b"/> Qualité perçue par producteur (avis clients)
+                      </h3>
+                      <div style={{ overflowX:'auto', maxHeight:460, overflowY:'auto' }}>
+                        <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+                          <thead style={{ position:'sticky', top:0, background:'#111317' }}><tr style={{ borderBottom:'1px solid #1f2127' }}>
+                            {['Producteur','Note moyenne','Avis reçus','Avis ≤2★ (signal de litige)'].map(h=>(
+                              <th key={h} style={{ padding:'8px 10px', textAlign:'left', color:'#6b7280' }}>{h}</th>
+                            ))}
+                          </tr></thead>
+                          <tbody>
+                            {marketIntel.qualityRows.map(r=>(
+                              <tr key={r.sellerId} style={{ borderBottom:'1px solid #1a1c22' }}>
+                                <td style={{ padding:'8px 10px', fontWeight:600 }}>{r.sellerName}</td>
+                                <td style={{ padding:'8px 10px', color: r.avgRating>=4 ? '#10b981' : r.avgRating>=3 ? '#f59e0b' : '#ef4444' }}>⭐ {r.avgRating}/5</td>
+                                <td style={{ padding:'8px 10px' }}>{r.count}</td>
+                                <td style={{ padding:'8px 10px', color: r.lowCount>0 ? '#ef4444' : '#6b7280' }}>{r.lowCount}</td>
+                              </tr>
+                            ))}
+                            {marketIntel.qualityRows.length===0 && (
+                              <tr><td colSpan={4} style={{ padding:20, textAlign:'center', color:'#6b7280' }}>Aucun avis client pour l'instant</td></tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {/* ── LOGISTIQUE ────────────────────────────── */}
+                {marketIntelSubTab === 'logistique' && (
+                  <>
+                    <div style={{ display:'flex', justifyContent:'flex-end', gap:8, marginBottom:14 }}>
+                      <button onClick={handleExportLogistiquePDF} className="btn-secondary" style={{ padding:'7px 14px', fontSize:12, fontWeight:600 }}>
+                        <FileText size={13}/> PDF
+                      </button>
+                      <button onClick={handleExportLogistiqueExcel} className="btn-secondary" style={{ padding:'7px 14px', fontSize:12, fontWeight:600 }}>
+                        <Download size={13}/> Excel
+                      </button>
+                    </div>
+                    <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:16, marginBottom:20 }}>
+                      <div className="glass-card" style={{ padding:16 }}>
+                        <div style={{ fontSize:11, color:'#6b7280', marginBottom:6 }}>Coût de transport moyen</div>
+                        <div style={{ fontSize:22, fontWeight:700, color:'#10b981' }}>{marketIntel.avgDeliveryFee ? `${marketIntel.avgDeliveryFee.toLocaleString()} FCFA` : '—'}</div>
+                      </div>
+                      <div className="glass-card" style={{ padding:16 }}>
+                        <div style={{ fontSize:11, color:'#6b7280', marginBottom:6 }}>Producteurs géolocalisés</div>
+                        <div style={{ fontSize:22, fontWeight:700, color:'#06b6d4' }}>{marketIntel.geolocatedSellers}/{marketIntel.totalSellers}</div>
+                      </div>
+                      <div className="glass-card" style={{ padding:16 }}>
+                        <div style={{ fontSize:11, color:'#6b7280', marginBottom:6 }}>Stockage disponible</div>
+                        <div style={{ fontSize:14, fontWeight:600, color:'#6b7280' }}>Non suivi actuellement</div>
+                      </div>
+                    </div>
+                    <div className="glass-card" style={{ padding:20 }}>
+                      <h3 style={{ fontSize:15, fontWeight:600, marginBottom:14, display:'flex', alignItems:'center', gap:8 }}>
+                        <MapIcon size={17} color="#06b6d4"/> Flux logistique par région — d'où, vers où
+                      </h3>
+                      <div style={{ overflowX:'auto' }}>
+                        <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+                          <thead><tr style={{ borderBottom:'1px solid #1f2127' }}>
+                            {['Région','Producteurs','Acheteurs','Commandes livrées','Commandes totales'].map(h=>(
+                              <th key={h} style={{ padding:'8px 10px', textAlign:'left', color:'#6b7280' }}>{h}</th>
+                            ))}
+                          </tr></thead>
+                          <tbody>
+                            {marketIntel.logisticsRows.map(r=>(
+                              <tr key={r.region} style={{ borderBottom:'1px solid #1a1c22' }}>
+                                <td style={{ padding:'8px 10px', fontWeight:600 }}>{r.region}</td>
+                                <td style={{ padding:'8px 10px' }}>{r.sellerCount}</td>
+                                <td style={{ padding:'8px 10px' }}>{r.buyerCount}</td>
+                                <td style={{ padding:'8px 10px', color:'#10b981' }}>{r.delivered}</td>
+                                <td style={{ padding:'8px 10px', color:'#6b7280' }}>{r.total}</td>
+                              </tr>
+                            ))}
+                            {marketIntel.logisticsRows.length===0 && (
+                              <tr><td colSpan={5} style={{ padding:20, textAlign:'center', color:'#6b7280' }}>Aucun flux logistique pour l'instant</td></tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {/* ── FINANCE ───────────────────────────────── */}
+                {marketIntelSubTab === 'finance' && (
+                  <>
+                    <div style={{ display:'flex', justifyContent:'flex-end', gap:8, marginBottom:14 }}>
+                      <button onClick={handleExportFinancePDF} className="btn-secondary" style={{ padding:'7px 14px', fontSize:12, fontWeight:600 }}>
+                        <FileText size={13}/> PDF
+                      </button>
+                      <button onClick={handleExportFinanceExcel} className="btn-secondary" style={{ padding:'7px 14px', fontSize:12, fontWeight:600 }}>
+                        <Download size={13}/> Excel
+                      </button>
+                    </div>
+                    <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:16, marginBottom:20 }}>
+                      {[
+                        ['Paiements réussis', marketIntel.paymentStatusCounts.paid, '#10b981'],
+                        ['Paiements en attente', marketIntel.paymentStatusCounts.pending, '#f59e0b'],
+                        ['Paiements échoués', marketIntel.paymentStatusCounts.failed, '#ef4444'],
+                        ['Volume financé (prêts)', `${marketIntel.loanFinanceStats.totalVolume.toLocaleString()} FCFA`, '#8b5cf6'],
+                      ].map(([label,val,color])=>(
+                        <div key={label as string} className="glass-card" style={{ padding:16 }}>
+                          <div style={{ fontSize:11, color:'#6b7280', marginBottom:6 }}>{label}</div>
+                          <div style={{ fontSize:22, fontWeight:700, color:color as string }}>{val}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="glass-card" style={{ padding:20 }}>
+                      <h3 style={{ fontSize:15, fontWeight:600, marginBottom:14, display:'flex', alignItems:'center', gap:8 }}>
+                        <Banknote size={17} color="#8b5cf6"/> Finançabilité par producteur
+                      </h3>
+                      <div style={{ fontSize:12, color:'#6b7280', marginBottom:12 }}>
+                        Un producteur est marqué finançable s'il a au moins 3 commandes, un score de confiance ≥ 60/100, et aucun défaut de remboursement enregistré.
+                      </div>
+                      <div style={{ overflowX:'auto', maxHeight:420, overflowY:'auto' }}>
+                        <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+                          <thead style={{ position:'sticky', top:0, background:'#111317' }}><tr style={{ borderBottom:'1px solid #1f2127' }}>
+                            {['Producteur','Score de confiance','Commandes','Prêts liés','Finançable'].map(h=>(
+                              <th key={h} style={{ padding:'8px 10px', textAlign:'left', color:'#6b7280' }}>{h}</th>
+                            ))}
+                          </tr></thead>
+                          <tbody>
+                            {marketIntel.financeBySeller.slice(0,100).map(r=>(
+                              <tr key={r.sellerId || r.sellerName} style={{ borderBottom:'1px solid #1a1c22' }}>
+                                <td style={{ padding:'8px 10px', fontWeight:600 }}>{r.sellerName}</td>
+                                <td style={{ padding:'8px 10px' }}>{r.trustScore!==null ? `${r.trustScore}/100` : '—'}</td>
+                                <td style={{ padding:'8px 10px' }}>{r.ordersCount}</td>
+                                <td style={{ padding:'8px 10px' }}>{r.loansCount}{r.hasDefault ? ' ⚠️' : ''}</td>
+                                <td style={{ padding:'8px 10px' }}>
+                                  {r.financable
+                                    ? <span style={{ color:'#10b981', fontWeight:600 }}>✅ Oui</span>
+                                    : <span style={{ color:'#6b7280' }}>Pas encore</span>}
+                                </td>
+                              </tr>
+                            ))}
+                            {marketIntel.financeBySeller.length===0 && (
+                              <tr><td colSpan={5} style={{ padding:20, textAlign:'center', color:'#6b7280' }}>Aucun producteur pour l'instant</td></tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {/* ── SCORES DE CONFIANCE ───────────────────── */}
+                {marketIntelSubTab === 'confiance' && (
+                  <>
+                    <div style={{ display:'flex', gap:8, marginBottom:16, flexWrap:'wrap', alignItems:'center', justifyContent:'space-between' }}>
+                      <div style={{ display:'flex', gap:8 }}>
+                        {([
+                          { id:'producteurs',   label:'Producteurs' },
+                          { id:'acheteurs',     label:'Acheteurs' },
+                          { id:'transporteurs', label:'Transporteurs' },
+                        ] as const).map(f => (
+                          <button key={f.id} onClick={()=>setMarketIntelTrustFilter(f.id)} className="btn-secondary"
+                            style={{ padding:'7px 14px', fontSize:12.5, fontWeight:600,
+                              background: marketIntelTrustFilter===f.id ? 'rgba(139,92,246,.15)' : undefined,
+                              borderColor: marketIntelTrustFilter===f.id ? 'rgba(139,92,246,.4)' : undefined,
+                              color: marketIntelTrustFilter===f.id ? '#8b5cf6' : undefined }}>
+                            {f.label}
+                          </button>
+                        ))}
+                      </div>
+                      <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+                        <div style={{ position:'relative', width:220 }}>
+                          <Search size={14} style={{ position:'absolute', left:10, top:10, color:'#6b7280' }}/>
+                          <input value={marketIntelTrustSearch} onChange={e=>setMarketIntelTrustSearch(e.target.value)}
+                            placeholder="Rechercher un nom..." style={{ paddingLeft:32, fontSize:12.5, padding:'8px 10px 8px 32px' }}/>
+                        </div>
+                        <button onClick={handleExportConfiancePDF} className="btn-secondary" style={{ padding:'7px 14px', fontSize:12, fontWeight:600 }}>
+                          <FileText size={13}/> PDF
+                        </button>
+                        <button onClick={handleExportConfianceExcel} className="btn-secondary" style={{ padding:'7px 14px', fontSize:12, fontWeight:600 }}>
+                          <Download size={13}/> Excel
+                        </button>
+                      </div>
+                    </div>
+
+                    <div style={{ marginBottom:16, padding:14, borderRadius:12, background:'rgba(139,92,246,.06)', border:'1px solid rgba(139,92,246,.2)', fontSize:12.5, color:'#9ca3af' }}>
+                      C'est potentiellement un actif énorme : chaque score est une moyenne des signaux réellement disponibles
+                      pour ce compte (livraisons, avis, annulations, paiements). Un compte trop récent pour avoir un signal
+                      donné n'est pas pénalisé — le signal manquant est simplement exclu du calcul plutôt que compté comme 0.
+                    </div>
+
+                    {marketIntelTrustFilter === 'producteurs' && (
+                      <div className="glass-card" style={{ padding:20 }}>
+                        <h3 style={{ fontSize:15, fontWeight:600, marginBottom:14, display:'flex', alignItems:'center', gap:8 }}>
+                          <ShieldCheck size={17} color="#10b981"/> Score de confiance — Producteurs
+                        </h3>
+                        <div style={{ overflowX:'auto', maxHeight:500, overflowY:'auto' }}>
+                          <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+                            <thead style={{ position:'sticky', top:0, background:'#111317' }}><tr style={{ borderBottom:'1px solid #1f2127' }}>
+                              {['Producteur','Score','Livraisons','Qualité','Litiges','Annulations',''].map(h=>(
+                                <th key={h} style={{ padding:'8px 10px', textAlign:'left', color:'#6b7280' }}>{h}</th>
+                              ))}
+                            </tr></thead>
+                            <tbody>
+                              {marketIntel.producerScores
+                                .filter(r => r.name.toLowerCase().includes(marketIntelTrustSearch.toLowerCase()))
+                                .slice(0,100).map((r,i)=>(
+                                <tr key={r.id || r.name} style={{ borderBottom:'1px solid #1a1c22' }}>
+                                  <td onClick={()=>setSelectedPerson({ type:'producteur', id:r.id, name:r.name })} style={{ padding:'8px 10px', fontWeight:600, cursor:'pointer', color:'#10b981' }} title="Voir la fiche">{i===0?'🥇 ':i===1?'🥈 ':i===2?'🥉 ':''}{r.name}<div style={{ fontSize:10, color:'#6b7280' }}>{r.region}</div></td>
+                                  <td style={{ padding:'8px 10px' }}>
+                                    {r.score!==null
+                                      ? <span style={{ fontWeight:700, color: r.score>=80?'#10b981':r.score>=60?'#f59e0b':'#ef4444' }}>{r.score}/100</span>
+                                      : <span style={{ color:'#6b7280' }}>Données insuffisantes</span>}
+                                  </td>
+                                  <td style={{ padding:'8px 10px' }}>{r.deliveryRate!==null ? `${Math.round(r.deliveryRate*100)}%` : '—'}</td>
+                                  <td style={{ padding:'8px 10px' }}>{r.avgRating!==null ? `⭐ ${r.avgRating.toFixed(1)}` : '—'}</td>
+                                  <td style={{ padding:'8px 10px' }}>{r.disputeRatio!==null ? `${Math.round(r.disputeRatio*100)}%` : '—'}</td>
+                                  <td style={{ padding:'8px 10px' }}>{r.cancelRatio!==null ? `${Math.round(r.cancelRatio*100)}%` : '—'}</td>
+                                  <td style={{ padding:'8px 10px' }}>
+                                    <button onClick={()=>handleExportPersonPDF('producteur', r.id, r.name)} title="Exporter sa fiche en PDF" style={{ background:'none', border:'none', color:'#6b7280', cursor:'pointer', padding:4 }}>
+                                      <Download size={13}/>
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                              {marketIntel.producerScores.filter(r => r.name.toLowerCase().includes(marketIntelTrustSearch.toLowerCase())).length===0 && (
+                                <tr><td colSpan={7} style={{ padding:20, textAlign:'center', color:'#6b7280' }}>{marketIntelTrustSearch ? 'Aucun résultat pour cette recherche' : "Aucun producteur pour l'instant"}</td></tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {marketIntelTrustFilter === 'acheteurs' && (
+                      <div className="glass-card" style={{ padding:20 }}>
+                        <h3 style={{ fontSize:15, fontWeight:600, marginBottom:14, display:'flex', alignItems:'center', gap:8 }}>
+                          <ShieldCheck size={17} color="#06b6d4"/> Score de confiance — Acheteurs
+                        </h3>
+                        <div style={{ overflowX:'auto', maxHeight:500, overflowY:'auto' }}>
+                          <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+                            <thead style={{ position:'sticky', top:0, background:'#111317' }}><tr style={{ borderBottom:'1px solid #1f2127' }}>
+                              {['Acheteur','Score','Paiement','Volume total','Commandes','Annulations',''].map(h=>(
+                                <th key={h} style={{ padding:'8px 10px', textAlign:'left', color:'#6b7280' }}>{h}</th>
+                              ))}
+                            </tr></thead>
+                            <tbody>
+                              {marketIntel.buyerScores
+                                .filter(r => r.name.toLowerCase().includes(marketIntelTrustSearch.toLowerCase()))
+                                .slice(0,100).map((r,i)=>(
+                                <tr key={r.id || r.name} style={{ borderBottom:'1px solid #1a1c22' }}>
+                                  <td onClick={()=>setSelectedPerson({ type:'acheteur', id:r.id, name:r.name })} style={{ padding:'8px 10px', fontWeight:600, cursor:'pointer', color:'#06b6d4' }} title="Voir la fiche">{i===0?'🥇 ':i===1?'🥈 ':i===2?'🥉 ':''}{r.name}</td>
+                                  <td style={{ padding:'8px 10px' }}>
+                                    <span style={{ fontWeight:700, color: r.score>=80?'#10b981':r.score>=60?'#f59e0b':'#ef4444' }}>{r.score}/100</span>
+                                  </td>
+                                  <td style={{ padding:'8px 10px' }}>{r.paymentRate!==null ? `${Math.round(r.paymentRate*100)}%` : '—'}</td>
+                                  <td style={{ padding:'8px 10px', color:'#10b981' }}>{r.totalAmount.toLocaleString()} FCFA</td>
+                                  <td style={{ padding:'8px 10px' }}>{r.orderCount}</td>
+                                  <td style={{ padding:'8px 10px' }}>{r.cancelRatio!==null ? `${Math.round(r.cancelRatio*100)}%` : '—'}</td>
+                                  <td style={{ padding:'8px 10px' }}>
+                                    <button onClick={()=>handleExportPersonPDF('acheteur', r.id, r.name)} title="Exporter sa fiche en PDF" style={{ background:'none', border:'none', color:'#6b7280', cursor:'pointer', padding:4 }}>
+                                      <Download size={13}/>
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                              {marketIntel.buyerScores.filter(r => r.name.toLowerCase().includes(marketIntelTrustSearch.toLowerCase())).length===0 && (
+                                <tr><td colSpan={7} style={{ padding:20, textAlign:'center', color:'#6b7280' }}>{marketIntelTrustSearch ? 'Aucun résultat pour cette recherche' : "Aucun acheteur pour l'instant"}</td></tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {marketIntelTrustFilter === 'transporteurs' && (
+                      <div className="glass-card" style={{ padding:20 }}>
+                        <h3 style={{ fontSize:15, fontWeight:600, marginBottom:14, display:'flex', alignItems:'center', gap:8 }}>
+                          <ShieldCheck size={17} color="#f59e0b"/> Score de confiance — Transporteurs
+                        </h3>
+                        <div style={{ overflowX:'auto', maxHeight:500, overflowY:'auto' }}>
+                          <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+                            <thead style={{ position:'sticky', top:0, background:'#111317' }}><tr style={{ borderBottom:'1px solid #1f2127' }}>
+                              {['Transporteur','Score','Livraisons abouties','Délai moyen','Courses assignées','Disponible',''].map(h=>(
+                                <th key={h} style={{ padding:'8px 10px', textAlign:'left', color:'#6b7280' }}>{h}</th>
+                              ))}
+                            </tr></thead>
+                            <tbody>
+                              {marketIntel.transporterScores
+                                .filter(r => r.name.toLowerCase().includes(marketIntelTrustSearch.toLowerCase()))
+                                .map((r,i)=>(
+                                <tr key={r.id || r.name} style={{ borderBottom:'1px solid #1a1c22' }}>
+                                  <td onClick={()=>setSelectedPerson({ type:'transporteur', id:r.id, name:r.name })} style={{ padding:'8px 10px', fontWeight:600, cursor:'pointer', color:'#f59e0b' }} title="Voir la fiche">{i===0?'🥇 ':i===1?'🥈 ':i===2?'🥉 ':''}{r.name}</td>
+                                  <td style={{ padding:'8px 10px' }}>
+                                    {r.score!==null
+                                      ? <span style={{ fontWeight:700, color: r.score>=80?'#10b981':r.score>=60?'#f59e0b':'#ef4444' }}>{r.score}/100</span>
+                                      : <span style={{ color:'#6b7280' }}>Données insuffisantes</span>}
+                                  </td>
+                                  <td style={{ padding:'8px 10px' }}>{r.completionRate!==null ? `${Math.round(r.completionRate*100)}%` : '—'}</td>
+                                  <td style={{ padding:'8px 10px' }}>{r.avgMinutes!==null ? `${r.avgMinutes} min` : '—'}</td>
+                                  <td style={{ padding:'8px 10px' }}>{r.assignedCount}</td>
+                                  <td style={{ padding:'8px 10px' }}>{r.isAvailable===undefined ? '—' : (r.isAvailable ? '🟢 Oui' : '🔴 Non')}</td>
+                                  <td style={{ padding:'8px 10px' }}>
+                                    <button onClick={()=>handleExportPersonPDF('transporteur', r.id, r.name)} title="Exporter sa fiche en PDF" style={{ background:'none', border:'none', color:'#6b7280', cursor:'pointer', padding:4 }}>
+                                      <Download size={13}/>
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                              {marketIntel.transporterScores.filter(r => r.name.toLowerCase().includes(marketIntelTrustSearch.toLowerCase())).length===0 && (
+                                <tr><td colSpan={7} style={{ padding:20, textAlign:'center', color:'#6b7280' }}>{marketIntelTrustSearch ? 'Aucun résultat pour cette recherche' : "Aucun transporteur pour l'instant"}</td></tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             )}
@@ -7270,6 +8650,48 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                 style={{ flex:1, display:'inline-flex', alignItems:'center', justifyContent:'center', gap:6 }}
               >
                 <Send size={13}/> Notifier
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Fiche individuelle — Marché & Intelligence (producteur / acheteur / transporteur) */}
+      {selectedPerson && selectedPersonProfile && (
+        <div onClick={()=>setSelectedPerson(null)} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,.8)', backdropFilter:'blur(8px)', zIndex:1000, display:'flex', alignItems:'center', justifyContent:'center' }}>
+          <div onClick={e=>e.stopPropagation()} className="glass-card" style={{ width:520, maxWidth:'92%', padding:24, maxHeight:'85vh', overflowY:'auto' }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:18 }}>
+              <div>
+                <h3 style={{ fontSize:17, fontWeight:600, marginBottom:4 }}>{selectedPersonProfile.title}</h3>
+                <div style={{ fontSize:12, color:'#6b7280' }}>{selectedPersonProfile.subtitle}</div>
+              </div>
+              <button onClick={()=>setSelectedPerson(null)} style={{ background:'none', border:'none', color:'#6b7280', cursor:'pointer' }}><X size={20}/></button>
+            </div>
+
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:10, marginBottom:20 }}>
+              {selectedPersonProfile.kpis.map(k => (
+                <div key={k.label} style={{ background:'#1f2127', borderRadius:10, padding:'10px 8px' }}>
+                  <div style={{ fontSize:9.5, color:'#6b7280', marginBottom:4 }}>{k.label}</div>
+                  <div style={{ fontSize:15, fontWeight:700, color: k.color ? `rgb(${k.color.join(',')})` : '#10b981' }}>{k.value}</div>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ borderTop:'1px solid #1f2127', borderBottom:'1px solid #1f2127', marginBottom:20 }}>
+              {selectedPersonProfile.fields.map((f,i) => (
+                <div key={f.label} style={{ display:'flex', justifyContent:'space-between', gap:12, padding:'9px 2px', borderTop: i===0 ? undefined : '1px solid #1a1c22' }}>
+                  <span style={{ fontSize:12, color:'#6b7280' }}>{f.label}</span>
+                  <span style={{ fontSize:12.5, fontWeight:600, textAlign:'right' }}>{f.value}</span>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ display:'flex', gap:8 }}>
+              <button onClick={()=>handleExportPersonPDF(selectedPerson.type, selectedPerson.id, selectedPerson.name)} className="btn-secondary" style={{ flex:1, display:'inline-flex', alignItems:'center', justifyContent:'center', gap:6 }}>
+                <FileText size={13}/> PDF
+              </button>
+              <button onClick={()=>handleExportPersonExcel(selectedPerson.type, selectedPerson.id, selectedPerson.name)} className="btn-secondary" style={{ flex:1, display:'inline-flex', alignItems:'center', justifyContent:'center', gap:6 }}>
+                <Download size={13}/> Excel
               </button>
             </div>
           </div>

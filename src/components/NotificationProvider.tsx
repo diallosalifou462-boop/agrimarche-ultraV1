@@ -18,6 +18,8 @@ interface Notification {
   read: boolean;
   createdAt: Date;
   link?: string;
+  /** Miniature (ex: photo du produit pour "nouveau produit") — optionnelle */
+  image?: string;
 }
 
 interface NotificationContextType {

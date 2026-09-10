@@ -6,7 +6,6 @@ import Image from 'next/image';
 import { auth, db } from '@/lib/firebase/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { collection, addDoc, serverTimestamp, doc, getDoc, setDoc } from 'firebase/firestore';
-import { notifyAllUsers } from '@/lib/notifications/notifyUser';
 import { computeDisplayPrice } from '@/lib/pricing';
 import { computeGeohash } from '@/lib/geo/geohash';
 // Firebase Storage remplacé par Cloudinary
@@ -285,15 +284,17 @@ export default function AddProductPage() {
         console.error('Échec écriture productPricing (non bloquant) :', pricingErr);
       }
 
-      // Notifier tout le monde qu'un nouveau produit est disponible.
-      // Best-effort : ne bloque jamais la publication du vendeur si ça échoue.
-      notifyAllUsers({
-        type: 'promotion',
-        title: '🌾 Nouveau produit disponible !',
-        body: `${form.name.trim()} par ${sellerInfo.name} — ${displayPrice.toLocaleString('fr-FR')} FCFA/${form.unit}`,
-        link: `/product?id=${newProductRef.id}`,
-        excludeUserId: userId,
-      });
+      // La notification "nouveau produit" (push + historique in-app, avec
+      // photo, lien vers la catégorie) est désormais entièrement gérée par
+      // le trigger serveur `notifyNewProduct` (functions/src/index.ts), qui
+      // se déclenche automatiquement à la création de ce document Firestore.
+      //
+      // ⚠️ FIX : un appel notifyAllUsers() vivait ICI en plus de ce trigger
+      // serveur — chaque produit publié envoyait donc DEUX notifications
+      // "nouveau produit" au lieu d'une. Supprimé : le trigger serveur est
+      // automatique (pas besoin de le déclencher depuis le client), protégé
+      // contre les rejeux Eventarc, et fonctionne même si le vendeur ferme
+      // l'app juste après avoir publié.
 
       showToast('success', 'Produit publié avec succès !');
       setTimeout(() => router.push('/seller/products'), 1200);

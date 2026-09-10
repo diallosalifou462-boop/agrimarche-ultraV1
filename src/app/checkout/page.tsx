@@ -1,12 +1,18 @@
 'use client';
 
-import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef, type MouseEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCart } from '@/hooks/useCart';
 import { useAuth } from '@/hooks/useAuth';
 import { useUserLocation } from '@/hooks/useUserLocation';
-import { saveManualAddress } from '@/lib/manualLocation';
+import {
+  saveManualAddress,
+  getManualAddressHistory,
+  removeManualAddressHistoryEntry,
+  formatManualAddressAge,
+  type ManualAddressHistoryEntry,
+} from '@/lib/manualLocation';
 import LocationPicker from '@/components/LocationPicker';
 import { reverseGeocode, searchPlaces } from '@/lib/geo/geocode';
 import type { GeocodeResult } from '@/lib/geo/types';
@@ -504,6 +510,31 @@ export default function CheckoutPage() {
   const [placeQuery, setPlaceQuery] = useState('');
   const [placeResults, setPlaceResults] = useState<GeocodeResult[]>([]);
   const [placeSearching, setPlaceSearching] = useState(false);
+  // ✨ NOUVEAU — adresses manuelles déjà confirmées par ce client sur cet
+  // appareil, quel que soit l'écran où il les a saisies (LiveLocation,
+  // dashboard vendeur, ou ce checkout lui-même — voir lib/manualLocation.ts,
+  // historique partagé). Évite de re-chercher/re-géocoder une adresse de
+  // livraison déjà utilisée récemment.
+  const [addressHistory, setAddressHistory] = useState<ManualAddressHistoryEntry[]>([]);
+  useEffect(() => {
+    setAddressHistory(getManualAddressHistory());
+  }, []);
+
+  const pickHistoryAddress = useCallback((entry: ManualAddressHistoryEntry) => {
+    setManualPin({ lat: entry.lat, lng: entry.lng });
+    setManualLocation({ lat: entry.lat, lng: entry.lng, address: entry.address, source: 'MANUAL_PIN' });
+    setShowLocationPicker(false);
+    // Coordonnées et adresse déjà connues (pas besoin de re-géocoder) : on
+    // rafraîchit simplement `locationUpdatedAt` et la position active pour
+    // que le reste de l'app (catalogue, tracking) voie ce choix aussi.
+    saveManualAddress({ uid: user?.uid, lat: entry.lat, lng: entry.lng, address: entry.address, label: entry.label });
+  }, [user?.uid]);
+
+  const deleteHistoryAddress = useCallback((entry: ManualAddressHistoryEntry, e: MouseEvent) => {
+    e.stopPropagation();
+    removeManualAddressHistoryEntry(entry.lat, entry.lng);
+    setAddressHistory(getManualAddressHistory());
+  }, []);
 
   const effectiveLocation = manualLocation
     ? { ...manualLocation, city: manualLocation.address, region: '', country: 'Sénégal', detected: true, isDefault: false }
@@ -561,7 +592,9 @@ export default function CheckoutPage() {
     // manuelle que celle gérée par LiveLocation.tsx et le tableau de bord
     // vendeur — elle apparaît désormais partout, jusqu'à modification ou
     // retour explicite au GPS.
-    saveManualAddress({ uid: user?.uid, lat: r.latitude, lng: r.longitude, address });
+    saveManualAddress({ uid: user?.uid, lat: r.latitude, lng: r.longitude, address }).then(() => {
+      setAddressHistory(getManualAddressHistory());
+    });
   }, [user?.uid]);
 
   const confirmManualLocation = useCallback(async () => {
@@ -578,11 +611,13 @@ export default function CheckoutPage() {
       // ci-dessus : même correction, pour le pin posé à la main sur la
       // carte plutôt que via la recherche de lieu nommé.
       await saveManualAddress({ uid: user?.uid, lat: manualPin.lat, lng: manualPin.lng, address });
+      setAddressHistory(getManualAddressHistory());
     } catch {
       const address = `${manualPin.lat.toFixed(5)}, ${manualPin.lng.toFixed(5)}`;
       setManualLocation({ lat: manualPin.lat, lng: manualPin.lng, address, source: 'MANUAL_PIN' });
       setShowLocationPicker(false);
       await saveManualAddress({ uid: user?.uid, lat: manualPin.lat, lng: manualPin.lng, address });
+      setAddressHistory(getManualAddressHistory());
     } finally {
       setManualLocationLoading(false);
     }
@@ -1237,6 +1272,40 @@ export default function CheckoutPage() {
                   )}
                   {showLocationPicker && manualPin && !manualLocation && (
                     <div style={{ marginTop:12 }}>
+                      {/* ✨ NOUVEAU — reprendre une adresse déjà confirmée
+                          ailleurs dans l'app (lib/manualLocation.ts) en un
+                          tap, sans repasser par la recherche ou la carte. */}
+                      {addressHistory.length > 0 && (
+                        <div style={{ marginBottom:10 }}>
+                          <p style={{ fontSize:11, color:'var(--ink-lt)', marginBottom:6 }}>Adresses récentes :</p>
+                          <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
+                            {addressHistory.map((entry, i) => (
+                              <div
+                                key={`${entry.lat}-${entry.lng}-${i}`}
+                                style={{ display:'inline-flex', alignItems:'center', gap:4, fontSize:11, padding:'4px 4px 4px 10px', borderRadius:999, border:'1px solid rgba(16,185,129,.35)', background:'rgba(16,185,129,.08)', color:'#047857', maxWidth:240 }}
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() => pickHistoryAddress(entry)}
+                                  title={entry.address}
+                                  style={{ background:'none', border:'none', color:'inherit', cursor:'pointer', padding:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', textAlign:'left' }}
+                                >
+                                  📍 {entry.label ? <strong>{entry.label} · </strong> : null}{entry.address}
+                                  <span style={{ opacity:.7 }}> · {formatManualAddressAge(entry.savedAt)}</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label="Supprimer cette adresse"
+                                  onClick={(e) => deleteHistoryAddress(entry, e)}
+                                  style={{ background:'none', border:'none', color:'inherit', cursor:'pointer', padding:'0 4px', opacity:.6, fontSize:13, lineHeight:1 }}
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                       <div style={{ position:'relative', marginBottom:10 }}>
                         <input
                           type="text"
