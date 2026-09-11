@@ -17,7 +17,7 @@ import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import * as admin from 'firebase-admin';
 import { generateOtp, hashOtp, verifyOtpHash } from './otp';
 import { checkAndConsumeRateLimit, RateLimitedError } from './rateLimit';
-import { sendOtpSmsInfobip } from './smsInfobip';
+import { decideChannelAndSend, getMostRecentPushToken } from './otpChannel';
 import { logAuditEvent } from './audit';
 import { bumpRegistrationMetric } from './metrics';
 import { localizeError } from './errorMessages';
@@ -82,17 +82,21 @@ export const loginSendOtp = onCall(
       ip,
     });
 
+    // Compte déjà existant (on est en 2ᵉ facteur, pas en inscription) :
+    // on va chercher nous-mêmes un token push déjà enregistré pour ce
+    // uid, plutôt que d'exiger un changement côté client — voir
+    // otpChannel.ts.
+    const pushToken = await getMostRecentPushToken(uid);
+    let channel: 'push' | 'sms_infobip';
     try {
-      await sendOtpSmsInfobip(phone, code, 'connexion');
+      channel = await decideChannelAndSend(sessionRef.id, phone, pushToken, code, 'connexion', 'login');
     } catch (err) {
       await sessionRef.update({ status: 'send_failed' });
-      await bumpRegistrationMetric('login_send_failed_sms');
       await logAuditEvent({ type: 'login_otp_rejected', sessionId: sessionRef.id, phone, ip, reason: 'send_failed' });
-      throwLocalized('unavailable', 'SMS_SEND_FAILED');
+      throw err; // déjà un HttpsError('unavailable', 'SMS_SEND_FAILED') localisé côté client
     }
 
-    await bumpRegistrationMetric('login_otp_sent');
-    await logAuditEvent({ type: 'login_otp_sent', sessionId: sessionRef.id, phone, ip });
+    await logAuditEvent({ type: 'login_otp_sent', sessionId: sessionRef.id, phone, ip, channel });
 
     return { sessionId: sessionRef.id, otpTtlSeconds: OTP_TTL_MS / 1000 };
   }

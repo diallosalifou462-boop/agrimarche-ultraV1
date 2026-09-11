@@ -122,8 +122,21 @@ export default function RegisterPage() {
     console.log('=====================================================');
   }, []);
 
+  // ⚠️ GARDE-FOU (même piège que sur auth/login/page.tsx, voir
+  // otpPendingRef) : sur Android/iOS, la vérification du téléphone peut
+  // aboutir INSTANTANÉMENT côté natif (SMS Retriever / Play Integrity),
+  // ce qui rend `user` non-nul avant même que finalizeRegistration()
+  // (completeOrangeRegistration : nom, région, mot de passe, rôle...)
+  // ait fini son appel réseau. Sans ce ref, ce useEffect se déclenche
+  // dès que Firebase confirme le numéro et propulse l'utilisateur vers
+  // '/' (donc vers /main/products via le Splash) AVANT que le compte
+  // soit réellement finalisé — l'inscription semble "sauter" une étape.
+  const registrationInProgressRef = useRef(false);
+
   useEffect(() => {
-    if (isClient && user && !authLoading) router.push('/');
+    if (isClient && user && !authLoading && !registrationInProgressRef.current) {
+      router.push('/');
+    }
   }, [user, authLoading, router, isClient]);
 
   // Cooldown timer pour renvoi OTP
@@ -336,6 +349,7 @@ export default function RegisterPage() {
     // toute course avec onAuthStateChanged (voir useAuth.ts). Relâché par
     // signUp() en cas de succès, ou ici même si l'utilisateur abandonne.
     suppressAutoProfileRef.current = true;
+    registrationInProgressRef.current = true;
     await sendOTP();
   };
 
@@ -397,6 +411,11 @@ export default function RegisterPage() {
     // ne reste pas sur l'ancien état "téléphone seul".
     await auth.currentUser?.reload();
     setStep('success');
+    // On ne relâche le garde-fou qu'ICI, une fois le profil réellement
+    // écrit côté serveur — pas avant. La redirection est désormais
+    // explicite (/auth/login), plus besoin que le useEffect générique
+    // s'en charge.
+    registrationInProgressRef.current = false;
     setTimeout(() => router.push('/auth/login'), 2500);
   };
 
