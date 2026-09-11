@@ -14,6 +14,9 @@ import { auth } from '@/lib/firebase/firebase';
 import { Capacitor } from '@capacitor/core';
 import { detectCarrier } from '@/lib/carrier';
 import { apiUrl } from '@/lib/api-config';
+import { resetPasswordSendOtp, resetPasswordVerifyOtp, RegistrationActionError } from '@/lib/registrationActions';
+import { AuthHero } from '../_shared/AuthHero';
+import { AuthSheet, AuthErrorBanner, LineField, PrimaryButton, AuthLink, BackRow, OtpCells } from '../_shared/AuthFormKit';
 
 // ─── Attend que le pont natif Capacitor soit prêt ─────
 async function waitForNativeBridge(timeoutMs = 1500): Promise<boolean> {
@@ -25,7 +28,7 @@ async function waitForNativeBridge(timeoutMs = 1500): Promise<boolean> {
   return Capacitor.isNativePlatform();
 }
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
-import { MessageSquare, ArrowLeft, Lock, CheckCircle, Eye, EyeOff } from 'lucide-react';
+import { Eye, EyeOff } from 'lucide-react';
 
 function toE164(phone: string): string {
   const digits = phone.replace(/\D/g, '');
@@ -47,6 +50,10 @@ export default function ForgotPasswordPage() {
   const [confirmResult, setConfirmResult] = useState<ConfirmationResult | null>(null);
   const [verificationId, setVerificationId] = useState<string | null>(null);
   const verificationIdRef = useRef<string | null>(null);
+  // sessionId renvoyé par resetPasswordSendOtp (passwordReset.ts) —
+  // Free/Yas et Expresso uniquement ; à transmettre tel quel à
+  // resetPasswordVerifyOtp.
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const recaptchaRef = useRef<RecaptchaVerifier | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -129,19 +136,14 @@ export default function ForgotPasswordPage() {
       if (carrier === 'free' || carrier === 'expresso') {
         useCustomOtpRef.current = true;
         try {
-          const res = await fetch(apiUrl('/api/otp/send'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phone: phoneE164, purpose: 'reset' }),
-          });
-          const json = await res.json().catch(() => null);
-          if (!res.ok) {
-            setError(json?.error || `Erreur lors de l'envoi du code (HTTP ${res.status})`);
-            setLoading(false);
-            return;
-          }
-        } catch (networkErr: any) {
-          setError(`Connexion au serveur impossible (réseau). Détail: ${String(networkErr?.message || networkErr)}`);
+          // resetPasswordSendOtp (passwordReset.ts) : refuse explicitement
+          // un numéro qui n'appartient à aucun compte (ACCOUNT_NOT_FOUND) —
+          // logique inverse de l'inscription.
+          const { sessionId: sid } = await resetPasswordSendOtp(phoneE164);
+          setSessionId(sid);
+        } catch (otpErr: any) {
+          const msg = otpErr instanceof RegistrationActionError ? otpErr.message : "Erreur lors de l'envoi du code";
+          setError(msg);
           setLoading(false);
           return;
         }
@@ -212,25 +214,22 @@ export default function ForgotPasswordPage() {
     setLoading(true); setError('');
     try {
       if (useCustomOtpRef.current) {
-        // Free/Yas et Expresso : vérification côté serveur (Admin SDK),
-        // pas de `registration` ici (compte déjà existant) — voir
-        // /api/otp/verify. On récupère un customToken pour établir la
-        // session Firebase et pouvoir ensuite appeler updatePassword().
-        const phoneE164 = toE164(phone);
-        const res = await fetch(apiUrl('/api/otp/verify'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phone: phoneE164, code }),
-        });
-        const json = await res.json().catch(() => null);
-        if (!res.ok) {
-          setError(json?.error || 'Code incorrect');
+        // Free/Yas et Expresso : vérification côté serveur (Admin SDK) via
+        // resetPasswordVerifyOtp (passwordReset.ts) — pas de `registration`
+        // ici (compte déjà existant). On récupère un customToken pour
+        // établir la session Firebase et pouvoir ensuite appeler
+        // updatePassword().
+        if (!sessionId) { setError('Session expirée, renvoyez le code'); setLoading(false); return; }
+        try {
+          const { customToken } = await resetPasswordVerifyOtp(sessionId, code);
+          await signInWithCustomToken(auth, customToken);
+          setStep('newpwd');
+        } catch (otpErr: any) {
+          const msg = otpErr instanceof RegistrationActionError ? otpErr.message : 'Code incorrect';
+          setError(msg);
+        } finally {
           setLoading(false);
-          return;
         }
-        await signInWithCustomToken(auth, json.customToken);
-        setStep('newpwd');
-        setLoading(false);
         return;
       }
 
@@ -263,128 +262,140 @@ export default function ForgotPasswordPage() {
     } finally { setLoading(false); }
   };
 
-  const wrapperClass = "min-h-screen bg-gradient-to-br from-green-50 to-emerald-100 flex items-center justify-center p-4";
-  const cardClass = "bg-white rounded-3xl shadow-xl w-full max-w-sm p-8";
-
   // ── Succès ──────────────────────────────────────────
   if (step === 'success') return (
-    <div className={wrapperClass}>
-      <div className={`${cardClass} text-center`}>
-        <div className="inline-flex items-center justify-center w-16 h-16 bg-green-100 rounded-full mb-4">
-          <CheckCircle size={36} className="text-green-600" />
+    <div className="min-h-screen" style={{ background: '#F7F0E2' }}>
+      <AuthHero variant="bloom" title="Nouveau mot de passe" subtitle="Votre accès est prêt, comme une graine qui vient de lever" compact />
+      <AuthSheet>
+        <div className="text-center">
+          <Link
+            href="/auth/login"
+            className="mt-2 block w-full rounded-xl py-3.5 text-center text-[0.95rem] font-semibold text-[#F7F0E2] transition"
+            style={{ background: '#C6572A' }}
+          >
+            Se connecter
+          </Link>
         </div>
-        <h2 className="text-xl font-bold text-gray-800 mb-2">Mot de passe mis à jour</h2>
-        <p className="text-sm text-gray-500 mb-6">Vous pouvez maintenant vous connecter</p>
-        <Link href="/auth/login" className="block w-full text-center bg-green-600 hover:bg-green-700 text-white font-semibold py-3 rounded-xl transition">
-          Se connecter
-        </Link>
-      </div>
+      </AuthSheet>
     </div>
   );
 
   // ── Nouveau mot de passe ──────────────────────────
   if (step === 'newpwd') return (
-    <div className={wrapperClass}>
-      <div className={cardClass}>
-        <div className="text-center mb-6">
-          <div className="inline-flex items-center justify-center w-14 h-14 bg-green-100 rounded-full mb-3">
-            <Lock size={24} className="text-green-600" />
-          </div>
-          <h2 className="text-xl font-bold text-gray-800">Nouveau mot de passe</h2>
+    <div className="min-h-screen" style={{ background: '#F7F0E2' }}>
+      <AuthHero variant="sprout" title="Nouveau mot de passe" subtitle="Choisissez-en un que vous seul connaissez" compact />
+      <AuthSheet>
+        {error && <AuthErrorBanner>{error}</AuthErrorBanner>}
+        <div className="space-y-5">
+          <LineField
+            label="Nouveau mot de passe"
+            icon={
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <rect x="3" y="11" width="18" height="11" rx="2" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" strokeLinecap="round" />
+              </svg>
+            }
+            type={showPwd ? 'text' : 'password'}
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+            placeholder="••••••••"
+            trailing={
+              <button type="button" onClick={() => setShowPwd(!showPwd)} style={{ color: '#14172E80' }}>
+                {showPwd ? <EyeOff size={17} /> : <Eye size={17} />}
+              </button>
+            }
+          />
+          <LineField
+            label="Confirmer le mot de passe"
+            icon={
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <path d="M20 6L9 17l-5-5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            }
+            type={showPwd ? 'text' : 'password'}
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+            placeholder="••••••••"
+          />
         </div>
-        {error && <div className="bg-red-50 text-red-600 p-3 rounded-xl text-sm mb-4">{error}</div>}
-        <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-1">Nouveau mot de passe</label>
-          <div className="relative">
-            <input type={showPwd ? 'text' : 'password'} value={newPassword} onChange={e => setNewPassword(e.target.value)}
-              placeholder="••••••••" className="w-full border border-gray-200 rounded-xl px-4 py-3 outline-none focus:border-green-500 pr-11" />
-            <button type="button" onClick={() => setShowPwd(!showPwd)} className="absolute right-3 top-3 text-gray-400">
-              {showPwd ? <EyeOff size={18} /> : <Eye size={18} />}
-            </button>
-          </div>
+        <div className="mt-7">
+          <PrimaryButton onClick={handleNewPassword} disabled={loading}>
+            {loading ? 'Mise à jour…' : 'Mettre à jour'}
+          </PrimaryButton>
         </div>
-        <div className="mb-5">
-          <label className="block text-sm font-medium text-gray-700 mb-1">Confirmer</label>
-          <input type={showPwd ? 'text' : 'password'} value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)}
-            placeholder="••••••••" className="w-full border border-gray-200 rounded-xl px-4 py-3 outline-none focus:border-green-500" />
-        </div>
-        <button onClick={handleNewPassword} disabled={loading}
-          className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 rounded-xl transition disabled:opacity-50">
-          {loading ? 'Mise à jour...' : 'Mettre à jour'}
-        </button>
-      </div>
+      </AuthSheet>
     </div>
   );
 
   // ── OTP ───────────────────────────────────────────
   if (step === 'otp') return (
-    <div className={wrapperClass}>
+    <div className="min-h-screen" style={{ background: '#F7F0E2' }}>
       <div id="recaptcha-container" />
-      <div className={cardClass}>
-        <button onClick={() => { setStep('phone'); setOtp(['','','','','','']); setError(''); }}
-          className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 mb-6">
-          <ArrowLeft size={16} /> Retour
-        </button>
-        <div className="text-center mb-6">
-          <div className="inline-flex items-center justify-center w-14 h-14 bg-green-100 rounded-full mb-3">
-            <MessageSquare size={24} className="text-green-600" />
-          </div>
-          <h2 className="text-xl font-bold text-gray-800">Code SMS</h2>
-          <p className="text-sm text-gray-500 mt-1">Envoyé au <span className="font-semibold">{toE164(phone)}</span></p>
+      <AuthHero variant="signal" title="Un code en chemin" subtitle={`Envoyé par SMS au ${toE164(phone)}`} compact />
+      <AuthSheet>
+        <BackRow onClick={() => { setStep('phone'); setOtp(['', '', '', '', '', '']); setError(''); }} />
+
+        {error && <AuthErrorBanner>{error}</AuthErrorBanner>}
+
+        <OtpCells
+          digits={otp}
+          refs={otpRefs}
+          onChange={handleOtpChange}
+          onKeyDown={handleOtpKeyDown}
+          onPaste={handleOtpPaste}
+        />
+
+        <PrimaryButton onClick={verifyOTP} disabled={loading || otp.join('').length < 6}>
+          {loading ? 'Vérification…' : 'Confirmer'}
+        </PrimaryButton>
+
+        <div className="mt-4 text-center">
+          {resendCooldown > 0 ? (
+            <p className="text-sm" style={{ color: '#14172E66' }}>
+              Renvoyer dans <span className="font-semibold">{resendCooldown}s</span>
+            </p>
+          ) : (
+            <button onClick={sendOTP} disabled={loading} className="text-sm font-medium" style={{ color: '#C6572A' }}>
+              Renvoyer
+            </button>
+          )}
         </div>
-        {error && <div className="bg-red-50 text-red-600 p-3 rounded-xl text-sm mb-4">{error}</div>}
-        <div className="flex justify-center gap-2 mb-6" onPaste={handleOtpPaste}>
-          {otp.map((digit, i) => (
-            <input key={i} ref={el => { otpRefs.current[i] = el; }}
-              type="text" inputMode="numeric" maxLength={1} value={digit}
-              onChange={e => handleOtpChange(i, e.target.value)}
-              onKeyDown={e => handleOtpKeyDown(i, e)}
-              className={`w-11 text-center text-xl font-bold border-2 rounded-xl outline-none transition-all py-3 ${digit ? 'border-green-500 bg-green-50 text-green-700' : 'border-gray-200 focus:border-green-400'}`}
-            />
-          ))}
-        </div>
-        <button onClick={verifyOTP} disabled={loading || otp.join('').length < 6}
-          className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 rounded-xl transition disabled:opacity-50 mb-3">
-          {loading ? 'Vérification...' : 'Confirmer'}
-        </button>
-        <div className="text-center">
-          {resendCooldown > 0
-            ? <p className="text-sm text-gray-400">Renvoyer dans <span className="font-semibold">{resendCooldown}s</span></p>
-            : <button onClick={sendOTP} disabled={loading} className="text-sm text-green-600 hover:text-green-700 font-medium">Renvoyer</button>
-          }
-        </div>
-      </div>
+      </AuthSheet>
     </div>
   );
 
   // ── Saisie numéro ─────────────────────────────────
   return (
-    <div className={wrapperClass}>
+    <div className="min-h-screen" style={{ background: '#F7F0E2' }}>
       <div id="recaptcha-container" />
-      <div className={cardClass}>
-        <div className="text-center mb-8">
-          <span className="text-5xl">🔑</span>
-          <h1 className="text-2xl font-bold text-gray-900 mt-3">Mot de passe oublié</h1>
-          <p className="text-gray-500 text-sm mt-1">Entrez votre numéro pour recevoir un SMS</p>
+      <AuthHero variant="welcome" title="Mot de passe oublié" subtitle="Entrez votre numéro pour recevoir un code par SMS" />
+      <AuthSheet>
+        {error && <AuthErrorBanner>{error}</AuthErrorBanner>}
+
+        <LineField
+          label="Numéro de téléphone"
+          icon={
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+              <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          }
+          prefix="+221"
+          type="tel"
+          value={phone}
+          onChange={(e) => setPhone(e.target.value)}
+          placeholder="77 000 00 00"
+        />
+
+        <div className="mt-7">
+          <PrimaryButton onClick={sendOTP} disabled={loading}>
+            {loading ? 'Envoi…' : 'Envoyer le code SMS'}
+          </PrimaryButton>
         </div>
-        {error && <div className="mb-4 bg-red-50 text-red-700 text-sm px-4 py-3 rounded-xl border border-red-200">{error}</div>}
-        <div className="mb-5">
-          <label className="block text-sm font-medium text-gray-700 mb-1">Numéro de téléphone</label>
-          <div className="flex items-center border border-gray-200 rounded-xl overflow-hidden focus-within:border-green-500 focus-within:ring-2 focus-within:ring-green-100">
-            <span className="px-3 text-xs font-semibold text-gray-500 bg-gray-50 border-r border-gray-200 py-3">+221</span>
-            <input type="tel" value={phone} onChange={e => setPhone(e.target.value)}
-              placeholder="77 000 00 00" className="flex-1 px-3 py-3 outline-none text-sm" />
-          </div>
-        </div>
-        <button onClick={sendOTP} disabled={loading}
-          className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 rounded-xl transition disabled:opacity-60 flex items-center justify-center gap-2">
-          <MessageSquare size={16} />
-          {loading ? 'Envoi...' : 'Envoyer le code SMS'}
-        </button>
-        <p className="text-center text-sm text-gray-500 mt-6">
-          <Link href="/auth/login" className="text-green-600 font-semibold hover:text-green-700">← Retour à la connexion</Link>
+
+        <p className="mt-6 text-center text-sm" style={{ color: '#14172E99' }}>
+          <AuthLink href="/auth/login">← Retour à la connexion</AuthLink>
         </p>
-      </div>
+      </AuthSheet>
     </div>
   );
 }

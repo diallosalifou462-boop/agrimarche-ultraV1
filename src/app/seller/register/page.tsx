@@ -149,15 +149,16 @@ export default function SellerRegisterPage() {
       // ⚠️ FIX : `email` n'est plus inclus dans une mise à jour (doc déjà
       // existant). Les règles Firestore interdisent à un update() de
       // changer ce champ (doesNotChange(['uid','email','createdAt'])).
-      // Pour les comptes Free/Yas/Expresso (créés via /api/otp/verify,
-      // sans email attaché à l'objet Firebase Auth avant leur premier
-      // signIn), auth.currentUser.email vaut `null` côté client alors que
-      // le document Firestore a déjà `email: "<tel>@agrimarche.sn"` —
-      // envoyer `email: user.email` écrasait ce champ par null et violait
-      // la règle → "permission-denied" sur CE formulaire. En omettant la
-      // clé lors d'un update (merge:true), on ne touche pas au champ
-      // existant et la règle passe. On ne l'envoie qu'à la création,
-      // où il est requis par hasFields(['email','createdAt','role']).
+      // Pour les comptes Free/Yas/Expresso (créés via registrationVerify,
+      // functions/src/registration.ts), l'email synthétique est fixé
+      // côté serveur (Admin SDK) au moment de la création — mais selon
+      // le moment exact du premier chargement, auth.currentUser.email
+      // peut encore valoir `null` côté client avant un premier
+      // rafraîchissement du token. Envoyer `email: user.email` écraserait
+      // alors ce champ par null et violerait la règle → "permission-denied"
+      // sur CE formulaire. En omettant la clé lors d'un update (merge:true),
+      // on ne touche pas au champ existant et la règle passe. On ne l'envoie
+      // qu'à la création, où il est requis par hasFields(['email','createdAt','role']).
       const dataToSave: {
         displayName: string;
         phone: string;

@@ -23,6 +23,12 @@ import { onSchedule } from 'firebase-functions/v2/scheduler';
 import * as admin from 'firebase-admin';
 import { Resend } from 'resend';
 import { extractKeywords } from './normalizeKeyword';
+import { purgeOldRateLimitDocs } from './rateLimit';
+import { purgeOldRegistrationSessions } from './registration';
+import { purgeExpiredPhoneReservations } from './phoneUniqueness';
+import { purgeOldFraudWindows } from './fraud';
+import { purgeOldLoginOtpSessions } from './loginOtp';
+import { purgeOldPasswordResetSessions } from './passwordReset';
 
 // Échappement HTML minimal — le corps d'un email de la queue peut contenir
 // du texte dérivé d'une saisie utilisateur (nom de produit, message...).
@@ -89,6 +95,21 @@ export {
   claimGuestOrderSession,
   startGuestCheckoutSession,
 } from './deliveryCode';
+
+// ============================================================
+//   INSCRIPTION — Expresso/Tigo (push-first, fallback InfoBip
+//   uniquement en l'absence de token push) + Orange (Firebase
+//   Phone Auth). Unicité du numéro garantie côté backend dans les
+//   deux cas via phoneUniqueness.ts (collection partagée
+//   `phoneIndex`). Voir registration.ts et orangeRegistration.ts
+//   pour le détail du parcours.
+// ============================================================
+export { registrationStart, registrationResend, registrationVerify } from './registration';
+export { completeOrangeRegistration } from './orangeRegistration';
+export { loginSendOtp, loginVerifyOtp } from './loginOtp';
+export { resetPasswordSendOtp, resetPasswordVerifyOtp } from './passwordReset';
+// Alerting automatique (taux d'échec anormal) + endpoint dashboard admin.
+export { checkRegistrationHealth, getRegistrationMetrics } from './monitoring';
 
 export const processEmailQueue = functions.firestore.onDocumentCreated(
   {
@@ -1536,5 +1557,52 @@ export const cleanupProcessedEvents = onSchedule(
     snap.docs.forEach((d) => batch.delete(d.ref));
     await batch.commit();
     console.log(`🧹 ${snap.size} entrée(s) d'idempotence purgée(s).`);
+  }
+);
+
+// Purge quotidienne des compteurs anti-abus d'inscription
+// (rateLimits/*) — même logique que ci-dessus, collection distincte.
+export const cleanupRegistrationRateLimits = onSchedule(
+  { schedule: 'every day 04:15', region: 'us-central1', timeZone: 'Africa/Dakar', timeoutSeconds: 300 },
+  async () => {
+    const purged = await purgeOldRateLimitDocs(3 * 24 * 60 * 60 * 1000);
+    if (purged > 0) console.log(`🧹 ${purged} entrée(s) de rate-limiting d'inscription purgée(s).`);
+  }
+);
+
+// ⚠️ AJOUT (revue de code) : registrationSessions, phoneIndex (réservations
+// abandonnées) et les fenêtres anti-fraude (_fraudIpWindow/_fraudTokenWindow)
+// n'avaient jusqu'ici AUCUN nettoyage — seuls rateLimits et
+// _processedNotificationEvents étaient purgés. Ces trois collections
+// grossissaient donc indéfiniment. Un seul job planifié couvre les trois,
+// par lots de 400 comme les jobs existants (marge sous la limite de 500
+// écritures par batch Firestore) ; rétention de 7 jours pour les sessions
+// (l'historique nominatif utile reste dans registrationAuditLog, jamais
+// purgé), 3 jours pour les réservations abandonnées et les fenêtres
+// anti-fraude (cohérent avec cleanupRegistrationRateLimits ci-dessus).
+// Couvre aussi loginOtpSessions et passwordResetSessions (même rétention
+// de 3 jours, mêmes raisons que les fenêtres anti-fraude) — absents du
+// commentaire d'origine mais bien purgés ci-dessous (⚠️ correctif apporté
+// ici au passage : le Promise.all d'origine ne déstructurait que 3
+// résultats sur 5, les compteurs purgés de loginOtpSessions/
+// passwordResetSessions n'étaient donc jamais journalisés, alors que la
+// purge elle-même s'exécutait bien).
+export const cleanupRegistrationLeftovers = onSchedule(
+  { schedule: 'every day 04:30', region: 'us-central1', timeZone: 'Africa/Dakar', timeoutSeconds: 300 },
+  async () => {
+    const [sessions, reservations, fraudWindows, loginOtpSessions, passwordResetSessions] = await Promise.all([
+      purgeOldRegistrationSessions(7 * 24 * 60 * 60 * 1000),
+      purgeExpiredPhoneReservations(3 * 24 * 60 * 60 * 1000),
+      purgeOldFraudWindows(3 * 24 * 60 * 60 * 1000),
+      purgeOldLoginOtpSessions(3 * 24 * 60 * 60 * 1000),
+      purgeOldPasswordResetSessions(3 * 24 * 60 * 60 * 1000),
+    ]);
+    if (sessions > 0) console.log(`🧹 ${sessions} session(s) d'inscription terminée(s) purgée(s).`);
+    if (reservations > 0) console.log(`🧹 ${reservations} réservation(s) de numéro abandonnée(s) purgée(s).`);
+    if (fraudWindows.ip + fraudWindows.token > 0) {
+      console.log(`🧹 ${fraudWindows.ip} fenêtre(s) IP + ${fraudWindows.token} fenêtre(s) token anti-fraude purgée(s).`);
+    }
+    if (loginOtpSessions > 0) console.log(`🧹 ${loginOtpSessions} session(s) OTP de connexion purgée(s).`);
+    if (passwordResetSessions > 0) console.log(`🧹 ${passwordResetSessions} session(s) de réinitialisation purgée(s).`);
   }
 );

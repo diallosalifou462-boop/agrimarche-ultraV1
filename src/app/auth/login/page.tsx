@@ -1,6 +1,5 @@
 'use client';
 
-import Image from 'next/image';
 import { useState, useEffect, useRef, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
@@ -11,12 +10,14 @@ import {
   signInWithCustomToken,
   ConfirmationResult,
   signInWithEmailAndPassword,
+  signOut,
 } from 'firebase/auth';
 import { auth } from '@/lib/firebase/firebase';
 import { Capacitor } from '@capacitor/core';
 import { detectCarrier } from '@/lib/carrier';
-import { apiUrl } from '@/lib/api-config';
-import { logOtpAttempt } from '@/lib/otpDiagnostics';
+import { loginSendOtp, loginVerifyOtp, RegistrationActionError } from '@/lib/registrationActions';
+import { AuthHero } from '../_shared/AuthHero';
+import { AuthSheet, AuthErrorBanner, LineField, PrimaryButton, AuthLink, BackRow, OtpCells } from '../_shared/AuthFormKit';
 
 // ─── Attend que le pont natif Capacitor soit prêt ─────
 async function waitForNativeBridge(timeoutMs = 1500): Promise<boolean> {
@@ -28,7 +29,7 @@ async function waitForNativeBridge(timeoutMs = 1500): Promise<boolean> {
   return Capacitor.isNativePlatform();
 }
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
-import { Phone, Lock, Eye, EyeOff, MessageSquare, ArrowLeft } from 'lucide-react';
+import { Eye, EyeOff } from 'lucide-react';
 
 // ─── Helpers ─────────────────────────────────────────────
 function toE164(phone: string): string {
@@ -71,10 +72,24 @@ function LoginContent() {
   const otpRefs = useRef<(HTMLInputElement | null)[]>([]);
   const [confirmResult, setConfirmResult] = useState<ConfirmationResult | null>(null);
   const [verificationId, setVerificationId] = useState<string | null>(null);
+  // sessionId renvoyé par loginSendOtp (loginOtp.ts) — Free/Yas et
+  // Expresso uniquement ; à transmettre tel quel à loginVerifyOtp.
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const recaptchaRef = useRef<RecaptchaVerifier | null>(null);
   const [resendCooldown, setResendCooldown] = useState(0);
   const isNativeRef = useRef(false);
   const useCustomOtpRef = useRef(false);
+  // ⚠️ SÉCURITÉ 2FA : signInWithEmailAndPassword() (étape 1, plus bas)
+  // ouvre une VRAIE session Firebase persistée (browserLocalPersistence,
+  // voir lib/firebase/firebase.ts) AVANT que l'OTP (étape 2) soit vérifié.
+  // Sans ce garde-fou, le useEffect de redirection ci-dessous — qui ne
+  // réagit qu'à `user` — se déclenche dès que le mot de passe est validé,
+  // et envoie l'utilisateur directement dans l'app sans jamais lui
+  // demander le code SMS : la 2ᵉ étape devient facultative en pratique.
+  // Ce ref reste `true` entre la validation du mot de passe et la
+  // validation de l'OTP ; le useEffect ignore tout changement de `user`
+  // tant qu'il est à `true`.
+  const otpPendingRef = useRef(false);
 
   // UI
   const [loading, setLoading] = useState(false);
@@ -94,6 +109,10 @@ function LoginContent() {
 
   useEffect(() => {
     if (!mounted || authLoading || !user) return;
+    // Voir le commentaire sur otpPendingRef plus haut : ne jamais rediriger
+    // sur une session ouverte par la seule étape 1 (mot de passe), qui
+    // n'a pas encore passé l'OTP.
+    if (otpPendingRef.current) return;
     router.replace(getRedirectPath(profile?.role));
   }, [user, profile, authLoading, mounted, router]);
 
@@ -135,6 +154,7 @@ function LoginContent() {
     const completedSub = FirebaseAuthentication.addListener('phoneVerificationCompleted', async (event) => {
       try {
         if (event.verificationCode) setOtp(event.verificationCode.split(''));
+        otpPendingRef.current = false; // auto-vérif Android = 2FA complète
         router.replace(searchParams.get('redirect') || '/main/products');
       } catch {
         // L'utilisateur pourra toujours saisir/valider le code manuellement
@@ -168,6 +188,9 @@ function LoginContent() {
       // Vérifie le mot de passe via email synthétique
       const email = toSyntheticEmail(phone);
       await signInWithEmailAndPassword(auth, email, password);
+      // Session mot de passe ouverte, OTP pas encore validé : voir
+      // otpPendingRef plus haut.
+      otpPendingRef.current = true;
 
       // Mot de passe OK → envoie l'OTP
       const phoneE164 = toE164(phone);
@@ -175,46 +198,25 @@ function LoginContent() {
       const carrier = detectCarrier(phone);
       if (carrier === 'free' || carrier === 'expresso') {
         useCustomOtpRef.current = true;
-        // Fetch isolé + log automatique (Firestore) : une erreur réseau
-        // (CORS/ATS/DNS/timeout côté iOS) ne doit pas être confondue avec
-        // un vrai rejet du code par le serveur/Infobip — voir même fix sur
-        // auth/register/page.tsx, et otpDiagnostics.ts pour le détail.
-        const fetchStartedAt = Date.now();
-        logOtpAttempt({ flow: 'login', step: 'fetch_start', phoneE164, carrier });
-        let res: Response;
+        // loginSendOtp (loginOtp.ts) : aucun numéro envoyé, le serveur lit
+        // celui de users/{uid} — request.auth est déjà renseigné ici
+        // puisque signInWithEmailAndPassword vient de réussir juste au-dessus.
         try {
-          res = await fetch(apiUrl('/api/otp/send'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phone: phoneE164 }),
-          });
-        } catch (networkErr: any) {
-          const msg = String(networkErr?.message || networkErr);
-          console.error('[DEBUG] /api/otp/send — échec RÉSEAU:', networkErr);
-          logOtpAttempt({
-            flow: 'login', step: 'fetch_network_error', phoneE164, carrier,
-            errorMessage: msg, durationMs: Date.now() - fetchStartedAt,
-          });
-          setError(`Connexion au serveur impossible (réseau). Détail: ${msg}`);
+          const { sessionId: sid } = await loginSendOtp();
+          setSessionId(sid);
+        } catch (otpErr: any) {
+          // L'OTP n'est pas parti : cette tentative de connexion s'arrête
+          // là, sans jamais avoir passé la 2FA. On referme la session
+          // mot de passe plutôt que de la laisser traîner (voir
+          // otpPendingRef) — sinon un simple retour sur l'app plus tard
+          // pourrait être considéré comme connecté sans OTP validé.
+          await signOut(auth).catch(() => {});
+          otpPendingRef.current = false;
+          const msg = otpErr instanceof RegistrationActionError ? otpErr.message : "Erreur lors de l'envoi du code";
+          setError(msg);
           setLoading(false);
           return;
         }
-        const json = await res.json().catch(() => null);
-        if (!res.ok) {
-          console.error('[DEBUG] /api/otp/send — erreur API:', res.status, json);
-          logOtpAttempt({
-            flow: 'login', step: 'fetch_api_error', phoneE164, carrier,
-            httpStatus: res.status, errorMessage: json?.error,
-            durationMs: Date.now() - fetchStartedAt,
-          });
-          setError(json?.error || `Erreur lors de l'envoi du code (HTTP ${res.status})`);
-          setLoading(false);
-          return;
-        }
-        logOtpAttempt({
-          flow: 'login', step: 'fetch_success', phoneE164, carrier,
-          httpStatus: res.status, durationMs: Date.now() - fetchStartedAt,
-        });
         setStep('otp');
         setResendCooldown(60);
         setLoading(false);
@@ -241,6 +243,13 @@ function LoginContent() {
       setResendCooldown(60);
       setLoading(false);
     } catch (err: any) {
+      // Idem qu'au-dessus : si le mot de passe avait été validé mais que
+      // l'envoi du SMS (natif ou web) a ensuite échoué, ne pas laisser une
+      // session non-2FA active.
+      if (otpPendingRef.current) {
+        await signOut(auth).catch(() => {});
+        otpPendingRef.current = false;
+      }
       const code = err?.code;
       if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
         setError('Numéro ou mot de passe incorrect');
@@ -265,42 +274,20 @@ function LoginContent() {
       const carrier = detectCarrier(phone);
       if (carrier === 'free' || carrier === 'expresso') {
         useCustomOtpRef.current = true;
-        const fetchStartedAt = Date.now();
-        logOtpAttempt({ flow: 'resend', step: 'fetch_start', phoneE164, carrier });
-        let res: Response;
+        // Une nouvelle session écrase l'ancienne (nouveau sessionId, ancien
+        // code déjà supprimé côté serveur si vérifié — sinon simplement
+        // remplacé) : on renvoie systématiquement à loginSendOtp() plutôt
+        // qu'à un endpoint /resend dédié, cohérent avec loginOtp.ts qui n'a
+        // volontairement qu'un seul callable d'envoi.
         try {
-          res = await fetch(apiUrl('/api/otp/send'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phone: phoneE164 }),
-          });
-        } catch (networkErr: any) {
-          const msg = String(networkErr?.message || networkErr);
-          console.error('[DEBUG] /api/otp/send (resend) — échec RÉSEAU:', networkErr);
-          logOtpAttempt({
-            flow: 'resend', step: 'fetch_network_error', phoneE164, carrier,
-            errorMessage: msg, durationMs: Date.now() - fetchStartedAt,
-          });
-          setError(`Connexion au serveur impossible (réseau). Détail: ${msg}`);
+          const { sessionId: sid } = await loginSendOtp();
+          setSessionId(sid);
+        } catch (otpErr: any) {
+          const msg = otpErr instanceof RegistrationActionError ? otpErr.message : "Erreur lors de l'envoi du code";
+          setError(msg);
           setLoading(false);
           return;
         }
-        const json = await res.json().catch(() => null);
-        if (!res.ok) {
-          console.error('[DEBUG] /api/otp/send (resend) — erreur API:', res.status, json);
-          logOtpAttempt({
-            flow: 'resend', step: 'fetch_api_error', phoneE164, carrier,
-            httpStatus: res.status, errorMessage: json?.error,
-            durationMs: Date.now() - fetchStartedAt,
-          });
-          setError(json?.error || `Erreur lors de l'envoi du code (HTTP ${res.status})`);
-          setLoading(false);
-          return;
-        }
-        logOtpAttempt({
-          flow: 'resend', step: 'fetch_success', phoneE164, carrier,
-          httpStatus: res.status, durationMs: Date.now() - fetchStartedAt,
-        });
         setResendCooldown(60);
         setLoading(false);
         return;
@@ -353,20 +340,19 @@ function LoginContent() {
     setError('');
     try {
       if (useCustomOtpRef.current) {
-        const phoneE164 = toE164(phone);
-        const res = await fetch(apiUrl('/api/otp/verify'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phone: phoneE164, code }),
-        });
-        const json = await res.json();
-        if (!res.ok) {
-          setError(json.error || 'Code incorrect');
+        if (!sessionId) { setError('Session expirée, renvoyez le code'); setLoading(false); return; }
+        try {
+          const { customToken } = await loginVerifyOtp(sessionId, code);
+          await signInWithCustomToken(auth, customToken);
+          // 2FA complète : la vraie session (post-OTP) remplace la session
+          // mot de passe intermédiaire, le garde-fou n'a plus lieu d'être.
+          otpPendingRef.current = false;
+          router.replace(redirect);
+        } catch (otpErr: any) {
+          const msg = otpErr instanceof RegistrationActionError ? otpErr.message : 'Code incorrect';
+          setError(msg);
           setLoading(false);
-          return;
         }
-        await signInWithCustomToken(auth, json.customToken);
-        router.replace(redirect);
         return;
       }
 
@@ -377,6 +363,8 @@ function LoginContent() {
         if (!confirmResult) { setError('Session expirée, renvoyez le code'); setLoading(false); return; }
         await confirmResult.confirm(code);
       }
+      // 2FA complète (voir note équivalente ci-dessus).
+      otpPendingRef.current = false;
       // Firebase est déjà connecté via Phone Auth,
       // le useEffect va déclencher la redirection
       router.replace(redirect);
@@ -398,67 +386,45 @@ function LoginContent() {
   // ═══════════════════════════════════════════════════
   if (step === 'otp') {
     return (
-      <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
+      <div className="min-h-screen" style={{ background: '#F7F0E2' }}>
         <div id="recaptcha-container" />
-        <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-sm">
-          <button
-            onClick={() => { setStep('form'); setOtp(['','','','','','']); setError(''); }}
-            className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 mb-6"
-          >
-            <ArrowLeft size={16} /> Retour
-          </button>
+        <AuthHero variant="signal" title="Un code en chemin" subtitle={`Envoyé par SMS au ${toE164(phone)}`} compact />
+        <AuthSheet>
+          <BackRow onClick={() => {
+            // Abandon de la 2FA en cours de route : on referme la session
+            // mot de passe intermédiaire plutôt que de la laisser vivante
+            // sans OTP validé (voir otpPendingRef).
+            signOut(auth).catch(() => {});
+            otpPendingRef.current = false;
+            setStep('form'); setOtp(['', '', '', '', '', '']); setError('');
+          }} />
 
-          <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center w-14 h-14 bg-green-100 rounded-full mb-3">
-              <MessageSquare size={26} className="text-green-600" />
-            </div>
-            <h2 className="text-xl font-bold text-gray-800">Code SMS</h2>
-            <p className="text-sm text-gray-500 mt-1">
-              Envoyé au <span className="font-semibold">{toE164(phone)}</span>
-            </p>
-          </div>
+          {error && <AuthErrorBanner>{error}</AuthErrorBanner>}
 
-          {error && (
-            <div className="bg-red-100 text-red-700 p-3 rounded-xl text-sm mb-4">{error}</div>
-          )}
+          <OtpCells
+            digits={otp}
+            refs={otpRefs}
+            onChange={handleOtpChange}
+            onKeyDown={handleOtpKeyDown}
+            onPaste={handleOtpPaste}
+          />
 
-          {/* 6 cases OTP */}
-          <div className="flex justify-center gap-2 mb-6" onPaste={handleOtpPaste}>
-            {otp.map((digit, i) => (
-              <input
-                key={i}
-                ref={el => { otpRefs.current[i] = el; }}
-                type="text"
-                inputMode="numeric"
-                maxLength={1}
-                value={digit}
-                onChange={e => handleOtpChange(i, e.target.value)}
-                onKeyDown={e => handleOtpKeyDown(i, e)}
-                className={`w-11 h-13 text-center text-xl font-bold border-2 rounded-xl outline-none transition-all py-3 ${
-                  digit ? 'border-green-500 bg-green-50 text-green-700' : 'border-gray-200 focus:border-green-400'
-                }`}
-              />
-            ))}
-          </div>
+          <PrimaryButton onClick={handleVerifyOTP} disabled={loading || otp.join('').length < 6}>
+            {loading ? 'Vérification…' : 'Se connecter'}
+          </PrimaryButton>
 
-          <button
-            onClick={handleVerifyOTP}
-            disabled={loading || otp.join('').length < 6}
-            className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 rounded-xl transition disabled:opacity-50 mb-3"
-          >
-            {loading ? 'Vérification...' : 'Se connecter'}
-          </button>
-
-          <div className="text-center">
+          <div className="mt-4 text-center">
             {resendCooldown > 0 ? (
-              <p className="text-sm text-gray-400">Renvoyer dans <span className="font-semibold">{resendCooldown}s</span></p>
+              <p className="text-sm" style={{ color: '#14172E66' }}>
+                Renvoyer dans <span className="font-semibold">{resendCooldown}s</span>
+              </p>
             ) : (
-              <button onClick={resendOTP} disabled={loading} className="text-sm text-green-600 hover:text-green-700 font-medium">
+              <button onClick={resendOTP} disabled={loading} className="text-sm font-medium" style={{ color: '#C6572A' }}>
                 Renvoyer le code
               </button>
             )}
           </div>
-        </div>
+        </AuthSheet>
       </div>
     );
   }
@@ -467,77 +433,60 @@ function LoginContent() {
   // FORMULAIRE PRINCIPAL (numéro + mot de passe)
   // ═══════════════════════════════════════════════════
   return (
-    <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
+    <div className="min-h-screen" style={{ background: '#F7F0E2' }}>
       <div id="recaptcha-container" />
-      <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-sm">
-        <div className="text-center mb-6">
-          <div className="inline-flex items-center justify-center w-24 h-24 rounded-full bg-white shadow-lg ring-4 ring-green-100 mb-3 overflow-hidden">
-            <Image src="/logo.png" alt="AgriMarché" width={96} height={96} className="w-full h-full object-cover rounded-full" />
-          </div>
-          <h1 className="text-2xl font-bold mt-3">Bienvenue sur AgriMarché</h1>
-          <p className="text-sm text-gray-500 mt-1">Connexion sécurisée par SMS</p>
+      <AuthHero variant="welcome" title="Bienvenue au marché" subtitle="Connexion sécurisée par SMS, à votre numéro" />
+      <AuthSheet>
+        {error && <AuthErrorBanner>{error}</AuthErrorBanner>}
+
+        <div className="space-y-5">
+          <LineField
+            label="Numéro de téléphone"
+            icon={
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            }
+            prefix="+221"
+            type="tel"
+            placeholder="77 000 00 00"
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+          />
+
+          <LineField
+            label="Mot de passe"
+            icon={
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <rect x="3" y="11" width="18" height="11" rx="2" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" strokeLinecap="round" />
+              </svg>
+            }
+            type={showPwd ? 'text' : 'password'}
+            placeholder="••••••••"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            trailing={
+              <button type="button" onClick={() => setShowPwd(!showPwd)} style={{ color: '#14172E80' }}>
+                {showPwd ? <EyeOff size={17} /> : <Eye size={17} />}
+              </button>
+            }
+          />
         </div>
 
-        {/* SMS badge */}
-        <div className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-xl px-3 py-2 mb-4">
-          <MessageSquare size={13} className="text-green-600 flex-shrink-0" />
-          <p className="text-xs text-green-700">Un code SMS vous sera envoyé pour confirmer</p>
+        <div className="mt-7">
+          <PrimaryButton onClick={handlePhoneLogin} disabled={loading}>
+            {loading ? 'Envoi du SMS…' : 'Se connecter'}
+          </PrimaryButton>
         </div>
 
-        {error && (
-          <div className="bg-red-100 text-red-700 p-3 rounded mb-4 text-sm">{error}</div>
-        )}
-
-        {/* TÉLÉPHONE */}
-        <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-1">Numéro de téléphone</label>
-          <div className="relative flex items-center border border-gray-200 rounded-xl overflow-hidden focus-within:border-green-500 focus-within:ring-2 focus-within:ring-green-100">
-            <span className="px-3 text-xs font-semibold text-gray-500 bg-gray-50 border-r border-gray-200 py-3 whitespace-nowrap">+221</span>
-            <input
-              type="tel"
-              placeholder="77 000 00 00"
-              value={phone}
-              onChange={e => setPhone(e.target.value)}
-              className="flex-1 px-3 py-3 outline-none text-sm"
-            />
-          </div>
-        </div>
-
-        {/* MOT DE PASSE */}
-        <div className="mb-5">
-          <label className="block text-sm font-medium text-gray-700 mb-1">Mot de passe</label>
-          <div className="relative">
-            <input
-              type={showPwd ? 'text' : 'password'}
-              placeholder="••••••••"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              className="w-full border border-gray-200 rounded-xl px-4 py-3 outline-none focus:border-green-500 focus:ring-2 focus:ring-green-100 pr-12"
-            />
-            <button type="button" onClick={() => setShowPwd(!showPwd)} className="absolute right-3 top-3 text-gray-400">
-              {showPwd ? <EyeOff size={18} /> : <Eye size={18} />}
-            </button>
-          </div>
-        </div>
-
-        <button
-          onClick={handlePhoneLogin}
-          disabled={loading}
-          className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 rounded-xl transition disabled:opacity-50 flex items-center justify-center gap-2"
-        >
-          <MessageSquare size={16} />
-          {loading ? 'Envoi du SMS...' : 'Se connecter'}
-        </button>
-
-        <p className="text-center mt-5 text-sm">
-          Pas encore de compte ?{' '}
-          <Link href="/auth/register" className="text-green-600 font-semibold">S'inscrire</Link>
+        <p className="mt-6 text-center text-sm" style={{ color: '#14172E99' }}>
+          Pas encore de compte ? <AuthLink href="/auth/register">S'inscrire</AuthLink>
         </p>
-
-        <p className="text-center mt-2 text-xs text-gray-400">
-          <Link href="/auth/forgot-password" className="hover:text-green-600">Mot de passe oublié ?</Link>
+        <p className="mt-2 text-center text-xs" style={{ color: '#14172E66' }}>
+          <Link href="/auth/forgot-password" className="hover:underline">Mot de passe oublié ?</Link>
         </p>
-      </div>
+      </AuthSheet>
     </div>
   );
 }
