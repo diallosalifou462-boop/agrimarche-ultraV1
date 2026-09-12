@@ -1,6 +1,7 @@
 'use client';
 
 import { ReactNode, InputHTMLAttributes, KeyboardEvent, ClipboardEvent } from 'react';
+import Link from 'next/link';
 import { uiFont } from './fonts';
 import { authPalette } from './AuthHero';
 
@@ -86,11 +87,19 @@ export function PrimaryButton({
   );
 }
 
-export function AuthLink({ children, ...props }: { children: ReactNode } & React.ComponentProps<'a'>) {
+export function AuthLink({ children, href, ...props }: { children: ReactNode; href: string } & Omit<React.ComponentProps<'a'>, 'href'>) {
+  // ⚠️ Sur natif (Capacitor), un <a href="..."> brut déclenche une
+  // navigation "dure" (rechargement complet du document) au lieu d'une
+  // navigation SPA. Le webview sert tout via index.html (le Splash
+  // app/page.tsx) : la route ciblée n'est jamais atteinte, on retombe
+  // sur le Splash qui redirige lui-même (vers /main/products si non
+  // connecté, ou selon le rôle sinon). C'est ce qui causait le "S'inscrire
+  // renvoie vers Main Products", même déconnecté. Link = navigation
+  // client-side, la route est bien montée.
   return (
-    <a {...props} className="font-semibold" style={{ color: authPalette.terracotta }}>
+    <Link href={href} {...props} className="font-semibold" style={{ color: authPalette.terracotta }}>
       {children}
-    </a>
+    </Link>
   );
 }
 
