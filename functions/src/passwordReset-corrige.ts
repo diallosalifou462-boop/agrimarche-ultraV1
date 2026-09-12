@@ -15,7 +15,7 @@
 //   (SDK client, pas ici) — voir app/auth/forgot-password/page.tsx.
 //   Aucun nouveau mot de passe ne transite donc par cette fonction.
 // ============================================================
-import { onCall, HttpsError } from 'firebase-functions/v2/https';
+import { onCall, HttpsError, FunctionsErrorCode } from 'firebase-functions/v2/https';
 import * as admin from 'firebase-admin';
 import { normalizePhoneSN, detectCarrier } from './carrier';
 import { getAccountIdForPhone } from './phoneUniqueness';
@@ -29,7 +29,7 @@ import { localizeError } from './errorMessages';
 const OTP_TTL_MS = 5 * 60 * 1000;
 const MAX_VERIFY_ATTEMPTS = 5;
 
-function throwLocalized(httpsCode: Parameters<typeof HttpsError>[0], techCode: string): never {
+function throwLocalized(httpsCode: FunctionsErrorCode, techCode: string): never {
   throw new HttpsError(httpsCode, techCode, { message: localizeError(techCode) });
 }
 

@@ -25,7 +25,7 @@
 //   et suivre l'erreur ORANGE_USE_FIREBASE_AUTH) et rediriger vers
 //   le parcours Firebase Phone Auth pour Orange.
 // ============================================================
-import { onCall, HttpsError } from 'firebase-functions/v2/https';
+import { onCall, HttpsError, FunctionsErrorCode } from 'firebase-functions/v2/https';
 import * as admin from 'firebase-admin';
 import { normalizePhoneSN, detectCarrier, phoneToSyntheticEmail } from './carrier';
 import { generateOtp, hashOtp, verifyOtpHash } from './otp';
@@ -113,7 +113,7 @@ function clientIp(rawRequest: any): string {
 // Centralise la levée d'erreur : code technique (pour la logique
 // frontend) + message déjà traduit (pour l'affichage direct, sans
 // que le client ait besoin de dupliquer la table de traduction).
-function throwLocalized(httpsCode: Parameters<typeof HttpsError>[0], techCode: string): never {
+function throwLocalized(httpsCode: FunctionsErrorCode, techCode: string): never {
   throw new HttpsError(httpsCode, techCode, { message: localizeError(techCode) });
 }
 
@@ -365,7 +365,7 @@ export const registrationVerify = onCall(
     // Code technique → (statut https, type audit, compteur métrique).
     // Table explicite plutôt que de relire une propriété interne de
     // HttpsError (non garantie stable entre versions du SDK).
-    const VERIFY_ERROR_MAP: Record<string, { https: Parameters<typeof HttpsError>[0]; audit: string; metric: string }> = {
+    const VERIFY_ERROR_MAP: Record<string, { https: FunctionsErrorCode; audit: string; metric: string }> = {
       SESSION_NOT_FOUND: { https: 'not-found', audit: 'verify_failed', metric: 'verify_invalid_code' },
       SESSION_NOT_ACTIVE: { https: 'failed-precondition', audit: 'verify_failed', metric: 'verify_invalid_code' },
       CODE_EXPIRED: { https: 'deadline-exceeded', audit: 'verify_expired', metric: 'verify_expired' },

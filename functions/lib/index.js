@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.cleanupProcessedEvents = exports.notifyDeliveryPhaseChange = exports.checkDeliveryProximity = exports.weeklyInterestDigest = exports.notifyRestockMatch = exports.flushQueuedPersonalizedNotifications = exports.syncProductSearchKeywords = exports.remindUnconfirmedDelivery = exports.notifyNewReview = exports.notifyDelivererClaimed = exports.notifyLowStock = exports.notifyOrderStatusStep = exports.notifyOrderCancelled = exports.notifyNewOrder = exports.notifyNewProduct = exports.onUserTokenSync = exports.processEmailQueue = exports.startGuestCheckoutSession = exports.claimGuestOrderSession = exports.findGuestOrders = exports.getDeliveryCodeAdmin = exports.getDeliveryCode = exports.confirmDeliveryWithCode = exports.claimOrder = exports.submitReview = exports.updateOrderStatus = void 0;
+exports.cleanupRegistrationLeftovers = exports.cleanupRegistrationRateLimits = exports.cleanupProcessedEvents = exports.notifyDeliveryPhaseChange = exports.checkDeliveryProximity = exports.weeklyInterestDigest = exports.notifyRestockMatch = exports.flushQueuedPersonalizedNotifications = exports.syncProductSearchKeywords = exports.remindUnconfirmedDelivery = exports.notifyNewReview = exports.notifyDelivererClaimed = exports.notifyLowStock = exports.notifyOrderStatusStep = exports.notifyOrderCancelled = exports.notifyNewOrder = exports.notifyNewProduct = exports.onUserTokenSync = exports.processEmailQueue = exports.getRegistrationMetrics = exports.checkRegistrationHealth = exports.resetPasswordVerifyOtp = exports.resetPasswordSendOtp = exports.loginVerifyOtp = exports.loginSendOtp = exports.completeOrangeRegistration = exports.registrationVerify = exports.registrationResend = exports.registrationStart = exports.startGuestCheckoutSession = exports.claimGuestOrderSession = exports.findGuestOrders = exports.getDeliveryCodeAdmin = exports.getDeliveryCode = exports.confirmDeliveryWithCode = exports.claimOrder = exports.submitReview = exports.updateOrderStatus = void 0;
 // ============================================================
 //   index.ts — FUSION du système de notifications avancé
 //   (idempotence, tokens FCM en sous-collection, digest hebdo,
@@ -59,6 +59,12 @@ const scheduler_1 = require("firebase-functions/v2/scheduler");
 const admin = __importStar(require("firebase-admin"));
 const resend_1 = require("resend");
 const normalizeKeyword_1 = require("./normalizeKeyword");
+const rateLimit_1 = require("./rateLimit");
+const registration_1 = require("./registration");
+const phoneUniqueness_1 = require("./phoneUniqueness");
+const fraud_1 = require("./fraud");
+const loginOtp_1 = require("./loginOtp");
+const passwordReset_1 = require("./passwordReset");
 // Échappement HTML minimal — le corps d'un email de la queue peut contenir
 // du texte dérivé d'une saisie utilisateur (nom de produit, message...).
 // Sans échappement, ce texte est injecté tel quel dans le HTML de l'email
@@ -122,6 +128,30 @@ Object.defineProperty(exports, "getDeliveryCodeAdmin", { enumerable: true, get: 
 Object.defineProperty(exports, "findGuestOrders", { enumerable: true, get: function () { return deliveryCode_1.findGuestOrders; } });
 Object.defineProperty(exports, "claimGuestOrderSession", { enumerable: true, get: function () { return deliveryCode_1.claimGuestOrderSession; } });
 Object.defineProperty(exports, "startGuestCheckoutSession", { enumerable: true, get: function () { return deliveryCode_1.startGuestCheckoutSession; } });
+// ============================================================
+//   INSCRIPTION — Expresso/Tigo (push-first, fallback InfoBip
+//   uniquement en l'absence de token push) + Orange (Firebase
+//   Phone Auth). Unicité du numéro garantie côté backend dans les
+//   deux cas via phoneUniqueness.ts (collection partagée
+//   `phoneIndex`). Voir registration.ts et orangeRegistration.ts
+//   pour le détail du parcours.
+// ============================================================
+var registration_2 = require("./registration");
+Object.defineProperty(exports, "registrationStart", { enumerable: true, get: function () { return registration_2.registrationStart; } });
+Object.defineProperty(exports, "registrationResend", { enumerable: true, get: function () { return registration_2.registrationResend; } });
+Object.defineProperty(exports, "registrationVerify", { enumerable: true, get: function () { return registration_2.registrationVerify; } });
+var orangeRegistration_1 = require("./orangeRegistration");
+Object.defineProperty(exports, "completeOrangeRegistration", { enumerable: true, get: function () { return orangeRegistration_1.completeOrangeRegistration; } });
+var loginOtp_2 = require("./loginOtp");
+Object.defineProperty(exports, "loginSendOtp", { enumerable: true, get: function () { return loginOtp_2.loginSendOtp; } });
+Object.defineProperty(exports, "loginVerifyOtp", { enumerable: true, get: function () { return loginOtp_2.loginVerifyOtp; } });
+var passwordReset_2 = require("./passwordReset");
+Object.defineProperty(exports, "resetPasswordSendOtp", { enumerable: true, get: function () { return passwordReset_2.resetPasswordSendOtp; } });
+Object.defineProperty(exports, "resetPasswordVerifyOtp", { enumerable: true, get: function () { return passwordReset_2.resetPasswordVerifyOtp; } });
+// Alerting automatique (taux d'échec anormal) + endpoint dashboard admin.
+var monitoring_1 = require("./monitoring");
+Object.defineProperty(exports, "checkRegistrationHealth", { enumerable: true, get: function () { return monitoring_1.checkRegistrationHealth; } });
+Object.defineProperty(exports, "getRegistrationMetrics", { enumerable: true, get: function () { return monitoring_1.getRegistrationMetrics; } });
 exports.processEmailQueue = functions.firestore.onDocumentCreated({
     document: 'email_queue/{docId}',
     secrets: ['RESEND_API_KEY'],
@@ -181,20 +211,7 @@ async function writeNotification(userId, payload) {
         // le panneau admin. Ce fix aligne le schéma d'écriture sur celui
         // utilisé par /api/notifications/send (route client), déjà lu
         // correctement par les deux écrans.
-        await admin.firestore().collection('notifications').add({
-            userId,
-            title: payload.title,
-            body: payload.body,
-            type: payload.type,
-            icon: (_a = payload.icon) !== null && _a !== void 0 ? _a : '🔔',
-            link: (_b = payload.link) !== null && _b !== void 0 ? _b : '/account/orders',
-            deepLink: (_c = payload.link) !== null && _c !== void 0 ? _c : '/account/orders', // conservé pour compat avec le champ lu par la route client
-            priority: (_d = payload.priority) !== null && _d !== void 0 ? _d : 'medium',
-            urgent: (_e = payload.urgent) !== null && _e !== void 0 ? _e : false,
-            data: (_f = payload.data) !== null && _f !== void 0 ? _f : {},
-            read: false,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
+        await admin.firestore().collection('notifications').add(Object.assign(Object.assign({ userId, title: payload.title, body: payload.body, type: payload.type, icon: (_a = payload.icon) !== null && _a !== void 0 ? _a : '🔔', link: (_b = payload.link) !== null && _b !== void 0 ? _b : '/account/orders', deepLink: (_c = payload.link) !== null && _c !== void 0 ? _c : '/account/orders', priority: (_d = payload.priority) !== null && _d !== void 0 ? _d : 'medium', urgent: (_e = payload.urgent) !== null && _e !== void 0 ? _e : false }, (payload.image ? { image: payload.image } : {})), { data: (_f = payload.data) !== null && _f !== void 0 ? _f : {}, read: false, createdAt: admin.firestore.FieldValue.serverTimestamp() }));
     }
     catch (err) {
         console.error(`❌ Erreur écriture notification pour ${userId}:`, err);
@@ -451,6 +468,18 @@ exports.onUserTokenSync = functions.firestore.onDocumentCreated({ document: 'use
         console.error('❌ Erreur abonnement topic:', err);
     }
 });
+// Duplique volontairement src/lib/categoryLink.ts : ce fichier tourne côté
+// Cloud Functions (Node), il ne peut pas importer un module du dossier
+// src/ de l'app Next.js. La logique DOIT rester identique à celle du
+// frontend (src/app/category/page.tsx filtre avec le même slug), sinon la
+// notif mène vers une page catégorie qui affiche "Aucun produit trouvé".
+function categorySlug(category) {
+    return (category || '').toLowerCase().trim().replace(/\s+/g, '-');
+}
+function categoryLink(category) {
+    const slug = categorySlug(category);
+    return slug ? `/category?category=${encodeURIComponent(slug)}` : '/main/products';
+}
 exports.notifyNewProduct = functions.firestore.onDocumentCreated({ document: 'products/{productId}', region: 'us-central1' }, async (event) => {
     var _a, _b, _c;
     const product = (_a = event.data) === null || _a === void 0 ? void 0 : _a.data();
@@ -462,14 +491,96 @@ exports.notifyNewProduct = functions.firestore.onDocumentCreated({ document: 'pr
         ? `${product.price.toLocaleString('fr-FR')} FCFA/${(_b = product.unit) !== null && _b !== void 0 ? _b : 'unité'}`
         : undefined;
     const image = Array.isArray(product.images) ? product.images[0] : undefined;
+    const title = `🌾 Nouveau : ${product.name} !`;
+    const sellerLabel = (_c = product.sellerName) !== null && _c !== void 0 ? _c : 'un producteur local';
+    const body = priceLabel
+        ? `Disponible dès maintenant chez ${sellerLabel}${product.region ? ` (${product.region})` : ''} — ${priceLabel}`
+        : `${product.name} est maintenant disponible sur AgriMarché`;
+    // ⚠️ FIX : pointait vers `/product?id=...` — la fiche de CE seul
+    // produit. Un acheteur qui reçoit "🌾 Nouveau : Bananes !" et tape
+    // sur la notif doit atterrir sur le rayon Fruits en entier (mêmes
+    // bananes, plus tout le reste de la catégorie), pas être enfermé sur
+    // une fiche unique.
+    const link = categoryLink(product.category);
+    // ── 0. Anti-spam en rafale : un vendeur qui publie tout son catalogue
+    //    d'un coup (10-20 produits en quelques secondes) ne doit pas faire
+    //    vibrer le téléphone de chaque acheteur 10-20 fois de suite. On
+    //    garde une notification PAR produit dans l'historique in-app (rien
+    //    n'est perdu — l'acheteur peut tout consulter dans la cloche 🔔),
+    //    mais on ne renvoie un push qui interrompt réellement l'utilisateur
+    //    que si le dernier produit de ce vendeur date d'il y a plus de 3
+    //    minutes. "Fail open" volontaire, même logique qu'alreadyProcessed
+    //    ci-dessus : si cette vérification échoue, on préfère un push en
+    //    trop plutôt qu'aucun.
+    const BURST_WINDOW_MS = 3 * 60 * 1000;
+    let skipPush = false;
+    if (product.sellerId) {
+        try {
+            const throttleRef = admin.firestore().collection('_sellerNewProductThrottle').doc(product.sellerId);
+            await admin.firestore().runTransaction(async (tx) => {
+                var _a, _b, _c, _d;
+                const snap = await tx.get(throttleRef);
+                const lastAt = snap.exists ? ((_d = (_c = (_b = (_a = snap.data()) === null || _a === void 0 ? void 0 : _a.lastPushAt) === null || _b === void 0 ? void 0 : _b.toMillis) === null || _c === void 0 ? void 0 : _c.call(_b)) !== null && _d !== void 0 ? _d : 0) : 0;
+                skipPush = Date.now() - lastAt < BURST_WINDOW_MS;
+                if (!skipPush) {
+                    tx.set(throttleRef, { lastPushAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+                }
+            });
+        }
+        catch (err) {
+            console.error('❌ Erreur vérification anti-spam nouveau produit:', err);
+        }
+    }
+    // ── 1. Push instantané, par topic (efficace à grande échelle : un seul
+    //    appel FCM touche tous les acheteurs abonnés, sans lire leurs
+    //    tokens un par un — voir onUserTokenSync ci-dessus). Sauté en cas
+    //    de rafale (voir étape 0), l'écriture in-app ci-dessous a lieu
+    //    dans tous les cas. ─────────────────────────────────────────────
+    if (!skipPush) {
+        try {
+            await admin.messaging().send(Object.assign({ topic: 'buyers', notification: Object.assign({ title, body }, (image ? { imageUrl: image } : {})), data: { type: 'new_product', productId: event.params.productId, link } }, buildPushConfig({ imageUrl: image })));
+            console.log(`📣 Push "nouveau produit" envoyé pour ${product.name}`);
+        }
+        catch (err) {
+            console.error('❌ Erreur push nouveau produit:', err);
+        }
+    }
+    else {
+        console.log(`⏭️ Push "nouveau produit" sauté (rafale du vendeur) pour ${product.name} — conservé dans l'historique in-app`);
+    }
+    // ── 2. Historique in-app (cloche de notifications), avec la photo.
+    //    ⚠️ FIX : avant cette conversation, un nouveau produit déclenchait
+    //    DEUX envois séparés — ce trigger (push topic uniquement, pas
+    //    d'historique) ET un notifyAllUsers() côté client dans
+    //    seller/products/add/page.tsx (historique in-app, mais sans
+    //    photo et sans le fix de lien catégorie, en plus d'un aller-retour
+    //    réseau évitable). Un acheteur recevait donc deux notifications
+    //    "nouveau produit" pour une seule publication. L'appel client a
+    //    été supprimé : ce trigger serveur — automatique, fiable même si
+    //    le vendeur ferme l'app juste après publication, et déjà protégé
+    //    par alreadyProcessed() contre les rejouements Eventarc — est
+    //    maintenant l'unique source, pour le push ET l'historique. ──────
     try {
-        await admin.messaging().send(Object.assign({ topic: 'buyers', notification: Object.assign({ title: `🌾 Nouveau : ${product.name} !`, body: priceLabel
-                    ? `Disponible dès maintenant chez ${(_c = product.sellerName) !== null && _c !== void 0 ? _c : 'un producteur local'} — ${priceLabel}`
-                    : `${product.name} est maintenant disponible sur AgriMarché` }, (image ? { imageUrl: image } : {})), data: { type: 'new_product', productId: event.params.productId, link: `/product?id=${event.params.productId}` } }, buildPushConfig({ imageUrl: image })));
-        console.log(`📣 Diffusion "nouveau produit" envoyée pour ${product.name}`);
+        const usersSnap = await admin.firestore().collection('users').select('role').get();
+        // Même audience que le topic "buyers" côté onUserTokenSync : tout le
+        // monde sauf les vendeurs (un rôle absent/inconnu est traité comme
+        // acheteur, exactement comme `role === 'seller' ? 'sellers' : 'buyers'`).
+        const buyerIds = usersSnap.docs
+            .filter((d) => { var _a; return ((_a = d.data()) === null || _a === void 0 ? void 0 : _a.role) !== 'seller'; })
+            .map((d) => d.id);
+        for (const idsChunk of chunk(buyerIds, 450)) {
+            const batch = admin.firestore().batch();
+            idsChunk.forEach((userId) => {
+                const ref = admin.firestore().collection('notifications').doc();
+                batch.set(ref, Object.assign(Object.assign({ userId, type: 'new_product', title,
+                    body, icon: '🌾', link, deepLink: link, priority: 'medium', urgent: false }, (image ? { image } : {})), { data: { type: 'new_product', productId: event.params.productId }, read: false, createdAt: admin.firestore.FieldValue.serverTimestamp() }));
+            });
+            await batch.commit();
+        }
+        console.log(`🗂️ Historique in-app écrit pour ${buyerIds.length} acheteur(s)`);
     }
     catch (err) {
-        console.error('❌ Erreur diffusion nouveau produit:', err);
+        console.error('❌ Erreur écriture historique nouveau produit:', err);
     }
 });
 exports.notifyNewOrder = functions.firestore.onDocumentCreated({ document: 'orders/{orderId}', region: 'us-central1' }, async (event) => {
@@ -1210,4 +1321,48 @@ exports.cleanupProcessedEvents = (0, scheduler_1.onSchedule)({ schedule: 'every 
     snap.docs.forEach((d) => batch.delete(d.ref));
     await batch.commit();
     console.log(`🧹 ${snap.size} entrée(s) d'idempotence purgée(s).`);
+});
+// Purge quotidienne des compteurs anti-abus d'inscription
+// (rateLimits/*) — même logique que ci-dessus, collection distincte.
+exports.cleanupRegistrationRateLimits = (0, scheduler_1.onSchedule)({ schedule: 'every day 04:15', region: 'us-central1', timeZone: 'Africa/Dakar', timeoutSeconds: 300 }, async () => {
+    const purged = await (0, rateLimit_1.purgeOldRateLimitDocs)(3 * 24 * 60 * 60 * 1000);
+    if (purged > 0)
+        console.log(`🧹 ${purged} entrée(s) de rate-limiting d'inscription purgée(s).`);
+});
+// ⚠️ AJOUT (revue de code) : registrationSessions, phoneIndex (réservations
+// abandonnées) et les fenêtres anti-fraude (_fraudIpWindow/_fraudTokenWindow)
+// n'avaient jusqu'ici AUCUN nettoyage — seuls rateLimits et
+// _processedNotificationEvents étaient purgés. Ces trois collections
+// grossissaient donc indéfiniment. Un seul job planifié couvre les trois,
+// par lots de 400 comme les jobs existants (marge sous la limite de 500
+// écritures par batch Firestore) ; rétention de 7 jours pour les sessions
+// (l'historique nominatif utile reste dans registrationAuditLog, jamais
+// purgé), 3 jours pour les réservations abandonnées et les fenêtres
+// anti-fraude (cohérent avec cleanupRegistrationRateLimits ci-dessus).
+// Couvre aussi loginOtpSessions et passwordResetSessions (même rétention
+// de 3 jours, mêmes raisons que les fenêtres anti-fraude) — absents du
+// commentaire d'origine mais bien purgés ci-dessous (⚠️ correctif apporté
+// ici au passage : le Promise.all d'origine ne déstructurait que 3
+// résultats sur 5, les compteurs purgés de loginOtpSessions/
+// passwordResetSessions n'étaient donc jamais journalisés, alors que la
+// purge elle-même s'exécutait bien).
+exports.cleanupRegistrationLeftovers = (0, scheduler_1.onSchedule)({ schedule: 'every day 04:30', region: 'us-central1', timeZone: 'Africa/Dakar', timeoutSeconds: 300 }, async () => {
+    const [sessions, reservations, fraudWindows, loginOtpSessions, passwordResetSessions] = await Promise.all([
+        (0, registration_1.purgeOldRegistrationSessions)(7 * 24 * 60 * 60 * 1000),
+        (0, phoneUniqueness_1.purgeExpiredPhoneReservations)(3 * 24 * 60 * 60 * 1000),
+        (0, fraud_1.purgeOldFraudWindows)(3 * 24 * 60 * 60 * 1000),
+        (0, loginOtp_1.purgeOldLoginOtpSessions)(3 * 24 * 60 * 60 * 1000),
+        (0, passwordReset_1.purgeOldPasswordResetSessions)(3 * 24 * 60 * 60 * 1000),
+    ]);
+    if (sessions > 0)
+        console.log(`🧹 ${sessions} session(s) d'inscription terminée(s) purgée(s).`);
+    if (reservations > 0)
+        console.log(`🧹 ${reservations} réservation(s) de numéro abandonnée(s) purgée(s).`);
+    if (fraudWindows.ip + fraudWindows.token > 0) {
+        console.log(`🧹 ${fraudWindows.ip} fenêtre(s) IP + ${fraudWindows.token} fenêtre(s) token anti-fraude purgée(s).`);
+    }
+    if (loginOtpSessions > 0)
+        console.log(`🧹 ${loginOtpSessions} session(s) OTP de connexion purgée(s).`);
+    if (passwordResetSessions > 0)
+        console.log(`🧹 ${passwordResetSessions} session(s) de réinitialisation purgée(s).`);
 });

@@ -13,7 +13,7 @@
 //   un compte authentifié A pourrait demander l'envoi d'un OTP vers le
 //   numéro d'un compte B.
 // ============================================================
-import { onCall, HttpsError } from 'firebase-functions/v2/https';
+import { onCall, HttpsError, FunctionsErrorCode } from 'firebase-functions/v2/https';
 import * as admin from 'firebase-admin';
 import { generateOtp, hashOtp, verifyOtpHash } from './otp';
 import { checkAndConsumeRateLimit, RateLimitedError } from './rateLimit';
@@ -25,7 +25,7 @@ import { localizeError } from './errorMessages';
 const OTP_TTL_MS = 5 * 60 * 1000;
 const MAX_VERIFY_ATTEMPTS = 5;
 
-function throwLocalized(httpsCode: Parameters<typeof HttpsError>[0], techCode: string): never {
+function throwLocalized(httpsCode: FunctionsErrorCode, techCode: string): never {
   throw new HttpsError(httpsCode, techCode, { message: localizeError(techCode) });
 }
 

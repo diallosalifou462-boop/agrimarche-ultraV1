@@ -41,6 +41,7 @@ export function trace(tag: string, msg: string, extra?: any) {
 import { getStorage, uploadBytes, uploadBytesResumable, getDownloadURL, deleteObject } from 'firebase/storage';
 import { getMessaging, getToken, onMessage, isSupported } from 'firebase/messaging';
 import { getAnalytics, isSupported as analyticsIsSupported } from 'firebase/analytics';
+import { initializeAppCheck, ReCaptchaEnterpriseProvider } from 'firebase/app-check';
 import { Capacitor } from '@capacitor/core';
 
 // =====================================================
@@ -62,6 +63,24 @@ const firebaseConfig = {
 // =====================================================
 
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+
+// ⚠️ App Check — requis par les Cloud Functions déclarées avec
+// enforceAppCheck: true (registration.ts, loginOtp.ts, passwordReset.ts,
+// orangeRegistration.ts). Sans ça, chaque appel httpsCallable() est
+// rejeté en 401 avant même d'atteindre le code serveur.
+if (typeof window !== 'undefined') {
+  if (process.env.NODE_ENV !== 'production' || location.hostname === 'localhost') {
+    // @ts-ignore — jeton de debug, uniquement en dev/localhost
+    self.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
+  }
+
+  initializeAppCheck(app, {
+    provider: new ReCaptchaEnterpriseProvider(
+      process.env.NEXT_PUBLIC_RECAPTCHA_ENTERPRISE_SITE_KEY || ''
+    ),
+    isTokenAutoRefreshEnabled: true,
+  });
+}
 
 // ⚠️ FIX v9 — CAUSE RACINE CONFIRMÉE DU BLOCAGE DE `onAuthStateChanged` :
 // `getAuth(app)` seul (sans configuration explicite) tente en interne, dès

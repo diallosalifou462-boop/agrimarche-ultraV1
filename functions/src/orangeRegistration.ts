@@ -17,7 +17,7 @@
 //   Firebase Auth existe déjà (créé par Firebase Phone Auth
 //   lui-même lors du premier signInWithPhoneNumber réussi).
 // ============================================================
-import { onCall, HttpsError } from 'firebase-functions/v2/https';
+import { onCall, HttpsError, FunctionsErrorCode } from 'firebase-functions/v2/https';
 import * as admin from 'firebase-admin';
 import { normalizePhoneSN, detectCarrier, phoneToSyntheticEmail } from './carrier';
 import { claimPhoneForAccount, PhoneAlreadyUsedError } from './phoneUniqueness';
@@ -25,7 +25,7 @@ import { logAuditEvent } from './audit';
 import { bumpRegistrationMetric } from './metrics';
 import { localizeError } from './errorMessages';
 
-function throwLocalized(httpsCode: Parameters<typeof HttpsError>[0], techCode: string): never {
+function throwLocalized(httpsCode: FunctionsErrorCode, techCode: string): never {
   throw new HttpsError(httpsCode, techCode, { message: localizeError(techCode) });
 }
 
