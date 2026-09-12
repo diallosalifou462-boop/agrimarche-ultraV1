@@ -467,7 +467,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   // ─── Déconnexion ──────────────────────────────────────
+  // ⚠️ Sur natif (iOS/Android), la session vit aussi côté plugin
+  // @capacitor-firebase/authentication (Keychain/Keystore), séparément
+  // du SDK JS. Un signOut(auth) seul ne la supprime pas : au retour
+  // suivant au premier plan, le useEffect ci-dessus rappelle
+  // FirebaseAuthentication.getCurrentUser() et resynchronise cette
+  // session native encore valide vers le SDK JS — ce qui reconnecte
+  // silencieusement l'utilisateur malgré le logout. Il faut donc
+  // déconnecter explicitement le plugin natif en plus du SDK JS.
   const logout = async () => {
+    if (Capacitor.isNativePlatform()) {
+      try {
+        await FirebaseAuthentication.signOut();
+      } catch (err) {
+        console.error('[AuthContext] Échec signOut natif:', err);
+      }
+    }
     await signOut(auth);
     setProfile(null);
     setUser(null);

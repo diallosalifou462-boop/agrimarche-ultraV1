@@ -133,11 +133,10 @@ export default function RegisterPage() {
   // soit réellement finalisé — l'inscription semble "sauter" une étape.
   const registrationInProgressRef = useRef(false);
 
-  useEffect(() => {
-    if (isClient && user && !authLoading && !registrationInProgressRef.current) {
-      router.push('/');
-    }
-  }, [user, authLoading, router, isClient]);
+  // Redirection auto vers '/' retirée : elle empêchait d'accéder au
+  // formulaire d'inscription dès qu'une session Firebase était déjà
+  // active sur l'appareil (persistance iOS/Keychain), en redirigeant
+  // immédiatement vers /main/products avant même l'affichage du form.
 
   // Cooldown timer pour renvoi OTP
   useEffect(() => {
