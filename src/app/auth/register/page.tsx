@@ -16,6 +16,7 @@ import { Capacitor } from '@capacitor/core';
 import { detectCarrier } from '@/lib/carrier';
 import { apiUrl } from '@/lib/api-config';
 import { startRegistration, verifyRegistrationCode, completeOrangeRegistration, RegistrationActionError } from '@/lib/registrationActions';
+import { useFCMToken, PENDING_FCM_TOKEN_KEY } from '@/hooks/useFCMToken';
 
 // ─── Attend que le pont natif Capacitor soit prêt ─────
 // Sur certains démarrages, window.Capacitor s'injecte avec
@@ -32,6 +33,22 @@ async function waitForNativeBridge(timeoutMs = 1500): Promise<boolean> {
 }
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
 import { Eye, EyeOff, Lock, User, Phone, Truck, Shield, MapPin, Map, Home, CheckCircle, ArrowLeft, MessageSquare } from 'lucide-react';
+
+// ─── Token FCM capté avant l'inscription (voir useFCMToken.ts) ────────
+// useFCMToken écrit ce token en localStorage dès qu'il est obtenu, sans
+// attendre qu'un compte existe (deviceTokens/{token} côté Firestore).
+// On le relit ici, best-effort : en son absence, startRegistration()
+// retombe simplement sur l'envoi par SMS Infobip.
+function readPendingPushToken(): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  try {
+    const raw = window.localStorage.getItem(PENDING_FCM_TOKEN_KEY);
+    if (!raw) return undefined;
+    return JSON.parse(raw)?.token || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 // ─── Régions & Départements ───────────────────────────────
 const SENEGAL_REGIONS = [
@@ -133,10 +150,43 @@ export default function RegisterPage() {
   // soit réellement finalisé — l'inscription semble "sauter" une étape.
   const registrationInProgressRef = useRef(false);
 
-  // Redirection auto vers '/' retirée : elle empêchait d'accéder au
-  // formulaire d'inscription dès qu'une session Firebase était déjà
-  // active sur l'appareil (persistance iOS/Keychain), en redirigeant
-  // immédiatement vers /main/products avant même l'affichage du form.
+  // ─── Capture du token push AVANT la création du compte ────────────
+  // Best-effort : on demande la permission dès l'arrivée sur la page,
+  // pour laisser le temps à useFCMToken de l'écrire en localStorage
+  // (voir readPendingPushToken) avant que l'utilisateur n'ait fini de
+  // remplir le formulaire et n'atteigne l'envoi du code.
+  //
+  // ⚠️ 1 seconde tentative : sur iOS, juste après l'acceptation de la
+  // permission, l'enregistrement APNs peut ne pas être encore terminé
+  // et getToken() échoue même si l'utilisateur a bien autorisé les
+  // notifications (rien à voir avec un refus). On retente donc une
+  // deuxième fois après un court délai avant d'abandonner. Si les deux
+  // tentatives échouent, on n'insiste pas davantage : startRegistration()
+  // retombe simplement sur SMS Infobip, comme prévu.
+  const { requestPermission: requestPushPermission } = useFCMToken();
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const first = await requestPushPermission().catch(() => null);
+      if (first || cancelled) return;
+      console.warn('[Push] Token non récupéré, nouvelle tentative dans 2s…');
+      await new Promise((r) => setTimeout(r, 2000));
+      if (cancelled) return;
+      const second = await requestPushPermission().catch(() => null);
+      if (!second) {
+        console.warn('[Push] Toujours pas de token après 2 tentatives — inscription par SMS.');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isClient && user && !authLoading && !registrationInProgressRef.current) {
+      router.push('/');
+    }
+  }, [user, authLoading, router, isClient]);
 
   // Cooldown timer pour renvoi OTP
   useEffect(() => {
@@ -230,7 +280,8 @@ export default function RegisterPage() {
         // ATS, DNS...). Il ne s'applique plus : httpsCallable passe par le
         // SDK Firebase Functions, avec sa propre gestion de transport/retry.
         try {
-          const { sessionId: newSessionId } = await startRegistration(phoneE164);
+          const pushToken = readPendingPushToken();
+          const { sessionId: newSessionId } = await startRegistration(phoneE164, pushToken);
           setSessionId(newSessionId);
           setStep('otp');
           setResendCooldown(60);

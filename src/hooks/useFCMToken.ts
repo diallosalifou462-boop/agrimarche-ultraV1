@@ -17,7 +17,7 @@ function getNativePlatformName(): 'ios' | 'android' | 'web' {
   return ((window as any).Capacitor?.getPlatform?.() as 'ios' | 'android') ?? 'web';
 }
 
-const PENDING_FCM_TOKEN_KEY = 'agrimarche_pending_fcm_token';
+export const PENDING_FCM_TOKEN_KEY = 'agrimarche_pending_fcm_token';
 
 export function useFCMToken() {
   const { user } = useAuth();

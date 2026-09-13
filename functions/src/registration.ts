@@ -117,46 +117,57 @@ function throwLocalized(httpsCode: FunctionsErrorCode, techCode: string): never 
   throw new HttpsError(httpsCode, techCode, { message: localizeError(techCode) });
 }
 
-async function decideChannelAndSend(sessionId: string, phone: string, pushToken: string | undefined, code: string) {
-  const channel: Channel = pushToken ? 'push' : 'sms_infobip';
-
-  if (channel === 'push') {
-    await admin.messaging().send({
-      token: pushToken!,
-      notification: {
-        title: 'AgriMarché',
-        body: `Votre code de confirmation AgriMarché est : ${code}. Ce code expire dans 5 minutes.`,
-      },
-      data: { type: 'registration_otp', sessionId },
-      android: { priority: 'high' },
-      apns: { payload: { aps: { sound: 'default', 'interruption-level': 'time-sensitive' } } },
-    }).catch(async (err) => {
+// ⚠️ FIX (13/09) : avant, un échec du push (token périmé, appareil
+// changé entre la capture du token et l'envoi...) faisait échouer
+// l'inscription ENTIÈRE au lieu de retomber sur SMS Infobip — seul
+// otpChannel.ts (utilisé par login/reset) avait ce filet. Sans
+// conséquence tant qu'aucun pushToken n'était jamais transmis, mais
+// désormais réellement atteignable puisque l'inscription en capte un.
+// On garde les noms de métriques historiques (sent_push, sent_sms...)
+// plutôt que de migrer vers otpChannel.ts, pour ne pas casser le
+// dashboard admin qui les lit sous ces noms précis pour l'inscription.
+async function decideChannelAndSend(sessionId: string, phone: string, pushToken: string | undefined, code: string): Promise<Channel> {
+  if (pushToken) {
+    try {
+      await admin.messaging().send({
+        token: pushToken,
+        notification: {
+          title: 'AgriMarché',
+          body: `Votre code de confirmation AgriMarché est : ${code}. Ce code expire dans 5 minutes.`,
+        },
+        data: { type: 'registration_otp', sessionId },
+        android: { priority: 'high' },
+        apns: { payload: { aps: { sound: 'default', 'interruption-level': 'time-sensitive' } } },
+      });
+      await bumpRegistrationMetric('sent_push');
+      return 'push';
+    } catch (err: any) {
       console.error(`❌ Échec envoi push OTP (session ${sessionId}):`, err?.code || err);
       await bumpRegistrationMetric('send_failed_push');
-      throw new HttpsError('unavailable', 'PUSH_SEND_FAILED');
-    });
-    await bumpRegistrationMetric('sent_push');
-  } else {
-    await sendOtpSmsInfobip(phone, code).catch(async (err) => {
-      console.error(`❌ Échec envoi SMS OTP (session ${sessionId}):`, err?.message || err);
-      await bumpRegistrationMetric('send_failed_sms');
-      throw new HttpsError('unavailable', 'SMS_SEND_FAILED');
-    });
-    await bumpRegistrationMetric('sent_sms');
+      // tombe dans l'envoi SMS ci-dessous plutôt que d'échouer ici
+    }
   }
 
-  return channel;
+  try {
+    await sendOtpSmsInfobip(phone, code);
+  } catch (err: any) {
+    console.error(`❌ Échec envoi SMS OTP (session ${sessionId}):`, err?.message || err);
+    await bumpRegistrationMetric('send_failed_sms');
+    throw new HttpsError('unavailable', 'SMS_SEND_FAILED');
+  }
+  await bumpRegistrationMetric('sent_sms');
+  return 'sms_infobip';
 }
 
 // ── POST /registration/start ────────────────────────────────────────────
 export const registrationStart = onCall(
-  // enforceAppCheck: DÉSACTIVÉ temporairement (12/09) — App Check n'est
-  // pas encore initialisé côté app mobile (aucune trace côté client),
-  // donc ce flag bloquait TOUTES les inscriptions, y compris légitimes,
-  // avec une erreur générique sans détail exploitable côté client.
-  // À réactiver une fois App Check déployé sur l'app (App Attest iOS /
-  // Play Integrity Android) et testé de bout en bout.
-  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: false },
+  // enforceAppCheck: active en code la protection décrite dans fraud.ts —
+  // sans ce flag, App Check n'était que "recommandé côté client" mais
+  // jamais réellement vérifié côté serveur ; un appelant sans jeton valide
+  // était accepté quand même. À activer seulement après avoir déployé
+  // App Check (Play Integrity / DeviceCheck) sur l'app mobile, sous peine
+  // de bloquer les inscriptions légitimes.
+  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: true },
   async (request) => {
     const phoneRaw = String(request.data?.phone ?? '');
     const pushToken: string | undefined = request.data?.pushToken || undefined;
@@ -253,9 +264,7 @@ export const registrationStart = onCall(
 
 // ── POST /registration/resend ───────────────────────────────────────────
 export const registrationResend = onCall(
-  // enforceAppCheck désactivé temporairement — voir commentaire sur
-  // registrationStart ci-dessus (même cause, même fix).
-  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: false },
+  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: true },
   async (request) => {
     const sessionId = String(request.data?.sessionId ?? '');
     const newPushToken: string | undefined = request.data?.pushToken || undefined;
@@ -341,9 +350,7 @@ export async function purgeOldRegistrationSessions(olderThanMs: number): Promise
 
 // ── POST /registration/verify ───────────────────────────────────────────
 export const registrationVerify = onCall(
-  // enforceAppCheck désactivé temporairement — voir commentaire sur
-  // registrationStart ci-dessus (même cause, même fix).
-  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER'], enforceAppCheck: false },
+  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER'], enforceAppCheck: true },
   async (request) => {
     const sessionId = String(request.data?.sessionId ?? '');
     const code = String(request.data?.code ?? '');
