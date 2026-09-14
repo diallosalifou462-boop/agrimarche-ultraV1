@@ -161,13 +161,10 @@ async function decideChannelAndSend(sessionId: string, phone: string, pushToken:
 
 // ── POST /registration/start ────────────────────────────────────────────
 export const registrationStart = onCall(
-  // enforceAppCheck: active en code la protection décrite dans fraud.ts —
-  // sans ce flag, App Check n'était que "recommandé côté client" mais
-  // jamais réellement vérifié côté serveur ; un appelant sans jeton valide
-  // était accepté quand même. À activer seulement après avoir déployé
-  // App Check (Play Integrity / DeviceCheck) sur l'app mobile, sous peine
-  // de bloquer les inscriptions légitimes.
-  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: true },
+  // enforceAppCheck: DÉSACTIVÉ (12/09, ré-confirmé 14/09) — App Check
+  // n'est toujours pas initialisé côté app mobile. À réactiver
+  // seulement une fois App Check déployé et testé côté client.
+  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: false },
   async (request) => {
     const phoneRaw = String(request.data?.phone ?? '');
     const pushToken: string | undefined = request.data?.pushToken || undefined;
@@ -264,7 +261,8 @@ export const registrationStart = onCall(
 
 // ── POST /registration/resend ───────────────────────────────────────────
 export const registrationResend = onCall(
-  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: true },
+  // enforceAppCheck désactivé — voir commentaire sur registrationStart.
+  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: false },
   async (request) => {
     const sessionId = String(request.data?.sessionId ?? '');
     const newPushToken: string | undefined = request.data?.pushToken || undefined;
@@ -350,7 +348,8 @@ export async function purgeOldRegistrationSessions(olderThanMs: number): Promise
 
 // ── POST /registration/verify ───────────────────────────────────────────
 export const registrationVerify = onCall(
-  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER'], enforceAppCheck: true },
+  // enforceAppCheck désactivé — voir commentaire sur registrationStart.
+  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER'], enforceAppCheck: false },
   async (request) => {
     const sessionId = String(request.data?.sessionId ?? '');
     const code = String(request.data?.code ?? '');

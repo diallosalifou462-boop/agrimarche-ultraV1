@@ -123,34 +123,47 @@ function clientIp(rawRequest) {
 function throwLocalized(httpsCode, techCode) {
     throw new https_1.HttpsError(httpsCode, techCode, { message: (0, errorMessages_1.localizeError)(techCode) });
 }
+// ⚠️ FIX (13/09) : avant, un échec du push (token périmé, appareil
+// changé entre la capture du token et l'envoi...) faisait échouer
+// l'inscription ENTIÈRE au lieu de retomber sur SMS Infobip — seul
+// otpChannel.ts (utilisé par login/reset) avait ce filet. Sans
+// conséquence tant qu'aucun pushToken n'était jamais transmis, mais
+// désormais réellement atteignable puisque l'inscription en capte un.
+// On garde les noms de métriques historiques (sent_push, sent_sms...)
+// plutôt que de migrer vers otpChannel.ts, pour ne pas casser le
+// dashboard admin qui les lit sous ces noms précis pour l'inscription.
 async function decideChannelAndSend(sessionId, phone, pushToken, code) {
-    const channel = pushToken ? 'push' : 'sms_infobip';
-    if (channel === 'push') {
-        await admin.messaging().send({
-            token: pushToken,
-            notification: {
-                title: 'AgriMarché',
-                body: `Votre code de confirmation AgriMarché est : ${code}. Ce code expire dans 5 minutes.`,
-            },
-            data: { type: 'registration_otp', sessionId },
-            android: { priority: 'high' },
-            apns: { payload: { aps: { sound: 'default', 'interruption-level': 'time-sensitive' } } },
-        }).catch(async (err) => {
+    if (pushToken) {
+        try {
+            await admin.messaging().send({
+                token: pushToken,
+                notification: {
+                    title: 'AgriMarché',
+                    body: `Votre code de confirmation AgriMarché est : ${code}. Ce code expire dans 5 minutes.`,
+                },
+                data: { type: 'registration_otp', sessionId },
+                android: { priority: 'high' },
+                apns: { payload: { aps: { sound: 'default', 'interruption-level': 'time-sensitive' } } },
+            });
+            await (0, metrics_1.bumpRegistrationMetric)('sent_push');
+            return 'push';
+        }
+        catch (err) {
             console.error(`❌ Échec envoi push OTP (session ${sessionId}):`, (err === null || err === void 0 ? void 0 : err.code) || err);
             await (0, metrics_1.bumpRegistrationMetric)('send_failed_push');
-            throw new https_1.HttpsError('unavailable', 'PUSH_SEND_FAILED');
-        });
-        await (0, metrics_1.bumpRegistrationMetric)('sent_push');
+            // tombe dans l'envoi SMS ci-dessous plutôt que d'échouer ici
+        }
     }
-    else {
-        await (0, smsInfobip_1.sendOtpSmsInfobip)(phone, code).catch(async (err) => {
-            console.error(`❌ Échec envoi SMS OTP (session ${sessionId}):`, (err === null || err === void 0 ? void 0 : err.message) || err);
-            await (0, metrics_1.bumpRegistrationMetric)('send_failed_sms');
-            throw new https_1.HttpsError('unavailable', 'SMS_SEND_FAILED');
-        });
-        await (0, metrics_1.bumpRegistrationMetric)('sent_sms');
+    try {
+        await (0, smsInfobip_1.sendOtpSmsInfobip)(phone, code);
     }
-    return channel;
+    catch (err) {
+        console.error(`❌ Échec envoi SMS OTP (session ${sessionId}):`, (err === null || err === void 0 ? void 0 : err.message) || err);
+        await (0, metrics_1.bumpRegistrationMetric)('send_failed_sms');
+        throw new https_1.HttpsError('unavailable', 'SMS_SEND_FAILED');
+    }
+    await (0, metrics_1.bumpRegistrationMetric)('sent_sms');
+    return 'sms_infobip';
 }
 // ── POST /registration/start ────────────────────────────────────────────
 exports.registrationStart = (0, https_1.onCall)(

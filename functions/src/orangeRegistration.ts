@@ -42,8 +42,7 @@ function sanitizeSelfRegisteredRole(candidate: unknown): 'client' | 'seller' {
     : 'client';
 }
 
-// enforceAppCheck désactivé temporairement — voir commentaire dans
-// registration.ts sur registrationStart (même cause, même fix).
+// enforceAppCheck désactivé — voir commentaire dans registration.ts.
 export const completeOrangeRegistration = onCall({ region: 'us-central1', enforceAppCheck: false }, async (request) => {
   if (!request.auth) throwLocalized('unauthenticated', 'AUTH_REQUIRED');
   const uid = request.auth.uid;
