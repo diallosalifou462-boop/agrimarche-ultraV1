@@ -178,8 +178,45 @@ function LoginContent() {
     recaptchaRef.current = new RecaptchaVerifier(auth, 'recaptcha-container', { size: 'invisible' });
   };
 
-  // ─── Étape 1 : vérifier mot de passe + envoyer OTP ──
+  // ─── Étape 1 (et unique désormais) : mot de passe suffit ──
+  // 🔧 SUPPRIMÉ (15/09) : l'envoi d'un OTP SMS/push à CHAQUE connexion,
+  // pas seulement à l'inscription. Ça gaspillait un SMS Infobip à chaque
+  // fois qu'un utilisateur déjà vérifié (numéro confirmé lors de son
+  // inscription) se déconnectait puis se reconnectait. Le mot de passe
+  // (signInWithEmailAndPassword, session Firebase persistée — voir
+  // lib/firebase/firebase.ts) suffit maintenant à authentifier.
+  // L'OTP reste utilisé ailleurs : vérification du numéro à l'inscription
+  // (registration.ts) et réinitialisation de mot de passe (passwordReset.ts).
   const handlePhoneLogin = async () => {
+    setError('');
+    if (!phone || !password) { setError('Remplissez tous les champs'); return; }
+
+    setLoading(true);
+    try {
+      const email = toSyntheticEmail(phone);
+      await signInWithEmailAndPassword(auth, email, password);
+      setLoading(false);
+      router.replace(redirect);
+    } catch (err: any) {
+      const code = err?.code;
+      if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
+        setError('Numéro ou mot de passe incorrect');
+      } else if (code === 'auth/invalid-phone-number') {
+        setError('Numéro de téléphone invalide');
+      } else if (code === 'auth/too-many-requests') {
+        setError('Trop de tentatives, réessayez plus tard');
+      } else {
+        setError('Connexion échouée, réessayez');
+      }
+      setLoading(false);
+    }
+  };
+
+  // ─── Ancienne étape 2 (OTP) — code conservé mais désormais mort  ──
+  // (step ne passe plus jamais à 'otp', voir handlePhoneLogin ci-dessus).
+  // Laissé en place pour ne pas casser resendOTP / handleVerifyOTP / les
+  // imports associés ; à supprimer complètement dans un nettoyage ultérieur.
+  const _unusedHandlePhoneLoginOtpFlow = async () => {
     setError('');
     if (!phone || !password) { setError('Remplissez tous les champs'); return; }
 
@@ -435,7 +472,7 @@ function LoginContent() {
   return (
     <div className="min-h-screen" style={{ background: '#F7F0E2' }}>
       <div id="recaptcha-container" />
-      <AuthHero variant="welcome" title="Bienvenue au marché" subtitle="Connexion sécurisée par SMS, à votre numéro" />
+      <AuthHero variant="welcome" title="Bienvenue au marché" subtitle="Connectez-vous avec votre numéro et mot de passe" />
       <AuthSheet>
         {error && <AuthErrorBanner>{error}</AuthErrorBanner>}
 
@@ -476,7 +513,7 @@ function LoginContent() {
 
         <div className="mt-7">
           <PrimaryButton onClick={handlePhoneLogin} disabled={loading}>
-            {loading ? 'Envoi du SMS…' : 'Se connecter'}
+            {loading ? 'Connexion…' : 'Se connecter'}
           </PrimaryButton>
         </div>
 
