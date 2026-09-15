@@ -119,6 +119,9 @@ export default function RegisterPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [resendCooldown, setResendCooldown] = useState(0);
+  // 🔍 DEBUG TEMPORAIRE — état du token push affiché à l'écran, à retirer
+  // après diagnostic (voir bannière ajoutée dans le JSX plus bas).
+  const [pushDebug, setPushDebug] = useState<string>('push: en attente...');
   const isNativeRef = useRef(false);
   // true si on utilise le système OTP maison (backend + Infobip) au lieu
   // de Firebase Phone Auth — cas des numéros Free/Yas et Expresso, voir lib/carrier.ts
@@ -167,14 +170,30 @@ export default function RegisterPage() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const first = await requestPushPermission().catch(() => null);
-      if (first || cancelled) return;
+      setPushDebug('push: tentative 1...');
+      const first = await requestPushPermission().catch((e: any) => {
+        setPushDebug(`push: erreur tentative 1 — ${e?.message || e}`);
+        return null;
+      });
+      if (first) {
+        setPushDebug(`push: TOKEN OK — ${String(first).slice(0, 20)}...`);
+        return;
+      }
+      if (cancelled) return;
+      setPushDebug('push: échec tentative 1, retry dans 2s...');
       console.warn('[Push] Token non récupéré, nouvelle tentative dans 2s…');
       await new Promise((r) => setTimeout(r, 2000));
       if (cancelled) return;
-      const second = await requestPushPermission().catch(() => null);
+      setPushDebug('push: tentative 2...');
+      const second = await requestPushPermission().catch((e: any) => {
+        setPushDebug(`push: erreur tentative 2 — ${e?.message || e}`);
+        return null;
+      });
       if (!second) {
+        setPushDebug('push: ÉCHEC — aucun token, fallback SMS');
         console.warn('[Push] Toujours pas de token après 2 tentatives — inscription par SMS.');
+      } else {
+        setPushDebug(`push: TOKEN OK (2e essai) — ${String(second).slice(0, 20)}...`);
       }
     })();
     return () => {
@@ -657,6 +676,10 @@ export default function RegisterPage() {
   // ═══════════════════════════════════════════════════════
   return (
     <div className="min-h-screen bg-gradient-to-br from-green-50 via-white to-emerald-50 flex items-center justify-center p-4">
+      {/* 🔍 DEBUG TEMPORAIRE — bannière d'état du token push, à retirer après diagnostic */}
+      <div style={{ position: 'fixed', top: 0, left: 0, right: 0, background: 'yellow', color: 'black', fontSize: 12, padding: 4, zIndex: 9999, textAlign: 'center' }}>
+        {pushDebug}
+      </div>
       <div id="recaptcha-container" />
       <div className="w-full max-w-md">
         <div className="bg-white rounded-2xl shadow-xl p-8">
