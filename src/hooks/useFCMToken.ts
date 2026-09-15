@@ -133,8 +133,17 @@ export function useFCMToken() {
   );
 
   // Brancher les listeners Firebase Messaging natifs (natif uniquement)
+  // ⚠️ FIX (15/09) : la condition excluait auparavant `!user`, ce qui
+  // désactivait cet écouteur tant qu'aucun compte n'était connecté — donc
+  // PENDANT toute l'inscription. Or c'est justement là qu'on en a le plus
+  // besoin : sur iOS, l'enregistrement APNs peut arriver après les 2
+  // tentatives synchrones de requestPermission() (voir register/page.tsx),
+  // et c'était alors la seule façon de récupérer un token arrivé en retard.
+  // saveTokenToFirestore gère déjà le cas sans utilisateur (écriture
+  // anonyme dans deviceTokens/ + localStorage), donc aucun changement
+  // nécessaire de ce côté.
   useEffect(() => {
-    if (!isNative || !user) return;
+    if (!isNative) return;
 
     let tokenListener: any;
     let notificationListener: any;
