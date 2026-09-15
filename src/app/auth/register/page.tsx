@@ -166,11 +166,23 @@ export default function RegisterPage() {
   // deuxième fois après un court délai avant d'abandonner. Si les deux
   // tentatives échouent, on n'insiste pas davantage : startRegistration()
   // retombe simplement sur SMS Infobip, comme prévu.
-  const { requestPermission: requestPushPermission } = useFCMToken();
+  const { requestPermission: requestPushPermission, isNative: pushIsNative } = useFCMToken();
+  // 🔍 DEBUG TEMPORAIRE — lecture directe de l'état système (évite l'état
+  // périmé du hook, qui ne se met pas à jour dans cette closure figée).
+  const checkNativePermDebug = async (): Promise<string> => {
+    try {
+      const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
+      const status = await FirebaseMessaging.checkPermissions();
+      return status.receive;
+    } catch (e: any) {
+      return `err:${e?.message || e}`;
+    }
+  };
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      setPushDebug('push: tentative 1...');
+      const perm0 = await checkNativePermDebug();
+      setPushDebug(`push: tentative 1 (natif=${pushIsNative}, perm=${perm0})...`);
       const first = await requestPushPermission().catch((e: any) => {
         setPushDebug(`push: erreur tentative 1 — ${e?.message || e}`);
         return null;
@@ -180,17 +192,19 @@ export default function RegisterPage() {
         return;
       }
       if (cancelled) return;
-      setPushDebug('push: échec tentative 1, retry dans 2s...');
+      const perm1 = await checkNativePermDebug();
+      setPushDebug(`push: échec t1 (perm après=${perm1}), retry 2s...`);
       console.warn('[Push] Token non récupéré, nouvelle tentative dans 2s…');
       await new Promise((r) => setTimeout(r, 2000));
       if (cancelled) return;
-      setPushDebug('push: tentative 2...');
+      setPushDebug(`push: tentative 2 (perm=${perm1})...`);
       const second = await requestPushPermission().catch((e: any) => {
         setPushDebug(`push: erreur tentative 2 — ${e?.message || e}`);
         return null;
       });
       if (!second) {
-        setPushDebug('push: ÉCHEC — aucun token, fallback SMS');
+        const perm2 = await checkNativePermDebug();
+        setPushDebug(`push: ÉCHEC — aucun token, perm finale=${perm2}, fallback SMS`);
         console.warn('[Push] Toujours pas de token après 2 tentatives — inscription par SMS.');
       } else {
         setPushDebug(`push: TOKEN OK (2e essai) — ${String(second).slice(0, 20)}...`);
@@ -676,9 +690,9 @@ export default function RegisterPage() {
   // ═══════════════════════════════════════════════════════
   return (
     <div className="min-h-screen bg-gradient-to-br from-green-50 via-white to-emerald-50 flex items-center justify-center p-4">
-      {/* 🔍 DEBUG TEMPORAIRE — bannière d'état du token push, à retirer après diagnostic */}
-      <div style={{ position: 'fixed', top: 0, left: 0, right: 0, background: 'yellow', color: 'black', fontSize: 12, padding: 4, zIndex: 9999, textAlign: 'center' }}>
-        {pushDebug}
+      {/* 🔍 DEBUG TEMPORAIRE — bannière d'état du token push (v2, en bas), à retirer après diagnostic */}
+      <div style={{ position: 'fixed', bottom: 'env(safe-area-inset-bottom, 0px)', left: 0, right: 0, background: 'yellow', color: 'black', fontSize: 11, lineHeight: 1.3, padding: '6px 8px', zIndex: 9999, textAlign: 'center' }}>
+        [v2] {pushDebug}
       </div>
       <div id="recaptcha-container" />
       <div className="w-full max-w-md">
