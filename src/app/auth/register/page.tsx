@@ -15,7 +15,8 @@ import { auth } from '@/lib/firebase/firebase';
 import { Capacitor } from '@capacitor/core';
 import { detectCarrier } from '@/lib/carrier';
 import { apiUrl } from '@/lib/api-config';
-import { logOtpAttempt } from '@/lib/otpDiagnostics';
+import { startRegistration, verifyRegistrationCode, completeOrangeRegistration, RegistrationActionError } from '@/lib/registrationActions';
+import { useFCMToken, PENDING_FCM_TOKEN_KEY } from '@/hooks/useFCMToken';
 
 // ─── Attend que le pont natif Capacitor soit prêt ─────
 // Sur certains démarrages, window.Capacitor s'injecte avec
@@ -32,6 +33,22 @@ async function waitForNativeBridge(timeoutMs = 1500): Promise<boolean> {
 }
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
 import { Eye, EyeOff, Lock, User, Phone, Truck, Shield, MapPin, Map, Home, CheckCircle, ArrowLeft, MessageSquare } from 'lucide-react';
+
+// ─── Token FCM capté avant l'inscription (voir useFCMToken.ts) ────────
+// useFCMToken écrit ce token en localStorage dès qu'il est obtenu, sans
+// attendre qu'un compte existe (deviceTokens/{token} côté Firestore).
+// On le relit ici, best-effort : en son absence, startRegistration()
+// retombe simplement sur l'envoi par SMS Infobip.
+function readPendingPushToken(): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  try {
+    const raw = window.localStorage.getItem(PENDING_FCM_TOKEN_KEY);
+    if (!raw) return undefined;
+    return JSON.parse(raw)?.token || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 // ─── Régions & Départements ───────────────────────────────
 const SENEGAL_REGIONS = [
@@ -70,7 +87,7 @@ type Step = 'form' | 'otp' | 'success';
 
 export default function RegisterPage() {
   const router = useRouter();
-  const { signUp, user, loading: authLoading, suppressAutoProfileRef } = useAuth();
+  const { user, loading: authLoading, suppressAutoProfileRef } = useAuth();
   const [isClient, setIsClient] = useState(false);
 
   // ─── Étapes ───────────────────────────────────────────
@@ -95,6 +112,7 @@ export default function RegisterPage() {
   const otpRefs = useRef<(HTMLInputElement | null)[]>([]);
   const [confirmResult, setConfirmResult] = useState<ConfirmationResult | null>(null);
   const [verificationId, setVerificationId] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null); // session du nouveau backend (Free/Yas, Expresso)
   const recaptchaRef = useRef<RecaptchaVerifier | null>(null);
 
   // ─── UI state ─────────────────────────────────────────
@@ -121,8 +139,63 @@ export default function RegisterPage() {
     console.log('=====================================================');
   }, []);
 
+  // ⚠️ GARDE-FOU (même piège que sur auth/login/page.tsx, voir
+  // otpPendingRef) : sur Android/iOS, la vérification du téléphone peut
+  // aboutir INSTANTANÉMENT côté natif (SMS Retriever / Play Integrity),
+  // ce qui rend `user` non-nul avant même que finalizeRegistration()
+  // (completeOrangeRegistration : nom, région, mot de passe, rôle...)
+  // ait fini son appel réseau. Sans ce ref, ce useEffect se déclenche
+  // dès que Firebase confirme le numéro et propulse l'utilisateur vers
+  // '/' (donc vers /main/products via le Splash) AVANT que le compte
+  // soit réellement finalisé — l'inscription semble "sauter" une étape.
+  const registrationInProgressRef = useRef(false);
+
+  // ─── Capture du token push AVANT la création du compte ────────────
+  // Best-effort : on demande la permission dès l'arrivée sur la page,
+  // pour laisser le temps à useFCMToken de l'écrire en localStorage
+  // (voir readPendingPushToken) avant que l'utilisateur n'ait fini de
+  // remplir le formulaire et n'atteigne l'envoi du code.
+  //
+  // ⚠️ 1 seconde tentative : sur iOS, juste après l'acceptation de la
+  // permission, l'enregistrement APNs peut ne pas être encore terminé
+  // et getToken() échoue même si l'utilisateur a bien autorisé les
+  // notifications (rien à voir avec un refus). On retente donc une
+  // deuxième fois après un court délai avant d'abandonner. Si les deux
+  // tentatives échouent, on n'insiste pas davantage : startRegistration()
+  // retombe simplement sur SMS Infobip, comme prévu.
+  const { requestPermission: requestPushPermission } = useFCMToken();
+  // ⚠️ FIX (16/09) : toujours appeler la version LA PLUS RÉCENTE de
+  // requestPermission. Le useEffect ci-dessous ([] en dépendances) gardait
+  // sinon celle du tout premier rendu, figée avec isNative=false.
+  const requestPushRef = useRef(requestPushPermission);
+  requestPushRef.current = requestPushPermission;
+  // Canal réellement utilisé par le serveur, pour l'afficher à l'écran OTP.
+  const [otpChannel, setOtpChannel] = useState<'push' | 'sms' | null>(null);
   useEffect(() => {
-    if (isClient && user && !authLoading) router.push('/');
+    let cancelled = false;
+    (async () => {
+      // Laisse le pont Capacitor s'injecter, sinon on part en branche web.
+      await waitForNativeBridge();
+      if (cancelled) return;
+      const first = await requestPushRef.current().catch(() => null);
+      if (first || cancelled) return;
+      console.warn('[Push] Token non récupéré, nouvelle tentative dans 2s…');
+      await new Promise((r) => setTimeout(r, 2000));
+      if (cancelled) return;
+      const second = await requestPushRef.current().catch(() => null);
+      if (!second) {
+        console.warn('[Push] Toujours pas de token après 2 tentatives — inscription par SMS.');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isClient && user && !authLoading && !registrationInProgressRef.current) {
+      router.push('/');
+    }
   }, [user, authLoading, router, isClient]);
 
   // Cooldown timer pour renvoi OTP
@@ -212,68 +285,34 @@ export default function RegisterPage() {
       if (carrier === 'free' || carrier === 'expresso') {
         useCustomOtpRef.current = true;
 
-        // ⚠️ DIAGNOSTIC AUTOMATIQUE : chaque tentative est loguée dans
-        // Firestore (otp_debug_logs) via logOtpAttempt, SANS dépendre d'un
-        // accès physique au téléphone. Le fetch() est isolé dans son
-        // propre try/catch : avant ce fix, une erreur RÉSEAU ici (avant
-        // même d'atteindre notre backend/Infobip — ex. CORS, ATS, DNS,
-        // timeout WKWebView) tombait dans le catch général de sendOTP() et
-        // affichait le même message générique que les vraies erreurs
-        // Firebase, donnant l'illusion à tort d'un rejet Infobip alors que
-        // la requête n'était en fait jamais partie du téléphone. En
-        // comparant otp_debug_logs (client) et otp_debug_logs_server
-        // (serveur, voir /api/otp/send) pour un même essai, on voit
-        // immédiatement si la requête a atteint Vercel ou non.
-        const fetchStartedAt = Date.now();
-        logOtpAttempt({ flow: 'register', step: 'fetch_start', phoneE164, carrier });
-
-        let res: Response;
+        // Le diagnostic réseau détaillé (logOtpAttempt) visait spécifiquement
+        // le fetch() brut vers l'ancienne route Vercel /api/otp/send (CORS,
+        // ATS, DNS...). Il ne s'applique plus : httpsCallable passe par le
+        // SDK Firebase Functions, avec sa propre gestion de transport/retry.
         try {
-          res = await fetch(apiUrl('/api/otp/send'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phone: phoneE164, purpose: 'register' }),
-          });
-        } catch (networkErr: any) {
-          const msg = String(networkErr?.message || networkErr);
-          console.error('[DEBUG] /api/otp/send — échec RÉSEAU (avant réponse serveur):', networkErr);
-          logOtpAttempt({
-            flow: 'register', step: 'fetch_network_error', phoneE164, carrier,
-            errorMessage: msg, durationMs: Date.now() - fetchStartedAt,
-          });
-          setError(`Connexion au serveur impossible (réseau). Détail: ${msg}`);
+          // ⚠️ FIX (16/09) : si le token n'est pas encore en localStorage
+          // (formulaire rempli très vite, APNs lent sur iOS...), dernière
+          // tentative bornée à 5 s avant de se résigner au SMS.
+          let pushToken = readPendingPushToken();
+          if (!pushToken) {
+            const fresh = await Promise.race([
+              requestPushRef.current().catch(() => null),
+              new Promise<null>((r) => setTimeout(() => r(null), 5000)),
+            ]);
+            pushToken = fresh || readPendingPushToken();
+          }
+          console.log('[Push] Token envoyé à registrationStart :', pushToken ? `${pushToken.slice(0, 12)}…` : 'AUCUN → SMS');
+          const { sessionId: newSessionId, channel } = await startRegistration(phoneE164, pushToken);
+          setOtpChannel(channel === 'push' ? 'push' : 'sms');
+          setSessionId(newSessionId);
+          setStep('otp');
+          setResendCooldown(60);
+        } catch (err: any) {
+          const msg = err instanceof RegistrationActionError ? err.message : "Erreur lors de l'envoi du code";
+          setError(msg);
+        } finally {
           setLoading(false);
-          return;
         }
-
-        const json = await res.json().catch((parseErr) => {
-          console.error('[DEBUG] /api/otp/send — réponse non-JSON:', parseErr);
-          logOtpAttempt({
-            flow: 'register', step: 'fetch_bad_json', phoneE164, carrier,
-            httpStatus: res.status, errorMessage: String(parseErr?.message || parseErr),
-            durationMs: Date.now() - fetchStartedAt,
-          });
-          return null;
-        });
-
-        if (!res.ok) {
-          console.error('[DEBUG] /api/otp/send — erreur API:', res.status, json);
-          logOtpAttempt({
-            flow: 'register', step: 'fetch_api_error', phoneE164, carrier,
-            httpStatus: res.status, errorMessage: json?.error,
-            durationMs: Date.now() - fetchStartedAt,
-          });
-          setError(json?.error || `Erreur lors de l'envoi du code (HTTP ${res.status})`);
-          setLoading(false);
-          return;
-        }
-        logOtpAttempt({
-          flow: 'register', step: 'fetch_success', phoneE164, carrier,
-          httpStatus: res.status, durationMs: Date.now() - fetchStartedAt,
-        });
-        setStep('otp');
-        setResendCooldown(60);
-        setLoading(false);
         return;
       }
       useCustomOtpRef.current = false;
@@ -382,6 +421,7 @@ export default function RegisterPage() {
     // toute course avec onAuthStateChanged (voir useAuth.ts). Relâché par
     // signUp() en cas de succès, ou ici même si l'utilisateur abandonne.
     suppressAutoProfileRef.current = true;
+    registrationInProgressRef.current = true;
     await sendOTP();
   };
 
@@ -422,16 +462,32 @@ export default function RegisterPage() {
 
   const finalizeRegistration = async () => {
     if (isNativeRef.current) await waitForJsAuthSync();
-    const syntheticEmail = `${formData.phone.replace(/\D/g, '')}@agrimarche.sn`;
-    await signUp(syntheticEmail, formData.password, formData.name, {
-      phone: formData.phone,
-      phoneVerified: true,
+    // Orange : écrit désormais le profil (+ email/mot de passe pour
+    // pouvoir se reconnecter ensuite) côté serveur via l'Admin SDK — voir
+    // completeOrangeRegistration dans functions/src/orangeRegistration.ts
+    // — au lieu du writeDoc direct côté client (signUp) d'avant, qui
+    // dépendait de firestore.rules et ne passait jamais par les mêmes
+    // vérifications (unicité du numéro, journalisation) que Free/Expresso.
+    await completeOrangeRegistration({
+      password: formData.password,
+      name: formData.name,
       region: formData.region,
       departement: formData.departement,
       commune: formData.commune.trim(),
       quartier: formData.quartier.trim() || '',
+      role: 'client',
     });
+    // Le SDK client ne sait pas encore que l'e-mail/mot de passe viennent
+    // d'être ajoutés côté serveur (Admin SDK) : on force un rafraîchissement
+    // du user local pour que le reste de l'app (ex: affichage de l'email)
+    // ne reste pas sur l'ancien état "téléphone seul".
+    await auth.currentUser?.reload();
     setStep('success');
+    // On ne relâche le garde-fou qu'ICI, une fois le profil réellement
+    // écrit côté serveur — pas avant. La redirection est désormais
+    // explicite (/auth/login), plus besoin que le useEffect générique
+    // s'en charge.
+    registrationInProgressRef.current = false;
     setTimeout(() => router.push('/auth/login'), 2500);
   };
 
@@ -445,37 +501,31 @@ export default function RegisterPage() {
     try {
       if (useCustomOtpRef.current) {
         // Free/Yas et Expresso : vérification + création complète du
-        // compte (mot de passe, profil Firestore) côté serveur via
-        // l'Admin SDK — voir /api/otp/verify. On ne rappelle plus
-        // signUp() ici : le profil est déjà écrit, il ne reste qu'à
-        // établir la session côté client.
-        const phoneE164 = toE164(formData.phone);
-        const res = await fetch(apiUrl('/api/otp/verify'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            phone: phoneE164,
-            code,
-            registration: {
-              password: formData.password,
-              name: formData.name,
-              region: formData.region,
-              departement: formData.departement,
-              commune: formData.commune.trim(),
-              quartier: formData.quartier.trim(),
-            },
-          }),
-        });
-        const json = await res.json();
-        if (!res.ok) {
-          setError(json.error || 'Code incorrect');
+        // compte (email synthétique + mot de passe, profil Firestore)
+        // côté serveur via l'Admin SDK — voir registrationVerify dans
+        // functions/src/registration.ts. On ne rappelle plus signUp()
+        // ici : le profil est déjà écrit, il ne reste qu'à établir la
+        // session côté client avec le customToken renvoyé.
+        if (!sessionId) { setError('Session expirée, renvoyez le code'); setLoading(false); return; }
+        try {
+          const { customToken } = await verifyRegistrationCode(sessionId, code, {
+            password: formData.password,
+            name: formData.name,
+            region: formData.region,
+            departement: formData.departement,
+            commune: formData.commune.trim(),
+            quartier: formData.quartier.trim(),
+            role: 'client',
+          });
+          await signInWithCustomToken(auth, customToken);
+          suppressAutoProfileRef.current = false;
+          setStep('success');
+          setTimeout(() => router.push('/auth/login'), 2500);
+        } catch (err: any) {
+          setError(err instanceof RegistrationActionError ? err.message : 'Code incorrect');
+        } finally {
           setLoading(false);
-          return;
         }
-        await signInWithCustomToken(auth, json.customToken);
-        suppressAutoProfileRef.current = false;
-        setStep('success');
-        setTimeout(() => router.push('/auth/login'), 2500);
         return;
       }
 
@@ -493,7 +543,9 @@ export default function RegisterPage() {
       await finalizeRegistration();
     } catch (err: any) {
       console.error('[DEBUG] Erreur handleVerifyOTP:', err);
-      if (err?.code === 'auth/invalid-verification-code') {
+      if (err instanceof RegistrationActionError) {
+        setError(err.message);
+      } else if (err?.code === 'auth/invalid-verification-code') {
         setError('Code incorrect, vérifiez le SMS');
       } else if (err?.code === 'auth/code-expired') {
         setError('Code expiré, renvoyez un nouveau SMS');
@@ -545,7 +597,7 @@ export default function RegisterPage() {
               <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-green-600 to-emerald-600 rounded-2xl mb-4 shadow-lg">
                 <MessageSquare size={28} className="text-white" />
               </div>
-              <h2 className="text-2xl font-bold text-gray-800">Vérification SMS</h2>
+              <h2 className="text-2xl font-bold text-gray-800">{otpChannel === 'push' ? 'Vérification par notification' : 'Vérification SMS'}</h2>
               <p className="text-gray-500 text-sm mt-2">
                 Code envoyé au <span className="font-semibold text-gray-700">{toE164(formData.phone)}</span>
               </p>
@@ -634,10 +686,10 @@ export default function RegisterPage() {
           {/* HEADER */}
           <div className="text-center mb-6">
             <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-white shadow-lg ring-4 ring-green-100 mb-4 overflow-hidden">
-              <Image src="/logo.png" alt="AgriMarché" width={80} height={80} className="w-full h-full object-cover rounded-full" />
+              <Image src="/logo.png" alt="SunuMëñëf" width={80} height={80} className="w-full h-full object-cover rounded-full" />
             </div>
             <h2 className="text-2xl font-bold text-gray-800">Inscription</h2>
-            <p className="text-gray-500 text-sm mt-1">Créez votre compte AgriMarché</p>
+            <p className="text-gray-500 text-sm mt-1">Créez votre compte SunuMëñëf</p>
           </div>
 
           {/* SMS badge */}

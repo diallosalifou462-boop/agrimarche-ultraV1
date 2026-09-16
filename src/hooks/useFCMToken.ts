@@ -17,7 +17,7 @@ function getNativePlatformName(): 'ios' | 'android' | 'web' {
   return ((window as any).Capacitor?.getPlatform?.() as 'ios' | 'android') ?? 'web';
 }
 
-const PENDING_FCM_TOKEN_KEY = 'agrimarche_pending_fcm_token';
+export const PENDING_FCM_TOKEN_KEY = 'agrimarche_pending_fcm_token';
 
 export function useFCMToken() {
   const { user } = useAuth();
@@ -55,8 +55,8 @@ export function useFCMToken() {
           // iOS et sans effet si le canal existe déjà (createChannel est idempotent).
           if (getNativePlatformName() === 'android') {
             const channels: Array<{ id: string; name: string; importance: number; visibility: number; vibration: boolean }> = [
-              { id: 'agrimarche_default', name: 'Notifications AgriMarché', importance: 4, visibility: 1, vibration: true },
-              { id: 'agrimarche_urgent', name: 'Alertes urgentes AgriMarché', importance: 5, visibility: 1, vibration: true },
+              { id: 'agrimarche_default', name: 'Notifications SunuMëñëf', importance: 4, visibility: 1, vibration: true },
+              { id: 'agrimarche_urgent', name: 'Alertes urgentes SunuMëñëf', importance: 5, visibility: 1, vibration: true },
             ];
             await Promise.all(
               channels.map((c) =>
@@ -118,10 +118,18 @@ export function useFCMToken() {
       };
 
       if (!user) {
-        const anonRef = doc(db, 'deviceTokens', fcmToken);
-        await setDoc(anonRef, payload);
+        // ⚠️ FIX (16/09) : le localStorage est écrit AVANT Firestore. Avant,
+        // si setDoc(deviceTokens) échouait (règle Firestore sans auth, réseau
+        // coupé...), l'exception sortait avant cette ligne : le token n'était
+        // jamais mémorisé, readPendingPushToken() renvoyait undefined et
+        // registrationStart retombait TOUJOURS sur SMS.
         if (typeof window !== 'undefined') {
           window.localStorage.setItem(PENDING_FCM_TOKEN_KEY, JSON.stringify({ token: fcmToken, platform }));
+        }
+        try {
+          await setDoc(doc(db, 'deviceTokens', fcmToken), payload);
+        } catch (err) {
+          console.warn('[FCM] Écriture deviceTokens refusée (token gardé en local):', err);
         }
         return;
       }
@@ -185,8 +193,18 @@ export function useFCMToken() {
   // ⚠️ Fonctionne désormais SANS utilisateur connecté (token pré-inscription,
   // voir saveTokenToFirestore ci-dessus) — c'est le but recherché.
   const requestPermission = useCallback(async (): Promise<string | null> => {
+    // ⚠️ FIX (16/09) — CAUSE PRINCIPALE du "push jamais utilisé" :
+    // `isNative` et `isSupportedBrowser` sont des états remplis de façon
+    // ASYNCHRONE par checkSupport(). La page d'inscription appelle
+    // requestPermission() dès le montage, donc AVANT que ces états passent
+    // à true : on tombait dans la branche web, `!isSupportedBrowser` était
+    // vrai, et la fonction renvoyait null sans même demander le token — sur
+    // l'APK comme sur le web. On détecte désormais le contexte au moment de
+    // l'appel, sans dépendre de l'état React.
+    const nativeNow = isNative || isNativePlatform();
+
     // --- Branche native (Android/iOS via Capacitor) ---
-    if (isNative) {
+    if (nativeNow) {
       try {
         const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
         const status = await FirebaseMessaging.checkPermissions();
@@ -221,8 +239,9 @@ export function useFCMToken() {
       }
     }
 
-    // --- Branche web (inchangée) ---
-    if (!isSupportedBrowser) {
+    // --- Branche web ---
+    const supportedNow = isSupportedBrowser || (await isSupported().catch(() => false));
+    if (!supportedNow || typeof window === 'undefined' || !('Notification' in window)) {
       console.warn('Notifications non supportées sur ce navigateur');
       return null;
     }
