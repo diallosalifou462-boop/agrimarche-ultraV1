@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, type JSX, type MouseEvent } from 'react';
+import { useState, useEffect, type JSX } from 'react';
 import Link from 'next/link';
 import {
   DollarSign, ShoppingBag, Package, Star,
@@ -17,7 +17,6 @@ import { onAuthStateChanged } from 'firebase/auth';
 // cohérent (même fournisseur, même UX de correction).
 import { searchPlaces, reverseGeocode } from '@/lib/geo/geocode';
 import { computeGeohash } from '@/lib/geo/geohash';
-import { saveManualAddress, getManualAddressHistory, removeManualAddressHistoryEntry, formatManualAddressAge, type ManualAddressHistoryEntry } from '@/lib/manualLocation';
 import { isPlausibleSenegalCoordinate } from '@/lib/geo/distance';
 import type { GeocodeResult } from '@/lib/geo/types';
 import LocationPicker from '@/components/LocationPicker';
@@ -130,27 +129,6 @@ export default function SellerDashboard() {
   // toute position connue comme également fiable.
   const [sellerLocationSource, setSellerLocationSource] = useState<string | null>(null);
   const [sellerLocationUpdatedAt, setSellerLocationUpdatedAt] = useState<string | null>(null);
-  // ✨ NOUVEAU — retour explicite sur l'issue de l'enregistrement (voir le
-  // type `ManualAddressResult` renvoyé par lib/manualLocation.ts) : avant,
-  // un échec de synchronisation Firestore restait invisible pour le
-  // vendeur, qui voyait sa position "confirmée" localement sans savoir
-  // qu'elle n'avait peut-être pas atteint le serveur.
-  const [locationSyncWarning, setLocationSyncWarning] = useState<string | null>(null);
-  const [locationJustSaved, setLocationJustSaved] = useState(false);
-  // ✨ NOUVEAU — adresses manuelles déjà confirmées par ce vendeur, quel que
-  // soit l'écran (voir lib/manualLocation.ts) : utile s'il a déjà essayé
-  // plusieurs positions pour sa boutique et veut revenir à l'une d'elles.
-  const [locationHistory, setLocationHistory] = useState<ManualAddressHistoryEntry[]>([]);
-
-  const pickHistoryLocation = useCallback((entry: ManualAddressHistoryEntry) => {
-    setManualPin({ lat: entry.lat, lng: entry.lng });
-  }, []);
-
-  const deleteHistoryLocation = useCallback((entry: ManualAddressHistoryEntry, e: MouseEvent) => {
-    e.stopPropagation();
-    removeManualAddressHistoryEntry(entry.lat, entry.lng);
-    setLocationHistory(getManualAddressHistory());
-  }, []);
 
   useEffect(() => {
     const q = placeQuery.trim();
@@ -171,43 +149,37 @@ export default function SellerDashboard() {
   const saveManualLocation = async () => {
     if (!sellerUid || !manualPin) return;
     setSavingLocation(true);
-    setLocationSyncWarning(null);
     try {
       const geocoded = await reverseGeocode(manualPin.lat, manualPin.lng);
       const address =
         [geocoded?.neighborhood, geocoded?.city].filter(Boolean).join(', ') ||
         `${manualPin.lat.toFixed(5)}, ${manualPin.lng.toFixed(5)}`;
 
-      // 🔗 FIX ARCHITECTURAL — passe désormais par lib/manualLocation.ts,
-      // la même fonction utilisée par LiveLocation.tsx (/main/location) et
-      // le checkout. Avant, cette page écrivait Firestore toute seule
-      // (avec un `locationUpdatedAt` en string ISO, incompatible avec le
-      // `.toMillis()` attendu par LiveLocation.tsx au montage) et ne
-      // touchait JAMAIS le cache local partagé (lib/locationCache.ts) : la
-      // position boutique du vendeur pouvait donc être enregistrée avec
-      // succès sans jamais apparaître ailleurs dans l'app tant qu'un
-      // aller-retour Firestore n'avait pas eu lieu.
-      const result = await saveManualAddress({ uid: sellerUid, lat: manualPin.lat, lng: manualPin.lng, address });
+      // 🔗 FIX RACINE : ces trois champs (lat/lng/locationAddress) sont
+      // exactement ceux que app/admin/page.tsx lit pour chaque utilisateur
+      // (isValidCoordinate(user.lat, user.lng), user.locationAddress) —
+      // voir l'interface UserProfile là-bas. Le code précédent écrivait
+      // `latitude`/`longitude` (aucun champ `locationAddress` du tout), des
+      // noms que l'admin ne lit jamais : la position du vendeur pouvait donc
+      // être enregistrée avec succès sans JAMAIS apparaître dans l'onglet
+      // Utilisateurs. `locationSource: 'MANUAL_PIN'` reprend la valeur déjà
+      // utilisée par seller/register.tsx pour une saisie manuelle, afin de
+      // rester cohérent dans toute l'app.
+      await setDoc(doc(db, 'users', sellerUid), {
+        lat: manualPin.lat,
+        lng: manualPin.lng,
+        geohash: computeGeohash(manualPin.lat, manualPin.lng),
+        locationAddress: address,
+        locationSource: 'MANUAL_PIN',
+        locationUpdatedAt: new Date().toISOString(),
+      }, { merge: true });
 
       setSellerLocation(address);
       setSellerLocationSource('MANUAL_PIN');
       setSellerLocationUpdatedAt(new Date().toISOString());
       setShowLocationEditor(false);
-
-      if (!result.persisted && result.error === 'firestore_failed') {
-        // Enregistrement local réussi (les acheteurs sur cet appareil/cette
-        // session voient déjà la nouvelle position), mais la synchronisation
-        // serveur a échoué malgré les tentatives de retry — le vendeur doit
-        // le savoir plutôt que de croire sa boutique à jour partout.
-        setLocationSyncWarning("Position enregistrée sur cet appareil — synchronisation serveur en attente, vérifiez votre connexion.");
-      } else {
-        setLocationJustSaved(true);
-        setTimeout(() => setLocationJustSaved(false), 2200);
-      }
-      setLocationHistory(getManualAddressHistory());
     } catch (err) {
       console.error('Erreur enregistrement position boutique:', err);
-      setLocationSyncWarning("Une erreur est survenue lors de l'enregistrement. Réessayez.");
     } finally {
       setSavingLocation(false);
     }
@@ -556,13 +528,7 @@ export default function SellerDashboard() {
             </div>
             <button
               type="button"
-              onClick={() => {
-                setShowLocationEditor(v => {
-                  const next = !v;
-                  if (next) setLocationHistory(getManualAddressHistory());
-                  return next;
-                });
-              }}
+              onClick={() => setShowLocationEditor(v => !v)}
               className="w-8 h-8 rounded-xl bg-emerald-50 dark:bg-emerald-900/30 flex items-center justify-center flex-shrink-0 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 transition"
               aria-label="Modifier la position de la boutique"
             >
@@ -572,38 +538,6 @@ export default function SellerDashboard() {
 
           {showLocationEditor && (
             <div className="mt-3 pt-3 border-t border-gray-100 dark:border-gray-700">
-              {/* ✨ NOUVEAU — reprendre une position déjà confirmée
-                  ailleurs (lib/manualLocation.ts) en un tap. */}
-              {locationHistory.length > 0 && (
-                <div className="mb-2">
-                  <p className="text-[10px] text-gray-400 mb-1">Positions récentes :</p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {locationHistory.map((entry, i) => (
-                      <div
-                        key={`${entry.lat}-${entry.lng}-${i}`}
-                        className="inline-flex items-center gap-1 text-[11px] pl-2 pr-1 py-1 rounded-full border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 max-w-[220px]"
-                      >
-                        <button
-                          type="button"
-                          onClick={() => pickHistoryLocation(entry)}
-                          title={entry.address}
-                          className="truncate text-left"
-                        >
-                          📍 {entry.address} <span className="opacity-60">· {formatManualAddressAge(entry.savedAt)}</span>
-                        </button>
-                        <button
-                          type="button"
-                          aria-label="Supprimer cette position"
-                          onClick={(e) => deleteHistoryLocation(entry, e)}
-                          className="shrink-0 w-4 h-4 rounded-full flex items-center justify-center opacity-60 hover:opacity-100"
-                        >
-                          ×
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
               <div className="relative mb-2">
                 <input
                   type="text"
@@ -648,20 +582,6 @@ export default function SellerDashboard() {
               >
                 {savingLocation ? 'Enregistrement…' : 'Enregistrer cette position'}
               </button>
-              {/* ✨ NOUVEAU — statut explicite de la synchronisation serveur,
-                  voir ManualAddressResult dans lib/manualLocation.ts. */}
-              {locationSyncWarning && (
-                <p className="mt-2 text-[11px] text-amber-600 dark:text-amber-400 flex items-start gap-1.5">
-                  <span aria-hidden>⚠️</span>
-                  {locationSyncWarning}
-                </p>
-              )}
-              {locationJustSaved && (
-                <p className="mt-2 text-[11px] text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
-                  <span aria-hidden>✅</span>
-                  Position confirmée et synchronisée — visible immédiatement par les acheteurs.
-                </p>
-              )}
             </div>
           )}
         </div>

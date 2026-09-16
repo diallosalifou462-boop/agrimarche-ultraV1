@@ -68,8 +68,8 @@ export async function decideChannelAndSend(
       await admin.messaging().send({
         token: pushToken!,
         notification: {
-          title: 'AgriMarché',
-          body: `Votre code de ${purpose} AgriMarché est : ${code}. Ce code expire dans 5 minutes.`,
+          title: 'SunuMëñëf',
+          body: `Votre code de ${purpose} SunuMëñëf est : ${code}. Ce code expire dans 5 minutes.`,
         },
         data: { type: `${metricPrefix}_otp`, sessionId },
         android: { priority: 'high' },

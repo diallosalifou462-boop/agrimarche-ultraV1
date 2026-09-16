@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef, type MouseEvent } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   MapPin,
   Navigation,
@@ -35,16 +35,7 @@ import { db } from '@/lib/firebase/firebase';
 import { doc, updateDoc, getDoc, Timestamp } from 'firebase/firestore';
 import { distanceKm } from '@/lib/geo/distance';
 import { computeGeohash } from '@/lib/geo/geohash';
-import { setCachedLocation, getAnyCachedLocation } from '@/lib/locationCache';
-import {
-  saveManualAddress,
-  clearManualAddress,
-  getManualAddressHistory,
-  removeManualAddressHistoryEntry,
-  formatManualAddressAge,
-  subscribeToManualAddress,
-  type ManualAddressHistoryEntry,
-} from '@/lib/manualLocation';
+import { setCachedLocation } from '@/lib/locationCache';
 
 interface LocationData {
   lat: number;
@@ -145,17 +136,6 @@ export function LiveLocation() {
   const [showManualForm, setShowManualForm] = useState(false);
   const [savingManual, setSavingManual] = useState(false);
   const [manualCheckDone, setManualCheckDone] = useState(false);
-  // ✨ NOUVEAU — validation en direct + historique des adresses manuelles
-  // déjà confirmées sur cet appareil (lib/manualLocation.ts), pour proposer
-  // un "re-choisir" en un tap plutôt que de retaper la même adresse à
-  // chaque fois. `manualJustSaved` pilote un court flash de confirmation
-  // visuelle (checkmark animé) plutôt qu'un simple changement d'état muet.
-  const [manualError, setManualError] = useState<string | null>(null);
-  const [manualHistory, setManualHistory] = useState<ManualAddressHistoryEntry[]>([]);
-  const [manualJustSaved, setManualJustSaved] = useState(false);
-  const [manualLabel, setManualLabel] = useState<string>('');
-  const MANUAL_ADDRESS_MIN_LENGTH = 6;
-  const MANUAL_ADDRESS_LABEL_PRESETS = ['Maison', 'Bureau', 'Autre'];
 
   // Au montage : si le client avait déjà fixé une adresse manuelle
   // auparavant (locationSource === 'MANUAL_PIN' sur son profil), on la
@@ -695,20 +675,7 @@ export function LiveLocation() {
   //     tracking sans jamais être recalculé.
   const saveManualLocation = useCallback(async () => {
     const address = manualInput.trim();
-    setManualError(null);
-
-    // ✨ NOUVEAU — validation en direct plutôt qu'un bouton silencieusement
-    // inerte : "Dakar" seul (5 lettres) passait déjà, mais "Kr" ou une
-    // saisie accidentelle d'un caractère ne devrait pas déclencher un appel
-    // réseau ni écraser une adresse valide précédente.
-    if (address.length < MANUAL_ADDRESS_MIN_LENGTH) {
-      setManualError(`Adresse trop courte (minimum ${MANUAL_ADDRESS_MIN_LENGTH} caractères) — précisez le quartier ou un repère.`);
-      return;
-    }
-    if (!user?.uid) {
-      setManualError('Vous devez être connecté pour enregistrer une adresse.');
-      return;
-    }
+    if (!address || !user?.uid) return;
 
     setSavingManual(true);
     stopLocationTracking();
@@ -717,30 +684,16 @@ export function LiveLocation() {
     try {
       // On garde les dernières coordonnées connues (si on en a) pour ne pas
       // perdre la position sur la carte admin/livreur — seule l'ADRESSE
-      // affichée change. Sans coordonnées connues, on retombe sur celles
-      // déjà en cache, sinon le centre de Dakar plutôt que 0,0 (Golfe de
-      // Guinée) — jamais bloquant, l'objet affiché reste `address`, pas
-      // les coordonnées.
-      const fallbackCoords = getAnyCachedLocation();
-      const lat = location?.lat ?? fallbackCoords?.lat ?? 14.7167;
-      const lng = location?.lng ?? fallbackCoords?.lng ?? -17.4677;
+      // affichée change. Sans coordonnées connues, on ne touche pas lat/lng
+      // existants plutôt que d'écrire 0,0 (Golfe de Guinée).
+      const coords = location ? { lat: location.lat, lng: location.lng } : {};
 
-      // 🔗 FIX ARCHITECTURAL — passe désormais par lib/manualLocation.ts,
-      // la même fonction utilisée par checkout et seller/dashboard : c'est
-      // ce qui garantit qu'une adresse fixée ICI apparaît aussi partout
-      // ailleurs (catalogue, checkout, tableau de bord vendeur), et
-      // inversement. Avant, cette page écrivait son propre
-      // updateDoc+setCachedLocation en double, désynchronisé des deux
-      // autres écrans qui faisaient chacun la même chose à leur façon.
-      const result = await saveManualAddress({ uid: user.uid, lat, lng, address, label: manualLabel || undefined });
-
-      if (!result.persisted && result.error === 'firestore_failed') {
-        // ✨ Écriture locale réussie (l'app fonctionne déjà avec la
-        // nouvelle adresse) mais la synchronisation serveur a échoué après
-        // les tentatives de retry — on prévient sans bloquer, plutôt que de
-        // laisser croire à une confirmation serveur silencieuse.
-        setManualError('Adresse enregistrée sur cet appareil — synchronisation avec le serveur en attente (reconnexion réseau nécessaire).');
-      }
+      await updateDoc(doc(db, 'users', user.uid), {
+        ...coords,
+        locationAddress: address,
+        locationSource: 'MANUAL_PIN',
+        locationUpdatedAt: Timestamp.now(),
+      });
 
       setLocation(prev => ({
         lat: prev?.lat ?? 0,
@@ -763,35 +716,28 @@ export function LiveLocation() {
       setIsManualLocation(true);
       setManualAddress(address);
       setShowManualForm(false);
-      // ✨ Flash de confirmation animé (checkmark) plutôt qu'un simple
-      // repli silencieux du formulaire — donne un vrai accusé de réception
-      // visuel de l'action, comme le reste de l'app le fait déjà ailleurs.
-      setManualJustSaved(true);
-      setTimeout(() => setManualJustSaved(false), 2200);
-      setManualLabel('');
+
+      if (location) {
+        setCachedLocation({
+          lat: location.lat,
+          lng: location.lng,
+          city: address,
+          region: '',
+          country: 'Sénégal',
+          address,
+          detected: true,
+          // ✅ Adresse confirmée explicitement par le client : ce n'est PAS
+          // une position de repli, donc isDefault:false.
+          isDefault: false,
+        });
+      }
     } catch (err) {
       console.error('Erreur enregistrement adresse manuelle:', err);
       isManualRef.current = false;
-      setManualError('Une erreur est survenue. Réessayez.');
     } finally {
       setSavingManual(false);
     }
-
-  }, [manualInput, manualLabel, user?.uid, location, stopLocationTracking]);
-
-  /** Reprend une adresse déjà utilisée auparavant (historique local) sans retaper. */
-  const pickHistoryEntry = useCallback((entry: ManualAddressHistoryEntry) => {
-    setManualInput(entry.address);
-    setManualLabel(entry.label ?? '');
-    setManualError(null);
-  }, []);
-
-  /** Supprime une entrée de l'historique local sans affecter l'adresse active. */
-  const deleteHistoryEntry = useCallback((entry: ManualAddressHistoryEntry, e: MouseEvent) => {
-    e.stopPropagation();
-    removeManualAddressHistoryEntry(entry.lat, entry.lng);
-    setManualHistory(getManualAddressHistory());
-  }, []);
+  }, [manualInput, user?.uid, location, stopLocationTracking]);
 
   // Abandonne l'adresse manuelle et relance la détection automatique.
   const resumeAutoLocation = useCallback(() => {
@@ -799,41 +745,10 @@ export function LiveLocation() {
     setIsManualLocation(false);
     setManualAddress('');
     setManualInput('');
-    setManualError(null);
-    setManualJustSaved(false);
     setStatus('idle');
     setLocation(null);
-    // 🔗 FIX ARCHITECTURAL — clearManualAddress() (lib/manualLocation.ts)
-    // efface le cache local ET remet locationSource:'GPS' sur Firestore en
-    // un seul appel, cohérent avec saveManualAddress() utilisé ci-dessus :
-    // sans la remise à zéro Firestore, le prochain montage de cette page
-    // (ou de seller/dashboard) relisait locationSource:'MANUAL_PIN' et
-    // réactivait le mode manuel tout seul, rendant ce bouton sans effet
-    // durable.
-    clearManualAddress(user?.uid);
     startLocationTracking();
-  }, [startLocationTracking, user?.uid]);
-
-  // ✨ NOUVEAU — synchronisation temps réel : si l'adresse manuelle est
-  // confirmée ailleurs pendant que cette page est déjà ouverte (ex : le
-  // client corrige sa position au checkout dans un autre onglet/webview
-  // pendant que /main/location tourne en fond), cette page se met à jour
-  // sans attendre un remount ou un F5 (voir subscribeToManualAddress dans
-  // lib/manualLocation.ts).
-  useEffect(() => {
-    return subscribeToManualAddress((detail) => {
-      if (detail.type === 'saved') {
-        isManualRef.current = true;
-        setIsManualLocation(true);
-        setManualAddress(detail.address);
-        setManualHistory(getManualAddressHistory());
-      } else if (detail.type === 'cleared') {
-        isManualRef.current = false;
-        setIsManualLocation(false);
-        setManualAddress('');
-      }
-    });
-  }, []);
+  }, [startLocationTracking]);
 
   // ============================================================
   // Formateurs
@@ -1028,13 +943,7 @@ export function LiveLocation() {
                   {isLocating ? 'Recherche...' : 'Une fois'}
                 </button>
                 <button
-                  onClick={() => {
-                    setManualInput('');
-                    setManualError(null);
-                    setManualLabel('');
-                    setManualHistory(getManualAddressHistory());
-                    setShowManualForm(true);
-                  }}
+                  onClick={() => { setManualInput(''); setShowManualForm(true); }}
                   className="px-5 py-2.5 bg-gray-100 text-gray-700 rounded-xl text-sm font-medium flex items-center gap-2 hover:bg-gray-200 transition"
                 >
                   <Edit3 size={16} />
@@ -1056,92 +965,13 @@ export function LiveLocation() {
               Une fois confirmée, cette adresse sera utilisée partout (livreur, admin, suivi) et
               le GPS automatique sera arrêté pour ne pas l'écraser.
             </p>
-
-            {/* ✨ NOUVEAU — historique local : reprendre une adresse déjà
-                confirmée ici même sans retaper (voir lib/manualLocation.ts,
-                getManualAddressHistory). N'affiche rien tant qu'aucune
-                adresse manuelle n'a jamais été confirmée sur cet appareil. */}
-            {manualHistory.length > 0 && (
-              <div className="space-y-1.5">
-                <p className="text-[10px] font-semibold text-violet-500 uppercase tracking-wider">
-                  Adresses récentes
-                </p>
-                <div className="flex flex-wrap gap-1.5">
-                  {manualHistory.map((entry, idx) => (
-                    <div
-                      key={`${entry.lat}-${entry.lng}-${idx}`}
-                      className="group text-[11px] pl-2.5 pr-1.5 py-1 bg-white border border-violet-200 rounded-full text-violet-700 hover:bg-violet-100 transition flex items-center gap-1.5 max-w-[240px]"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => pickHistoryEntry(entry)}
-                        className="truncate text-left"
-                        title={entry.address}
-                      >
-                        {entry.label && <span className="font-semibold">{entry.label} · </span>}
-                        {entry.address}
-                        <span className="text-violet-400 ml-1 hidden sm:inline">· {formatManualAddressAge(entry.savedAt)}</span>
-                      </button>
-                      <button
-                        type="button"
-                        aria-label="Supprimer cette adresse de l'historique"
-                        onClick={(e) => deleteHistoryEntry(entry, e)}
-                        className="shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-violet-400 hover:bg-violet-200 hover:text-violet-700"
-                      >
-                        ×
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div>
-              <input
-                type="text"
-                value={manualInput}
-                onChange={(e) => { setManualInput(e.target.value); if (manualError) setManualError(null); }}
-                onKeyDown={(e) => { if (e.key === 'Enter' && !savingManual) saveManualLocation(); }}
-                placeholder="Ex : Villa 12, Cité Keur Gorgui, Dakar"
-                maxLength={120}
-                aria-invalid={!!manualError}
-                className={`w-full text-sm rounded-lg border px-3 py-2 focus:outline-none focus:ring-2 transition ${
-                  manualError
-                    ? 'border-red-300 focus:ring-red-300'
-                    : 'border-violet-200 focus:ring-violet-400'
-                }`}
-              />
-              <div className="flex items-center justify-between mt-1">
-                {manualError ? (
-                  <p className="text-[11px] text-red-600 flex items-center gap-1">
-                    <AlertCircle size={11} />
-                    {manualError}
-                  </p>
-                ) : <span />}
-                <span className="text-[10px] text-violet-400 font-mono">{manualInput.length}/120</span>
-              </div>
-            </div>
-
-            {/* ✨ NOUVEAU — étiquette optionnelle pour reconnaître cette
-                adresse d'un coup d'œil dans l'historique (lib/manualLocation.ts) */}
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-[10px] text-violet-500 font-medium">Étiquette (facultatif) :</span>
-              {MANUAL_ADDRESS_LABEL_PRESETS.map((preset) => (
-                <button
-                  key={preset}
-                  type="button"
-                  onClick={() => setManualLabel((prev) => (prev === preset ? '' : preset))}
-                  className={`text-[11px] px-2 py-0.5 rounded-full border transition ${
-                    manualLabel === preset
-                      ? 'bg-violet-600 text-white border-violet-600'
-                      : 'bg-white text-violet-600 border-violet-200 hover:bg-violet-100'
-                  }`}
-                >
-                  {preset}
-                </button>
-              ))}
-            </div>
-
+            <input
+              type="text"
+              value={manualInput}
+              onChange={(e) => setManualInput(e.target.value)}
+              placeholder="Ex : Villa 12, Cité Keur Gorgui, Dakar"
+              className="w-full text-sm rounded-lg border border-violet-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-violet-400"
+            />
             <div className="flex gap-2">
               <button
                 onClick={saveManualLocation}
@@ -1152,22 +982,12 @@ export function LiveLocation() {
                 Confirmer cette adresse
               </button>
               <button
-                onClick={() => { setShowManualForm(false); setManualInput(manualAddress); setManualError(null); setManualLabel(''); }}
+                onClick={() => { setShowManualForm(false); setManualInput(manualAddress); }}
                 className="px-4 py-2 bg-white text-gray-600 rounded-lg text-sm font-medium border border-gray-200 hover:bg-gray-50 transition"
               >
                 Annuler
               </button>
             </div>
-          </div>
-        )}
-
-        {/* ✨ NOUVEAU — accusé de réception visuel juste après confirmation,
-            pour que l'action "confirmer mon adresse" ait un vrai retour
-            perceptible au lieu de simplement refermer le formulaire. */}
-        {manualJustSaved && (
-          <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-medium rounded-xl px-3 py-2">
-            <CheckCircle size={14} />
-            Adresse manuelle enregistrée — utilisée partout dans l'app dès maintenant.
           </div>
         )}
 

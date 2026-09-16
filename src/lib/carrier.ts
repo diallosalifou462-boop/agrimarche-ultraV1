@@ -1,8 +1,9 @@
 /**
  * Détection de l'opérateur sénégalais à partir du numéro de téléphone.
  *
- * Préfixes confirmés (source : porteur du projet) :
- *   - Orange   : 77, 78, 71
+ * Préfixes (source : répartition Sonatel/Orange, Free — rebrandé "Yas" —,
+ * Expresso — à ajuster si l'ARTP réattribue des plages) :
+ *   - Orange   : 77, 78
  *   - Free/Yas : 76
  *   - Expresso : 70, 75
  *
@@ -28,7 +29,7 @@ export function detectCarrier(phone: string): Carrier {
   const digits = localDigits(phone);
   const prefix2 = digits.slice(0, 2);
 
-  if (prefix2 === '77' || prefix2 === '78' || prefix2 === '71') return 'orange';
+  if (prefix2 === '77' || prefix2 === '78') return 'orange';
   if (prefix2 === '76') return 'free';
   if (prefix2 === '70' || prefix2 === '75') return 'expresso';
   return 'unknown';

@@ -1,6 +1,6 @@
 "use client";
 
-import { doc, getDoc, collection, getDocs, query, where, limit } from 'firebase/firestore';
+import { doc, getDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
 import { getCurrentPosition } from '@/lib/geolocation';
 import { reverseGeocode } from '@/lib/geo/geocode';
@@ -24,6 +24,7 @@ import {
   Navigation,
 } from 'lucide-react';
 
+import { products } from '@/data/products';
 import { useCart } from '@/hooks/useCart';
 
 interface Product {
@@ -285,40 +286,23 @@ function ProductDetailContent() {
   useEffect(() => {
     if (!id) return;
 
-    // ⚠️ FIX : cette page lisait le produit dans le jeu de données de démo
-    // statique (@/data/products) au lieu de Firestore, où vivent les vrais
-    // produits (panier, catalogue, page catégorie). Un produit réel menait
-    // donc soit à "Produit introuvable", soit — pire — affichait par
-    // coïncidence un produit fictif du même id. On lit maintenant le vrai
-    // document Firestore, comme le reste de l'app.
     const loadProduct = async () => {
       setLoading(true);
-      try {
-        const snap = await getDoc(doc(db, 'products', id));
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const foundProduct = products.find((p) => p.id === id);
 
-        if (!snap.exists()) {
-          setError('Produit introuvable');
-          setLoading(false);
-          return;
-        }
-
-        const foundProduct = { id: snap.id, ...snap.data() } as Product;
-        setProduct(foundProduct);
-
-        const relatedSnap = await getDocs(
-          query(collection(db, 'products'), where('category', '==', foundProduct.category), limit(5))
-        );
-        const relatedProducts = relatedSnap.docs
-          .map((d) => ({ id: d.id, ...d.data() } as Product))
-          .filter((p) => p.id !== foundProduct.id)
-          .slice(0, 4);
-        setRelated(relatedProducts);
-      } catch (err) {
-        console.error('Erreur lors du chargement du produit:', err);
+      if (!foundProduct) {
         setError('Produit introuvable');
-      } finally {
         setLoading(false);
+        return;
       }
+
+      setProduct(foundProduct);
+      const relatedProducts = products
+        .filter((p) => p.category === foundProduct.category && p.id !== foundProduct.id)
+        .slice(0, 4);
+      setRelated(relatedProducts);
+      setLoading(false);
     };
 
     loadProduct();

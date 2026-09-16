@@ -87,7 +87,7 @@ export async function detectCarrier(phoneE164: string): Promise<CarrierSN> {
 }
 
 // ⚠️ Doit produire EXACTEMENT la même chaîne que phoneToEmail() côté
-// frontend (src/contexts/AuthContext.tsx : `${phone.replace(/\D/g,'')}@agrimarche.sn`),
+// frontend (src/contexts/AuthContext.tsx : `${phone.replace(/\D/g,'')}@gmail.com`),
 // qui s'applique au numéro LOCAL tel que tapé par l'utilisateur (sans
 // indicatif +221 — le formulaire n'en demande pas). normalizePhoneSN()
 // renvoie lui la forme E.164 complète (+221XXXXXXXXX) ; on retire donc
@@ -95,5 +95,5 @@ export async function detectCarrier(phoneE164: string): Promise<CarrierSN> {
 // un email qui ne correspond à aucun compte pour le login/reset.
 export function phoneToSyntheticEmail(phoneE164: string): string {
   const digits = phoneE164.replace(/\D/g, '').replace(/^221/, '');
-  return `${digits}@agrimarche.sn`;
+  return `${digits}@gmail.com`;
 }

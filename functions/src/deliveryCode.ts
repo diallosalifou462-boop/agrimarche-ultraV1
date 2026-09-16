@@ -52,7 +52,7 @@ async function ensureGuestUser(uid: string, normalizedPhone: string, displayName
   if (!userSnap.exists) {
     await userRef.set({
       uid, phone: normalizedPhone, role: 'buyer', isGuest: true,
-      displayName: displayName || 'Client AgriMarché',
+      displayName: displayName || 'Client SunuMëñëf',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
   }
@@ -219,7 +219,7 @@ export const confirmDeliveryWithCode = onCall({ region: REGION }, async (request
 
     const attempts = order.deliveryCodeAttempts ?? 0;
     if (attempts >= MAX_CODE_ATTEMPTS) {
-      throw new HttpsError('resource-exhausted', 'Trop de tentatives sur cette commande — contactez le support AgriMarché.');
+      throw new HttpsError('resource-exhausted', 'Trop de tentatives sur cette commande — contactez le support SunuMëñëf.');
     }
 
     const submitted = hashCode(String(code).trim(), order.deliveryCodeSalt);

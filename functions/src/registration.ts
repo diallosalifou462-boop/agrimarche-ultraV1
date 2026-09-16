@@ -132,8 +132,8 @@ async function decideChannelAndSend(sessionId: string, phone: string, pushToken:
       await admin.messaging().send({
         token: pushToken,
         notification: {
-          title: 'AgriMarché',
-          body: `Votre code de confirmation AgriMarché est : ${code}. Ce code expire dans 5 minutes.`,
+          title: 'SunuMëñëf',
+          body: `Votre code de confirmation SunuMëñëf est : ${code}. Ce code expire dans 5 minutes.`,
         },
         data: { type: 'registration_otp', sessionId },
         android: { priority: 'high' },

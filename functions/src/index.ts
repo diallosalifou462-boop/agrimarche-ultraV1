@@ -134,10 +134,10 @@ export const processEmailQueue = functions.firestore.onDocumentCreated(
       // (ex: notifications@agrimarche.sn) avant tout envoi à de vrais
       // clients, sous peine d'emails jamais délivrés en production.
       const { error } = await resend.emails.send({
-        from: 'AgriMarché <onboarding@resend.dev>',
+        from: 'SunuMëñëf <onboarding@resend.dev>',
         to: data.to,
         subject: data.subject,
-        html: `<div><h2>🌿 AgriMarché</h2><p>${escapeHtml(data.body)}</p></div>`,
+        html: `<div><h2>🌿 SunuMëñëf</h2><p>${escapeHtml(data.body)}</p></div>`,
       });
       
       if (error) throw new Error(error.message);
@@ -255,7 +255,7 @@ const BUYER_STICKERS = [
   '🥳 Merci pour votre confiance !',
   '💚 On prend soin de votre commande !',
   '✨ Ça va être délicieux !',
-  '🙏 Merci d\'avoir choisi AgriMarché !',
+  '🙏 Merci d\'avoir choisi SunuMëñëf !',
 ];
 function randomSticker(list: string[]): string {
   return list[Math.floor(Math.random() * list.length)];
@@ -536,7 +536,7 @@ export const notifyNewProduct = functions.firestore.onDocumentCreated(
     const sellerLabel = product.sellerName ?? 'un producteur local';
     const body = priceLabel
       ? `Disponible dès maintenant chez ${sellerLabel}${product.region ? ` (${product.region})` : ''} — ${priceLabel}`
-      : `${product.name} est maintenant disponible sur AgriMarché`;
+      : `${product.name} est maintenant disponible sur SunuMëñëf`;
     // ⚠️ FIX : pointait vers `/product?id=...` — la fiche de CE seul
     // produit. Un acheteur qui reçoit "🌾 Nouveau : Bananes !" et tape
     // sur la notif doit atterrir sur le rayon Fruits en entier (mêmes

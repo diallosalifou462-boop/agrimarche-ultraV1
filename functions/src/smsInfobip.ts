@@ -12,7 +12,7 @@
 // ============================================================
 const INFOBIP_BASE_URL = process.env.INFOBIP_BASE_URL; // ex: https://xxxxx.api.infobip.com
 const INFOBIP_API_KEY = process.env.INFOBIP_API_KEY;
-const INFOBIP_SENDER = process.env.INFOBIP_SENDER ?? 'AgriMarche';
+const INFOBIP_SENDER = process.env.INFOBIP_SENDER ?? 'SunuMenef';
 
 export async function sendOtpSmsInfobip(
   phoneE164: string,
@@ -28,7 +28,7 @@ export async function sendOtpSmsInfobip(
       {
         destinations: [{ to: phoneE164.replace('+', '') }],
         from: INFOBIP_SENDER,
-        text: `Votre code de ${purpose} AgriMarché est : ${code}. Ce code expire dans 5 minutes.`,
+        text: `Votre code de ${purpose} SunuMëñëf est : ${code}. Ce code expire dans 5 minutes.`,
       },
     ],
   };

@@ -107,7 +107,7 @@ export const checkRegistrationHealth = onSchedule(
     if (failureRate >= FAILURE_RATE_ALERT_THRESHOLD || sendFailed >= MIN_VOLUME_FOR_ALERT) {
       if (!(await tryAcquireAlertCooldown())) return; // incident déjà signalé récemment, ne repage pas les admins
       await notifyAdmins(
-        '🚨 Inscription AgriMarché : taux d\'échec anormal',
+        '🚨 Inscription SunuMëñëf : taux d\'échec anormal',
         `${Math.round(failureRate * 100)}% d'échecs de vérification (${verifyFailed}/${totalAttempts}), ${sendFailed} échec(s) d'envoi, ${started} inscription(s) démarrée(s) aujourd'hui.`
       );
     }

@@ -8,7 +8,7 @@
 // ============================================================
 const MESSAGES: Record<string, string> = {
   INVALID_PHONE: 'Ce numéro ne semble pas valide. Vérifie le format et réessaie.',
-  PHONE_ALREADY_USED: 'Ce numéro est déjà associé à un compte AgriMarché.',
+  PHONE_ALREADY_USED: 'Ce numéro est déjà associé à un compte SunuMëñëf.',
   ORANGE_USE_FIREBASE_AUTH: 'Pour un numéro Orange, la vérification se fait par SMS classique.',
   REGISTRATION_IN_PROGRESS: 'Une inscription est déjà en cours avec ce numéro sur un autre appareil.',
   TOO_MANY_REQUESTS: 'Trop de tentatives. Réessaie dans quelques minutes.',
