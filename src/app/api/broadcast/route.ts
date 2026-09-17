@@ -19,6 +19,7 @@
 //   excludeUserId?: string   // ex: le vendeur qui vient de publier
 // }
 
+import { absoluteAppLink } from '@/lib/categoryLink';
 import { NextRequest, NextResponse } from 'next/server';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
@@ -147,7 +148,7 @@ export async function POST(request: NextRequest) {
           },
           webpush: {
             notification: { icon: '/icons/icon-192.png', badge: '/icons/badge-72.png' },
-            fcmOptions: { link },
+            fcmOptions: { link: absoluteAppLink(link) },
           },
         });
         pushSuccessCount += multicast.successCount;

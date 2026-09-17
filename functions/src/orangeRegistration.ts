@@ -20,7 +20,7 @@
 import { onCall, HttpsError, FunctionsErrorCode } from 'firebase-functions/v2/https';
 import * as admin from 'firebase-admin';
 import { normalizePhoneSN, detectCarrier, phoneToSyntheticEmail } from './carrier';
-import { claimPhoneForAccount, PhoneAlreadyUsedError } from './phoneUniqueness';
+import { claimPhoneForAccount, PhoneAlreadyUsedError, findAuthAccountForPhone } from './phoneUniqueness';
 import { logAuditEvent } from './audit';
 import { bumpRegistrationMetric } from './metrics';
 import { localizeError } from './errorMessages';
@@ -72,6 +72,18 @@ export const completeOrangeRegistration = onCall({ region: 'us-central1', enforc
   // de connexion de l'app.
   const password = typeof profile.password === 'string' ? profile.password : '';
   if (password.length < 6) throwLocalized('invalid-argument', 'PASSWORD_REQUIRED');
+  // Ce numéro a déjà un VRAI compte (souvent : email seul, sans numéro
+  // attaché) → Firebase Phone Auth vient de créer un doublon vide (uid
+  // courant). On le supprime et on refuse l'inscription au lieu de laisser
+  // deux comptes pour le même numéro.
+  const existingAccount = await findAuthAccountForPhone(phone);
+  if (existingAccount && existingAccount !== uid) {
+    await admin.auth().deleteUser(uid).catch(() => {});
+    await bumpRegistrationMetric('rejected_phone_used');
+    await logAuditEvent({ type: 'account_creation_failed', phone, carrier, accountId: uid, reason: 'phone_has_existing_account' });
+    throwLocalized('already-exists', 'PHONE_ALREADY_USED');
+  }
+
   const syntheticEmail = phoneToSyntheticEmail(phone);
 
   try {

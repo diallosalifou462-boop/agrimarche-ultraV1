@@ -129,7 +129,7 @@ export default function SellerRegisterPage() {
       // Pour les comptes Free/Yas/Expresso (créés via /api/otp/verify,
       // sans email attaché à l'objet Firebase Auth avant leur premier
       // signIn), auth.currentUser.email vaut `null` côté client alors que
-      // le document Firestore a déjà `email: "<tel>@agrimarche.sn"` —
+      // le document Firestore a déjà `email: "<tel>@sunnumenef.sn"` —
       // envoyer `email: user.email` écrasait ce champ par null et violait
       // la règle → "permission-denied" sur CE formulaire. En omettant la
       // clé lors d'un update (merge:true), on ne touche pas au champ

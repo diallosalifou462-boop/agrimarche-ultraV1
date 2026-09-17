@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
+import { findAccountsForPhone } from '@/lib/server/phoneAccounts';
 import { logOtpServerAttempt } from '@/lib/otpServerDebugLog';
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -136,13 +137,8 @@ export async function POST(req: NextRequest) {
       );
     }
     if (purpose === 'register' || purpose === 'reset') {
-      const adminAuth = getAuth(app);
-      let accountExists = true;
-      try {
-        await adminAuth.getUserByPhoneNumber(phoneE164);
-      } catch {
-        accountExists = false;
-      }
+      // Toutes les formes de compte (y compris « email seul »).
+      const accountExists = !!(await findAccountsForPhone(phoneE164)).main;
       if (purpose === 'register' && accountExists) {
         await logOtpServerAttempt(db, {
           step: 'already_registered',

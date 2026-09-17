@@ -12,6 +12,7 @@ import {
   updatePassword,
 } from 'firebase/auth';
 import { auth } from '@/lib/firebase/firebase';
+import { ensureMainAccountAfterPhoneCode } from '@/lib/auth/phoneSession';
 import { Capacitor } from '@capacitor/core';
 import { detectCarrier } from '@/lib/carrier';
 import { apiUrl } from '@/lib/api-config';
@@ -263,11 +264,14 @@ export default function ForgotPasswordPage() {
         if (!confirmResult) { setError('Session expirée'); setLoading(false); return; }
         await confirmResult.confirm(code);
       }
+      // Orange : le nouveau mot de passe doit aller sur le VRAI compte, pas
+      // sur un compte « téléphone seul » vide que Firebase aurait créé.
+      await ensureMainAccountAfterPhoneCode(phone);
       setStep('newpwd');
     } catch (err: any) {
       if (err?.code === 'auth/invalid-verification-code') setError('Code incorrect');
       else if (err?.code === 'auth/code-expired') setError('Code expiré, renvoyez');
-      else setError('Erreur de vérification');
+      else setError(err?.code ? 'Erreur de vérification' : (err?.message || 'Erreur de vérification'));
     } finally { setLoading(false); }
   };
 

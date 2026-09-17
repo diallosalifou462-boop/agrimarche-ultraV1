@@ -1,7 +1,7 @@
 // ─── Avatar : initiale + couleur déterministe ─────────────
 // L'initiale vient du NOM affiché (profile.displayName / user.displayName),
 // pas de l'email : les comptes créés via le flow OTP Free/Yas/Expresso ont
-// un email synthétique (numéro@agrimarche.sn), qui commence par un chiffre
+// un email synthétique (numéro@sunnumenef.sn), qui commence par un chiffre
 // et affichait donc "?" à la place d'une vraie initiale.
 
 const AVATAR_COLORS = [

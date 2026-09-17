@@ -13,6 +13,7 @@ import {
   signInWithEmailAndPassword,
 } from 'firebase/auth';
 import { auth } from '@/lib/firebase/firebase';
+import { resolveLoginEmails, ensureMainAccountAfterPhoneCode, NoAccountForPhoneError } from '@/lib/auth/phoneSession';
 import { Capacitor } from '@capacitor/core';
 import { detectCarrier } from '@/lib/carrier';
 import { apiUrl } from '@/lib/api-config';
@@ -39,7 +40,7 @@ function toE164(phone: string): string {
 }
 
 function toSyntheticEmail(phone: string): string {
-  return `${phone.replace(/\D/g, '')}@agrimarche.sn`;
+  return `${phone.replace(/\D/g, '')}@sunnumenef.sn`;
 }
 
 const FORCED_ADMIN_EMAIL = 'support@agrimarche.com';
@@ -166,8 +167,22 @@ function LoginContent() {
     setLoading(true);
     try {
       // Vérifie le mot de passe via email synthétique
-      const email = toSyntheticEmail(phone);
-      await signInWithEmailAndPassword(auth, email, password);
+      // Email RÉEL du compte (le format a changé selon l'époque et
+      // l'opérateur) ; formats historiques en secours si serveur injoignable.
+      let signedIn = false;
+      let lastErr: any = null;
+      for (const email of await resolveLoginEmails(phone)) {
+        try {
+          await signInWithEmailAndPassword(auth, email, password);
+          signedIn = true;
+          break;
+        } catch (e: any) {
+          lastErr = e;
+          const retryable = e?.code === 'auth/invalid-credential' || e?.code === 'auth/user-not-found' || e?.code === 'auth/wrong-password';
+          if (!retryable) break;
+        }
+      }
+      if (!signedIn) throw lastErr ?? Object.assign(new Error('invalid'), { code: 'auth/invalid-credential' });
 
       // Mot de passe OK → envoie l'OTP
       const phoneE164 = toE164(phone);
@@ -242,7 +257,9 @@ function LoginContent() {
       setLoading(false);
     } catch (err: any) {
       const code = err?.code;
-      if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
+      if (err instanceof NoAccountForPhoneError) {
+        setError("Aucun compte n'est associé à ce numéro. Créez votre compte.");
+      } else if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
         setError('Numéro ou mot de passe incorrect');
       } else if (code === 'auth/invalid-phone-number') {
         setError('Numéro de téléphone invalide');
@@ -377,8 +394,10 @@ function LoginContent() {
         if (!confirmResult) { setError('Session expirée, renvoyez le code'); setLoading(false); return; }
         await confirmResult.confirm(code);
       }
-      // Firebase est déjà connecté via Phone Auth,
-      // le useEffect va déclencher la redirection
+      // Orange : si Firebase a connecté un compte « téléphone seul » vide au
+      // lieu du vrai compte, on revient sur le vrai compte (le doublon est
+      // supprimé côté serveur et le numéro rattaché au vrai compte).
+      await ensureMainAccountAfterPhoneCode(phone);
       router.replace(redirect);
     } catch (err: any) {
       if (err?.code === 'auth/invalid-verification-code') {
@@ -386,7 +405,7 @@ function LoginContent() {
       } else if (err?.code === 'auth/code-expired') {
         setError('Code expiré, renvoyez un nouveau SMS');
       } else {
-        setError('Erreur de vérification');
+        setError(err?.code ? 'Erreur de vérification' : (err?.message || 'Erreur de vérification'));
       }
     } finally {
       setLoading(false);

@@ -1,6 +1,6 @@
 "use client";
 
-import { doc, getDoc } from 'firebase/firestore';
+import { doc, getDoc, collection, query, where, limit as fsLimit, getDocs } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
 import { getCurrentPosition } from '@/lib/geolocation';
 import { reverseGeocode } from '@/lib/geo/geocode';
@@ -311,10 +311,21 @@ function ProductDetailContent() {
   useEffect(() => {
     if (!id) return;
 
+    // Produit lu dans Firestore (les vrais produits). Avant, cette page ne
+    // cherchait que dans les produits de démonstration (src/data/products.ts) :
+    // les liens des notifications (baisse de prix, réachat, retour en stock)
+    // affichaient tous « Produit introuvable ».
     const loadProduct = async () => {
       setLoading(true);
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      const foundProduct = products.find((p) => p.id === id);
+      setError('');
+      let foundProduct: any = null;
+      try {
+        const snap = await getDoc(doc(db, 'products', id));
+        if (snap.exists()) foundProduct = { id: snap.id, ...snap.data() };
+      } catch (err) {
+        console.warn('Lecture du produit impossible :', err);
+      }
+      if (!foundProduct) foundProduct = products.find((p) => p.id === id) ?? null;
 
       if (!foundProduct) {
         setError('Produit introuvable');
@@ -323,10 +334,19 @@ function ProductDetailContent() {
       }
 
       setProduct(foundProduct);
-      const relatedProducts = products
-        .filter((p) => p.category === foundProduct.category && p.id !== foundProduct.id)
-        .slice(0, 4);
-      setRelated(relatedProducts);
+      try {
+        const relatedSnap = await getDocs(
+          query(collection(db, 'products'), where('category', '==', foundProduct.category), fsLimit(6))
+        );
+        setRelated(
+          relatedSnap.docs
+            .map((d) => ({ id: d.id, ...d.data() }) as any)
+            .filter((p) => p.id !== foundProduct.id && !(typeof p.stock === 'number' && p.stock <= 0))
+            .slice(0, 4)
+        );
+      } catch {
+        setRelated([]);
+      }
       setLoading(false);
     };
 

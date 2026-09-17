@@ -288,9 +288,12 @@ function buildPushConfig(opts: {
   groupId?: string;
   timeSensitive?: boolean;
   ttlSeconds?: number;
+  link?: string;
 }) {
   const highPriority = opts.urgent || opts.timeSensitive;
+  const webLink = absoluteAppLink(opts.link);
   return {
+    ...(webLink ? { webpush: { fcmOptions: { link: webLink } } } : {}),
     android: {
       priority: highPriority ? ('high' as const) : ('normal' as const),
       ...(opts.ttlSeconds ? { ttl: opts.ttlSeconds * 1000 } : {}),
@@ -368,7 +371,7 @@ async function sendMulticastWithCleanup(
   tokenOwners: Map<string, string>, // token → userId, pour savoir où supprimer en cas d'échec
   notification: { title: string; body: string; imageUrl?: string },
   data: Record<string, string>,
-  pushOpts: { urgent?: boolean; groupId?: string; timeSensitive?: boolean; ttlSeconds?: number }
+  pushOpts: { urgent?: boolean; groupId?: string; timeSensitive?: boolean; ttlSeconds?: number; link?: string }
 ) {
   const allTokens = [...tokenOwners.keys()];
   if (allTokens.length === 0) return { successCount: 0, failureCount: 0 };
@@ -463,6 +466,7 @@ async function sendToUsers(
         groupId: data.orderId,
         timeSensitive: pushOpts.timeSensitive,
         ttlSeconds: pushOpts.ttlSeconds,
+        link: data.link,
       }
     );
     console.log(`📲 Push envoyé : ${successCount}/${successCount + failureCount} succès`);
@@ -516,9 +520,26 @@ export const onUserTokenSync = functions.firestore.onDocumentCreated(
 function categorySlug(category?: string | null): string {
   return (category || '').toLowerCase().trim().replace(/\s+/g, '-');
 }
-function categoryLink(category?: string | null): string {
-  const slug = categorySlug(category);
-  return slug ? `/category?category=${encodeURIComponent(slug)}` : '/main/products';
+// Lien d'une notification « nouveau produit » : le catalogue RÉEL (Firestore)
+// filtré sur la catégorie du produit, avec ce produit mis en tête. L'ancien
+// lien /category?category=… ouvrait une page branchée sur des produits de
+// démonstration (src/data/products.ts) → « Aucun produit trouvé ».
+function categoryLink(category?: string | null, productId?: string): string {
+  const label = (category || '').trim();
+  if (!label) return productId ? `/product?id=${encodeURIComponent(productId)}` : '/main/products';
+  const params = new URLSearchParams({ categorie: label });
+  if (productId) params.set('nouveau', productId);
+  return `/main/products?${params.toString()}`;
+}
+
+// Adresse publique de l'app web : un clic sur une notification web ouvre ce
+// lien absolu (webpush.fcmOptions.link). Dans l'app iOS/Android, c'est le
+// champ data.link qui est lu (NotificationProvider.tsx).
+const APP_BASE_URL = (process.env.APP_BASE_URL || 'https://agrimarche-ultra-v1.vercel.app').replace(/\/$/, '');
+function absoluteAppLink(link?: string): string | undefined {
+  if (!link) return undefined;
+  if (/^https?:\/\//i.test(link)) return link;
+  return `${APP_BASE_URL}${link.startsWith('/') ? '' : '/'}${link}`;
 }
 
 export const notifyNewProduct = functions.firestore.onDocumentCreated(
@@ -542,7 +563,7 @@ export const notifyNewProduct = functions.firestore.onDocumentCreated(
     // sur la notif doit atterrir sur le rayon Fruits en entier (mêmes
     // bananes, plus tout le reste de la catégorie), pas être enfermé sur
     // une fiche unique.
-    const link = categoryLink(product.category);
+    const link = categoryLink(product.category, event.params.productId);
 
     // ── 0. Anti-spam en rafale : un vendeur qui publie tout son catalogue
     //    d'un coup (10-20 produits en quelques secondes) ne doit pas faire
@@ -583,7 +604,7 @@ export const notifyNewProduct = functions.firestore.onDocumentCreated(
           topic: 'buyers',
           notification: { title, body, ...(image ? { imageUrl: image } : {}) },
           data: { type: 'new_product', productId: event.params.productId, link },
-          ...buildPushConfig({ imageUrl: image }),
+          ...buildPushConfig({ imageUrl: image, link }),
         });
         console.log(`📣 Push "nouveau produit" envoyé pour ${product.name}`);
       } catch (err) {
@@ -670,7 +691,7 @@ export const notifyNewOrder = functions.firestore.onDocumentCreated(
             : `Votre commande de ${total} FCFA est bien enregistrée ${randomSticker(BUYER_STICKERS)}`,
           ...(firstImage ? { imageUrl: firstImage } : {}),
         },
-        { type: 'order_created', orderId: event.params.orderId }
+        { type: 'order_created', orderId: event.params.orderId, link: '/account/orders' }
       ),
       order.sellerId
         ? sendToUsers(
@@ -682,7 +703,7 @@ export const notifyNewOrder = functions.firestore.onDocumentCreated(
                 : `Vous avez reçu une nouvelle commande de ${total} FCFA ${randomSticker(SELLER_STICKERS)}`,
               ...(firstImage ? { imageUrl: firstImage } : {}),
             },
-            { type: 'order_created', orderId: event.params.orderId }
+            { type: 'order_created', orderId: event.params.orderId, link: '/seller/orders' }
           )
         : Promise.resolve(),
     ]);
@@ -712,7 +733,7 @@ export const notifyOrderCancelled = functions.firestore.onDocumentUpdated(
                 ? `Votre commande (${itemsSummary} — ${total} FCFA) a été annulée. Désolé pour la gêne 💙`
                 : `Votre commande #${orderId.slice(0, 6)} a été annulée. Désolé pour la gêne 💙`,
             },
-            { type: 'order_cancelled', orderId }
+            { type: 'order_cancelled', orderId, link: '/account/orders' }
           )
         : Promise.resolve(),
       after.sellerId
@@ -724,7 +745,7 @@ export const notifyOrderCancelled = functions.firestore.onDocumentUpdated(
                 ? `La commande de ${after.userName ?? 'votre client'} (${itemsSummary} — ${total} FCFA) a été annulée.`
                 : `La commande #${orderId.slice(0, 6)} a été annulée.`,
             },
-            { type: 'order_cancelled', orderId }
+            { type: 'order_cancelled', orderId, link: '/seller/orders' }
           )
         : Promise.resolve(),
     ]);
@@ -818,7 +839,13 @@ export const notifyOrderStatusStep = functions.firestore.onDocumentUpdated(
     if (await alreadyProcessed(event.id)) return;
 
     const orderId = event.params.orderId;
-    const link = step.link === '/review' ? `/review?id=${orderId}` : undefined;
+    // Chaque étape ouvre la page utile : suivi en direct pendant la livraison,
+    // avis une fois livrée, mes commandes sinon.
+    const link = after.status === 'livre'
+      ? `/review?id=${orderId}`
+      : after.status === 'en_livraison'
+        ? `/tracking?orderId=${orderId}`
+        : '/account/orders';
 
     // 🎉 Étapes franchies : la 5e, 10e, 25e… commande livrée d'un client
     // change le titre de la notification (pas de push supplémentaire).
@@ -833,7 +860,7 @@ export const notifyOrderStatusStep = functions.firestore.onDocumentUpdated(
     await sendToUsers(
       [after.userId],
       { title: buyerTitle, body: step.body(after, orderId) },
-      { type: 'order_status', orderId, status: after.status, ...(link ? { link } : {}) },
+      { type: 'order_status', orderId, status: after.status, link },
       { timeSensitive: after.status === 'livre' }
     );
 
@@ -861,7 +888,7 @@ export const notifyOrderStatusStep = functions.firestore.onDocumentUpdated(
             ? `${itemsSummary} livré avec succès — ${earned} FCFA encaissés. ${randomSticker(SELLER_STICKERS)}`
             : `Livraison confirmée — ${earned} FCFA. Le paiement sera traité selon le cycle habituel. ${randomSticker(SELLER_STICKERS)}`,
         },
-        { type: 'order_delivered_seller', orderId }
+        { type: 'order_delivered_seller', orderId, link: '/seller/orders' }
       );
     }
   }
@@ -956,7 +983,7 @@ export const notifyNewReview = functions.firestore.onDocumentCreated(
     await sendToUsers(
       [review.sellerId],
       { title: 'Nouvel avis client 📝', body: `${stars} — ${excerpt}${cheer}` },
-      { type: 'new_review', reviewId: event.params.reviewId }
+      { type: 'new_review', reviewId: event.params.reviewId, link: '/seller/dashboard' }
     );
   }
 );
@@ -1296,7 +1323,7 @@ export const notifyRestockMatch = functions.firestore.onDocumentUpdated(
           : `Le produit que vous cherchiez est de nouveau disponible.`,
         imageUrl: image,
       },
-      { type: 'restock_match', productId: event.params.productId, link: '/main/products' }
+      { type: 'restock_match', productId: event.params.productId, link: `/product?id=${event.params.productId}` }
     );
 
     await event.data!.after.ref.update({
@@ -1389,7 +1416,7 @@ export const weeklyInterestDigest = onSchedule(
             : `Disponible maintenant, d'après vos recherches récentes.`,
           imageUrl: image,
         },
-        { type: 'weekly_digest', link: '/main/products' }
+        { type: 'weekly_digest', productId: best.id, link: `/product?id=${best.id}` }
       );
 
       // Historique glissant borné à 8 entrées : suffisant pour éviter la
@@ -2050,7 +2077,7 @@ export const notifyDeliveryPhaseChange = functions.firestore.onDocumentUpdated(
     await sendToUsers(
       [after.userId],
       { title: step.title, body: step.body(after) },
-      { type: 'delivery_phase', orderId: event.params.orderId, phase: afterPhase, link: `/tracking?id=${event.params.orderId}` },
+      { type: 'delivery_phase', orderId: event.params.orderId, phase: afterPhase, link: `/tracking?orderId=${event.params.orderId}` },
       { timeSensitive: afterPhase === 'arrived', ttlSeconds: 15 * 60 }
     );
   }

@@ -16,6 +16,7 @@
 // notifyUser() → /api/notifications/send). Elle est corrigée par
 // cohérence / au cas où elle serait rebranchée plus tard.
 
+import { absoluteAppLink } from '@/lib/categoryLink';
 import { NextRequest, NextResponse } from 'next/server';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
@@ -74,7 +75,7 @@ export async function POST(request: NextRequest) {
       },
       webpush: {
         notification: { icon: '/icons/icon-192.png', badge: '/icons/badge-72.png' },
-        fcmOptions: { link: '/seller/orders' },
+        fcmOptions: { link: absoluteAppLink('/seller/orders') },
       },
     });
 

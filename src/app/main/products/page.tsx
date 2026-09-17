@@ -3,7 +3,8 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { collection, onSnapshot, query, where, orderBy, doc, updateDoc, increment, limit } from 'firebase/firestore';
+import { collection, onSnapshot, query, where, orderBy, doc, updateDoc, increment, limit, getDoc } from 'firebase/firestore';
+import { matchCategoryLabel } from '@/lib/notificationLinks';
 import { db, waitForFirestoreReady, trace } from '@/lib/firebase/firebase';
 import { logEvent } from 'firebase/analytics';
 import { analytics } from '@/lib/firebase/firebase';
@@ -143,6 +144,11 @@ export default function AgriMarket() {
   const [filtered,           setFiltered]           = useState<ProductData[]>(readProductsCache);
   const [search,             setSearch]             = useState('');
   const [cat,                setCat]                = useState('Tous');
+  // Arrivée depuis une notification « nouveau produit » :
+  // /main/products?categorie=Légumes&nouveau=<id> → catégorie ouverte et
+  // produit ajouté affiché en premier.
+  const [highlightId,        setHighlightId]        = useState<string | null>(null);
+  const [highlightProduct,   setHighlightProduct]   = useState<ProductData | null>(null);
   const [sort,               setSort]               = useState<'default'|'asc'|'desc'>('default');
   const [wishlist,           setWishlist]           = useState<Set<string>>(new Set());
   const [showUserMenu,       setShowUserMenu]       = useState(false);
@@ -672,6 +678,7 @@ export default function AgriMarket() {
 
   useEffect(() => {
     let r = [...products];
+    if (highlightProduct && !r.some(p => p.id === highlightProduct.id)) r = [highlightProduct, ...r];
     // Exclure les produits en rupture de stock et ceux masqués par le
     // vendeur (bouton œil dans seller/products/page.tsx, status:'inactive')
     // — sinon un produit "masqué" restait visible dans le catalogue acheteur.
@@ -691,8 +698,29 @@ export default function AgriMarket() {
     if (cat !== 'Tous') r = r.filter(p => p.category === cat);
     if (sort === 'asc')  r.sort((a,b) => (a.price||0)-(b.price||0));
     if (sort === 'desc') r.sort((a,b) => (b.price||0)-(a.price||0));
+    if (highlightId) {
+      const idx = r.findIndex(p => p.id === highlightId);
+      if (idx > 0) r = [r[idx], ...r.slice(0, idx), ...r.slice(idx + 1)];
+    }
     setFiltered(r);
-  }, [products, search, cat, sort]);
+  }, [products, search, cat, sort, highlightId, highlightProduct]);
+
+  // Lecture des paramètres d'arrivée (notification, promo, lien partagé).
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const label = matchCategoryLabel(params.get('categorie'));
+    if (label) setCat(label);
+    const newId = params.get('nouveau');
+    if (newId) {
+      setHighlightId(newId);
+      // Le produit peut ne pas être dans la première page chargée : on le lit
+      // directement pour être sûr de l'afficher.
+      getDoc(doc(db, 'products', newId))
+        .then(snap => { if (snap.exists()) setHighlightProduct({ id: snap.id, ...snap.data() } as ProductData); })
+        .catch(() => {});
+    }
+  }, []);
 
   const open  = (p: ProductData) => { setSelected(p); setImgIdx(0); document.body.style.overflow = 'hidden'; };
   const close = () => { setSelected(null); document.body.style.overflow = ''; };

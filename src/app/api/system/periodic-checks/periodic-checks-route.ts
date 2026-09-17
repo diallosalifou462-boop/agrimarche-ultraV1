@@ -23,6 +23,7 @@
 // Variables d'environnement requises :
 //   FIREBASE_SERVICE_ACCOUNT_JSON
 
+import { absoluteAppLink } from '@/lib/categoryLink';
 import { NextRequest, NextResponse } from 'next/server';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getFirestore, FieldValue, Timestamp } from 'firebase-admin/firestore';
@@ -222,7 +223,7 @@ async function runInactiveClientsCheck(db: FirebaseFirestore.Firestore, app: Ret
     const body = `${firstName}, ça fait un moment — découvrez les nouveautés fraîches sur Sunu Mëñëf.`;
 
     batch.set(db.collection('notifications').doc(), {
-      userId: userDoc.id, type: 'promotion', title, body, icon: '👋', deepLink: '/products',
+      userId: userDoc.id, type: 'promotion', title, body, icon: '👋', deepLink: '/main/products',
       urgent: false, priority: 'low', read: false, createdAt: FieldValue.serverTimestamp(),
       metadata: { automated: true, source: 'inactive-client-alert' },
     });
@@ -296,7 +297,7 @@ async function runPendingSignupRemindersCheck(db: FirebaseFirestore.Firestore, a
         data: { deepLink: '/auth/register', click_action: 'FLUTTER_NOTIFICATION_CLICK' },
         android: { priority: 'normal', notification: { sound: 'default', channelId: 'agrimarche_default' } },
         apns: { payload: { aps: { sound: 'default' } } },
-        webpush: { fcmOptions: { link: '/auth/register' } },
+        webpush: { fcmOptions: { link: absoluteAppLink('/auth/register') } },
       });
       pushSuccessCount = resp.successCount;
       resp.responses.forEach((res, idx) => {

@@ -18,6 +18,7 @@ import { Capacitor } from '@capacitor/core';
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
 import { auth, db, waitForFirestoreReady, trace } from '@/lib/firebase/firebase';
 import { ensureUserExists } from '@/lib/firebase/userProfile';
+import { resolveLoginEmails } from '@/lib/auth/phoneSession';
 import { trackActivityTick } from '@/lib/interests/trackActivity';
 
 // =====================================================
@@ -39,7 +40,7 @@ import { trackActivityTick } from '@/lib/interests/trackActivity';
 
 // ─── Helper : numéro → email synthétique ─────────────────
 export function phoneToEmail(phone: string): string {
-  return `${phone.replace(/\D/g, '')}@agrimarche.sn`;
+  return `${phone.replace(/\D/g, '')}@sunnumenef.sn`;
 }
 
 // ─── Rafraîchir le token FCM (SANS jamais demander la permission) ─────────
@@ -407,8 +408,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // ─── Connexion ────────────────────────────────────────
   const signIn = async (emailOrPhone: string, password: string) => {
-    const email = emailOrPhone.includes('@') ? emailOrPhone : phoneToEmail(emailOrPhone);
-    const result = await signInWithEmailAndPassword(auth, email, password);
+    // Numéro : email réel du compte demandé au serveur (le format a varié).
+    const emails = emailOrPhone.includes('@') ? [emailOrPhone] : await resolveLoginEmails(emailOrPhone);
+    let result: any = null;
+    let lastErr: any = null;
+    for (const email of emails) {
+      try {
+        result = await signInWithEmailAndPassword(auth, email, password);
+        break;
+      } catch (e: any) {
+        lastErr = e;
+        if (!['auth/invalid-credential', 'auth/user-not-found', 'auth/wrong-password'].includes(e?.code)) break;
+      }
+    }
+    if (!result) throw lastErr;
     await fetchUserProfile(result.user.uid, result.user.email);
     trackLoginActivity(result.user.uid); // fire-and-forget
     migratePendingFcmToken(result.user.uid); // fire-and-forget

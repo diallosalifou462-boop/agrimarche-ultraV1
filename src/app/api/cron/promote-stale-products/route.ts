@@ -33,7 +33,7 @@ import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getFirestore, FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
 import { getAuth } from 'firebase-admin/auth';
-import { categoryLink } from '@/lib/categoryLink';
+import { categoryLink, absoluteAppLink } from '@/lib/categoryLink';
 
 // ============================================================
 // FIREBASE ADMIN — accepte les deux formats de config utilisés dans ce
@@ -298,7 +298,7 @@ export async function GET(req: NextRequest) {
       // `/product?id=`, non lu non plus). On conduit vers la catégorie
       // complète du produit, comme Jumia/Alibaba le font pour leurs push
       // de relance produit.
-      const deepLink = categoryLink(product.category);
+      const deepLink = categoryLink(product.category, docSnap.id);
 
       for (let i = 0; i < tokens.length; i += 500) {
         const chunk = tokens.slice(i, i + 500);
@@ -312,7 +312,7 @@ export async function GET(req: NextRequest) {
             apns: { payload: { aps: { sound: 'default' } } },
             webpush: {
               notification: { icon: '/icons/icon-192x192.png', badge: '/icons/badge-72x72.png' },
-              fcmOptions: { link: deepLink },
+              fcmOptions: { link: absoluteAppLink(deepLink) },
             },
           });
           pushSuccessCount += multicast.successCount;

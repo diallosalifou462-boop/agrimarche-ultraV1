@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
+import { DuplicateAccountWithDataError, findAccountsForPhone, resolveVerifiedPhoneAccount } from '@/lib/server/phoneAccounts';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -118,35 +119,42 @@ export async function POST(req: NextRequest) {
     const adminAuth = getAuth(app);
     let uid: string | null = null;
     let userExisted = false;
-    try {
-      const existingUser = await adminAuth.getUserByPhoneNumber(phoneE164);
-      uid = existingUser.uid;
-      userExisted = true;
-    } catch {
-      userExisted = false;
-    }
 
-    // ⚠️ GARDE-FOU : `registration` présent = flow d'inscription, absent =
-    // flow "mot de passe oublié". On ne se contente plus de brancher sur
-    // ces deux cas, on les VALIDE d'abord (filet de sécurité serveur, même
-    // si /api/otp/send a normalement déjà bloqué ces cas en amont avec
-    // `purpose`) :
-    //   - inscription sur un numéro déjà connu → refusé (pas de double
-    //     compte, pas d'écrasement silencieux du compte existant) ;
-    //   - réinitialisation sur un numéro inconnu → refusé (on ne crée plus
-    //     de compte "fantôme" vide juste parce que quelqu'un a reçu et
-    //     saisi un code SMS pour un numéro jamais inscrit).
+    // Recherche du compte sous TOUTES ses formes (téléphone attaché, email
+    // seul avec ou sans 221…). Avant, seul le numéro attaché comptait : les
+    // comptes « email seul » étaient déclarés inexistants (connexion refusée,
+    // réinscription possible avec le même numéro).
+    const { main } = await findAccountsForPhone(phoneE164);
+    userExisted = !!main;
+
     if (registration && userExisted) {
       return NextResponse.json(
         { error: 'Ce numéro est déjà inscrit. Connectez-vous ou utilisez « mot de passe oublié ».' },
         { status: 409, headers: CORS_HEADERS }
       );
     }
+
     if (!registration && !userExisted) {
       return NextResponse.json(
         { error: "Aucun compte n'est associé à ce numéro." },
         { status: 404, headers: CORS_HEADERS }
       );
+    }
+
+    if (!registration) {
+      // Code vérifié : on rattache le numéro au vrai compte (et on supprime
+      // un éventuel doublon vide) avant de le connecter.
+      try {
+        uid = await resolveVerifiedPhoneAccount(phoneE164);
+      } catch (err) {
+        if (err instanceof DuplicateAccountWithDataError) {
+          return NextResponse.json(
+            { error: 'Deux comptes utilisent ce numéro. Contactez le support pour les réunir.' },
+            { status: 409, headers: CORS_HEADERS }
+          );
+        }
+        throw err;
+      }
     }
 
     if (registration && !userExisted) {
@@ -169,7 +177,7 @@ export async function POST(req: NextRequest) {
     // finalise le compte : mot de passe + nom + document de profil.
     if (registration && !userExisted) {
       const { password, name, region, departement, commune, quartier } = registration;
-      const syntheticEmail = `${phoneE164.replace(/\D/g, '')}@agrimarche.sn`;
+      const syntheticEmail = `${phoneE164.replace(/\D/g, '')}@sunnumenef.sn`;
 
       // ⚠️ FIX : on attache désormais l'email/mot de passe comme second
       // provider sur le compte Firebase Auth lui-même (pas seulement dans

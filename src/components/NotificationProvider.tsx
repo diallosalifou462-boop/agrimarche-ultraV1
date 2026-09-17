@@ -9,6 +9,8 @@ import {
   doc, updateDoc, writeBatch,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
+import { useRouter } from 'next/navigation';
+import { resolveNotificationLink, openNotificationLink } from '@/lib/notificationLinks';
 
 interface Notification {
   id: string;
@@ -93,6 +95,32 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   const [showNotifButton, setShowNotifButton] = useState(false);
   const [isNative, setIsNative] = useState(false);
   const nativeRequestedRef = useRef(false);
+  const router = useRouter();
+  const routerRef = useRef(router);
+  routerRef.current = router;
+
+  // 📲 Appui sur une notification dans l'app iOS/Android : ouvre la page du
+  // lien (data.link). Avant, aucun écouteur n'existait : l'appui ouvrait
+  // simplement l'app là où elle était. Écouteur posé dès le démarrage, même
+  // avant la connexion, pour ne pas rater l'appui qui a LANCÉ l'app.
+  useEffect(() => {
+    if (!isNativePlatform()) return;
+    let handle: { remove?: () => void } | undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
+        const listener = await FirebaseMessaging.addListener('notificationActionPerformed', (event: any) => {
+          const target = resolveNotificationLink({ data: event?.notification?.data });
+          openNotificationLink(routerRef.current, target);
+        });
+        if (cancelled) listener.remove?.(); else handle = listener;
+      } catch (err) {
+        console.warn('Écoute des appuis sur notification impossible :', err);
+      }
+    })();
+    return () => { cancelled = true; handle?.remove?.(); };
+  }, []);
 
   useEffect(() => {
     setIsMounted(true);
@@ -133,11 +161,15 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const notifs = snapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-        createdAt: doc.data().createdAt?.toDate() || new Date(),
-      })) as Notification[];
+      const notifs = snapshot.docs.map((doc) => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          ...data,
+          link: resolveNotificationLink(data) ?? undefined,
+          createdAt: data.createdAt?.toDate() || new Date(),
+        };
+      }) as Notification[];
       setNotifications(notifs);
     });
 
@@ -158,7 +190,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
         type: payload.data?.type || 'info',
         read: false,
         createdAt: new Date(),
-        link: payload.data?.link,
+        link: resolveNotificationLink(payload) ?? undefined,
       };
 
       setNotifications((prev) => [newNotification, ...prev]);
@@ -170,10 +202,16 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
         window.Notification.permission === 'granted'
       ) {
         try {
-          new window.Notification(payload.notification?.title || 'SunuMëñëf', {
+          const shown = new window.Notification(payload.notification?.title || 'SunuMëñëf', {
             body: payload.notification?.body,
             icon: '/logo.png',
           });
+          const target = newNotification.link;
+          shown.onclick = () => {
+            window.focus();
+            shown.close();
+            openNotificationLink(routerRef.current, target ?? null);
+          };
         } catch (err) {
           console.warn('Notification native non disponible:', err);
         }

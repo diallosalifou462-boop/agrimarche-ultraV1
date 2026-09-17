@@ -215,7 +215,7 @@ export default function CreateDeliveryPage() {
                 type="email"
                 value={form.email}
                 onChange={(e) => setForm({ ...form, email: e.target.value })}
-                placeholder="livreur@agrimarche.sn"
+                placeholder="livreur@sunnumenef.sn"
                 className="w-full pl-10 pr-4 py-2.5 border border-gray-200 rounded-xl focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none transition"
                 required
               />

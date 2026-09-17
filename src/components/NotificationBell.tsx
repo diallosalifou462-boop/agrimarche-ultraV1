@@ -13,6 +13,7 @@
 // donc uniquement de l'affichage — il peut être posé dans n'importe
 // quel header sans rien dupliquer.
 
+import { resolveNotificationLink, openNotificationLink } from '@/lib/notificationLinks';
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
@@ -85,7 +86,8 @@ export function NotificationBell({
   const handleNotificationClick = (notif: (typeof notifications)[number]) => {
     if (!notif.read) markAsRead(notif.id);
     setOpen(false);
-    if (notif.link) router.push(notif.link);
+    const target = resolveNotificationLink(notif as any);
+    openNotificationLink(router, target);
   };
 
   return (

@@ -13,6 +13,7 @@
 //   INFOBIP_SENDER=SunuMenef                                       ← nom expéditeur SMS (11 car. max)
 //   RESEND_FROM=Sunu Mëñëf <noreply@agrimarche.sn>                  ← domaine vérifié sur Resend
 
+import { absoluteAppLink } from '@/lib/categoryLink';
 import { NextRequest, NextResponse } from 'next/server';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getFirestore, FieldValue }      from 'firebase-admin/firestore';
@@ -157,7 +158,7 @@ export async function POST(request: NextRequest) {
                 icon:  '/icons/icon-192.png',
                 badge: '/icons/badge-72.png',
               },
-              fcmOptions: { link },
+              fcmOptions: { link: absoluteAppLink(link) },
             },
           });
 

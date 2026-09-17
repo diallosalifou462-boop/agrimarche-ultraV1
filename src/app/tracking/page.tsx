@@ -355,7 +355,7 @@ function TrackingClientContent() {
   const { user, loading: authLoading } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const orderId = searchParams.get('orderId') as string;
+  const orderId = (searchParams.get('orderId') || searchParams.get('id')) as string; // 'id' : anciens liens de notification
 
   const [order,     setOrder]     = useState<Order | null>(null);
   const [loading,   setLoading]   = useState(true);

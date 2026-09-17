@@ -1,3 +1,4 @@
+import { absoluteAppLink } from '@/lib/categoryLink';
 import { NextRequest, NextResponse } from "next/server";
 import { initializeApp, getApps, cert } from "firebase-admin/app";
 import { getMessaging } from "firebase-admin/messaging";
@@ -241,7 +242,7 @@ export async function POST(req: NextRequest) {
           ...(safeImageUrl ? { image: safeImageUrl } : {}),
         },
         fcmOptions: {
-          link: deepLink || "/",
+          link: absoluteAppLink(deepLink || "/"),
         },
       },
     };

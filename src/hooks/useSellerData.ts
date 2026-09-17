@@ -19,7 +19,7 @@ import { ensureUserExists } from '@/lib/firebase/userProfile';
 
 // ─── Helper : numéro → email synthétique ─────────────────
 export function phoneToEmail(phone: string): string {
-  return `${phone.replace(/\D/g, '')}@agrimarche.sn`;
+  return `${phone.replace(/\D/g, '')}@sunnumenef.sn`;
 }
 
 // ─── Demander permission + enregistrer token FCM ─────────

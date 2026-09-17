@@ -16,6 +16,7 @@
 //   deux gagner (section 3 et 8 du cahier des charges).
 // ============================================================
 import * as admin from 'firebase-admin';
+import { syntheticEmailCandidates } from './carrier';
 
 export class PhoneAlreadyUsedError extends Error {
   constructor() {
@@ -112,7 +113,24 @@ export async function claimPhoneForAccount(
 // d'OTP pour un numéro déjà pris.
 export async function isPhoneAlreadyUsed(phone: string): Promise<boolean> {
   const snap = await phoneIndexRef(phone).get();
-  return !!snap.data()?.accountId;
+  if (snap.data()?.accountId) return true;
+  return !!(await findAuthAccountForPhone(phone));
+}
+
+// Comptes créés AVANT l'index phoneIndex (ou hors des functions) : ils n'y
+// figurent pas. Sans cette recherche, un numéro déjà inscrit avec un email
+// seul pouvait être réinscrit (doublon), et le mot de passe oublié répondait
+// « compte introuvable ». Priorité au compte qui a un mot de passe.
+export async function findAuthAccountForPhone(phone: string): Promise<string | null> {
+  const hasPassword = (u?: admin.auth.UserRecord | null) => !!u?.providerData?.some((p) => p.providerId === 'password');
+  const phoneUser = await admin.auth().getUserByPhoneNumber(phone).catch(() => null);
+  if (phoneUser && hasPassword(phoneUser)) return phoneUser.uid;
+  const candidates = syntheticEmailCandidates(phone);
+  const { users } = await admin.auth().getUsers(candidates.map((email) => ({ email })));
+  const emailUser = candidates
+    .map((email) => users.find((u) => u.email?.toLowerCase() === email))
+    .find((u) => hasPassword(u));
+  return emailUser?.uid ?? phoneUser?.uid ?? null;
 }
 
 // Utilisé par la réinitialisation de mot de passe (passwordReset.ts) :
@@ -120,7 +138,12 @@ export async function isPhoneAlreadyUsed(phone: string): Promise<boolean> {
 // du compte pour savoir À QUI envoyer le code et le customToken final.
 export async function getAccountIdForPhone(phone: string): Promise<string | null> {
   const snap = await phoneIndexRef(phone).get();
-  return (snap.data()?.accountId as string | undefined) ?? null;
+  const indexed = (snap.data()?.accountId as string | undefined) ?? null;
+  if (indexed) {
+    const exists = await admin.auth().getUser(indexed).then(() => true).catch(() => false);
+    if (exists) return indexed;
+  }
+  return findAuthAccountForPhone(phone);
 }
 
 // Purge des réservations abandonnées : une session commencée puis jamais
