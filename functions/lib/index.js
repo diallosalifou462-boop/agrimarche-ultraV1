@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.cleanupRegistrationLeftovers = exports.cleanupRegistrationRateLimits = exports.cleanupProcessedEvents = exports.notifyDeliveryPhaseChange = exports.checkDeliveryProximity = exports.weeklyInterestDigest = exports.notifyRestockMatch = exports.flushQueuedPersonalizedNotifications = exports.syncProductSearchKeywords = exports.remindUnconfirmedDelivery = exports.notifyNewReview = exports.notifyDelivererClaimed = exports.notifyLowStock = exports.notifyOrderStatusStep = exports.notifyOrderCancelled = exports.notifyNewOrder = exports.notifyNewProduct = exports.onUserTokenSync = exports.processEmailQueue = exports.getRegistrationMetrics = exports.checkRegistrationHealth = exports.resetPasswordVerifyOtp = exports.resetPasswordSendOtp = exports.loginVerifyOtp = exports.loginSendOtp = exports.completeOrangeRegistration = exports.registrationVerify = exports.registrationResend = exports.registrationStart = exports.startGuestCheckoutSession = exports.claimGuestOrderSession = exports.findGuestOrders = exports.getDeliveryCodeAdmin = exports.getDeliveryCode = exports.confirmDeliveryWithCode = exports.claimOrder = exports.submitReview = exports.updateOrderStatus = void 0;
+exports.cleanupRegistrationLeftovers = exports.cleanupRegistrationRateLimits = exports.cleanupProcessedEvents = exports.notifyDeliveryPhaseChange = exports.checkDeliveryProximity = exports.syncSellerLocation = exports.sellerDailyRecap = exports.abandonedCartReminder = exports.smartReorderReminder = exports.notifyPriceDrop = exports.weeklyInterestDigest = exports.notifyRestockMatch = exports.flushQueuedPersonalizedNotifications = exports.syncProductSearchKeywords = exports.remindUnconfirmedDelivery = exports.notifyNewReview = exports.notifyDelivererClaimed = exports.notifyLowStock = exports.notifyOrderStatusStep = exports.notifyOrderCancelled = exports.notifyNewOrder = exports.notifyNewProduct = exports.onUserTokenSync = exports.processEmailQueue = exports.getRegistrationMetrics = exports.checkRegistrationHealth = exports.resetPasswordVerifyOtp = exports.resetPasswordSendOtp = exports.loginVerifyOtp = exports.loginSendOtp = exports.completeOrangeRegistration = exports.registrationVerify = exports.registrationResend = exports.registrationStart = exports.startGuestCheckoutSession = exports.claimGuestOrderSession = exports.findGuestOrders = exports.getDeliveryCodeAdmin = exports.getDeliveryCode = exports.confirmDeliveryWithCode = exports.claimOrder = exports.submitReview = exports.updateOrderStatus = void 0;
 // ============================================================
 //   index.ts — FUSION du système de notifications avancé
 //   (idempotence, tokens FCM en sous-collection, digest hebdo,
@@ -171,10 +171,10 @@ exports.processEmailQueue = functions.firestore.onDocumentCreated({
         // (ex: notifications@agrimarche.sn) avant tout envoi à de vrais
         // clients, sous peine d'emails jamais délivrés en production.
         const { error } = await resend.emails.send({
-            from: 'AgriMarché <onboarding@resend.dev>',
+            from: 'Sunu Mëñëf <onboarding@resend.dev>',
             to: data.to,
             subject: data.subject,
-            html: `<div><h2>🌿 AgriMarché</h2><p>${escapeHtml(data.body)}</p></div>`,
+            html: `<div><h2>🌿 Sunu Mëñëf</h2><p>${escapeHtml(data.body)}</p></div>`,
         });
         if (error)
             throw new Error(error.message);
@@ -271,7 +271,7 @@ const BUYER_STICKERS = [
     '🥳 Merci pour votre confiance !',
     '💚 On prend soin de votre commande !',
     '✨ Ça va être délicieux !',
-    '🙏 Merci d\'avoir choisi AgriMarché !',
+    '🙏 Merci d\'avoir choisi Sunu Mëñëf !',
 ];
 function randomSticker(list) {
     return list[Math.floor(Math.random() * list.length)];
@@ -299,12 +299,10 @@ function randomSticker(list) {
 //   défaut de FCM (4 semaines).
 function buildPushConfig(opts) {
     const highPriority = opts.urgent || opts.timeSensitive;
-    return {
-        android: Object.assign(Object.assign({ priority: highPriority ? 'high' : 'normal' }, (opts.ttlSeconds ? { ttl: opts.ttlSeconds * 1000 } : {})), { notification: Object.assign(Object.assign({ channelId: opts.urgent ? 'agrimarche_urgent' : 'agrimarche_default', sound: 'default' }, (opts.imageUrl ? { imageUrl: opts.imageUrl } : {})), (opts.groupId ? { tag: opts.groupId } : {})) }),
-        apns: Object.assign(Object.assign(Object.assign({}, (opts.ttlSeconds ? { headers: { 'apns-expiration': String(Math.floor(Date.now() / 1000) + opts.ttlSeconds) } } : {})), { payload: {
+    const webLink = absoluteAppLink(opts.link);
+    return Object.assign(Object.assign({}, (webLink ? { webpush: { fcmOptions: { link: webLink } } } : {})), { android: Object.assign(Object.assign({ priority: highPriority ? 'high' : 'normal' }, (opts.ttlSeconds ? { ttl: opts.ttlSeconds * 1000 } : {})), { notification: Object.assign(Object.assign({ channelId: opts.urgent ? 'agrimarche_urgent' : 'agrimarche_default', sound: 'default' }, (opts.imageUrl ? { imageUrl: opts.imageUrl } : {})), (opts.groupId ? { tag: opts.groupId } : {})) }), apns: Object.assign(Object.assign(Object.assign({}, (opts.ttlSeconds ? { headers: { 'apns-expiration': String(Math.floor(Date.now() / 1000) + opts.ttlSeconds) } } : {})), { payload: {
                 aps: Object.assign(Object.assign(Object.assign({ sound: 'default' }, (opts.imageUrl ? { 'mutable-content': 1 } : {})), (opts.groupId ? { 'thread-id': opts.groupId } : {})), (opts.timeSensitive ? { 'interruption-level': 'time-sensitive' } : {})),
-            } }), (opts.imageUrl ? { fcmOptions: { imageUrl: opts.imageUrl } } : {})),
-    };
+            } }), (opts.imageUrl ? { fcmOptions: { imageUrl: opts.imageUrl } } : {})) });
 }
 // FCM rejette tout appel multicast au-delà de 500 tokens — découpe en lots.
 // Réutilisé aussi pour Firestore ci-dessous : même limite de 500 par batch.
@@ -430,6 +428,7 @@ async function sendToUsers(userIds, notification, data = {}, pushOpts = {}) {
             groupId: data.orderId,
             timeSensitive: pushOpts.timeSensitive,
             ttlSeconds: pushOpts.ttlSeconds,
+            link: data.link,
         });
         console.log(`📲 Push envoyé : ${successCount}/${successCount + failureCount} succès`);
     }
@@ -476,12 +475,32 @@ exports.onUserTokenSync = functions.firestore.onDocumentCreated({ document: 'use
 function categorySlug(category) {
     return (category || '').toLowerCase().trim().replace(/\s+/g, '-');
 }
-function categoryLink(category) {
-    const slug = categorySlug(category);
-    return slug ? `/category?category=${encodeURIComponent(slug)}` : '/main/products';
+// Lien d'une notification « nouveau produit » : le catalogue RÉEL (Firestore)
+// filtré sur la catégorie du produit, avec ce produit mis en tête. L'ancien
+// lien /category?category=… ouvrait une page branchée sur des produits de
+// démonstration (src/data/products.ts) → « Aucun produit trouvé ».
+function categoryLink(category, productId) {
+    const label = (category || '').trim();
+    if (!label)
+        return productId ? `/product?id=${encodeURIComponent(productId)}` : '/main/products';
+    const params = new URLSearchParams({ categorie: label });
+    if (productId)
+        params.set('nouveau', productId);
+    return `/main/products?${params.toString()}`;
+}
+// Adresse publique de l'app web : un clic sur une notification web ouvre ce
+// lien absolu (webpush.fcmOptions.link). Dans l'app iOS/Android, c'est le
+// champ data.link qui est lu (NotificationProvider.tsx).
+const APP_BASE_URL = (process.env.APP_BASE_URL || 'https://agrimarche-ultra-v1.vercel.app').replace(/\/$/, '');
+function absoluteAppLink(link) {
+    if (!link)
+        return undefined;
+    if (/^https?:\/\//i.test(link))
+        return link;
+    return `${APP_BASE_URL}${link.startsWith('/') ? '' : '/'}${link}`;
 }
 exports.notifyNewProduct = functions.firestore.onDocumentCreated({ document: 'products/{productId}', region: 'us-central1' }, async (event) => {
-    var _a, _b, _c;
+    var _a, _b;
     const product = (_a = event.data) === null || _a === void 0 ? void 0 : _a.data();
     if (!product)
         return;
@@ -492,16 +511,16 @@ exports.notifyNewProduct = functions.firestore.onDocumentCreated({ document: 'pr
         : undefined;
     const image = Array.isArray(product.images) ? product.images[0] : undefined;
     const title = `🌾 Nouveau : ${product.name} !`;
-    const sellerLabel = (_c = product.sellerName) !== null && _c !== void 0 ? _c : 'un producteur local';
+    const sellerLabel = product.sellerName || product.farmer || 'un producteur local';
     const body = priceLabel
         ? `Disponible dès maintenant chez ${sellerLabel}${product.region ? ` (${product.region})` : ''} — ${priceLabel}`
-        : `${product.name} est maintenant disponible sur AgriMarché`;
+        : `${product.name} est maintenant disponible sur Sunu Mëñëf`;
     // ⚠️ FIX : pointait vers `/product?id=...` — la fiche de CE seul
     // produit. Un acheteur qui reçoit "🌾 Nouveau : Bananes !" et tape
     // sur la notif doit atterrir sur le rayon Fruits en entier (mêmes
     // bananes, plus tout le reste de la catégorie), pas être enfermé sur
     // une fiche unique.
-    const link = categoryLink(product.category);
+    const link = categoryLink(product.category, event.params.productId);
     // ── 0. Anti-spam en rafale : un vendeur qui publie tout son catalogue
     //    d'un coup (10-20 produits en quelques secondes) ne doit pas faire
     //    vibrer le téléphone de chaque acheteur 10-20 fois de suite. On
@@ -538,7 +557,7 @@ exports.notifyNewProduct = functions.firestore.onDocumentCreated({ document: 'pr
     //    dans tous les cas. ─────────────────────────────────────────────
     if (!skipPush) {
         try {
-            await admin.messaging().send(Object.assign({ topic: 'buyers', notification: Object.assign({ title, body }, (image ? { imageUrl: image } : {})), data: { type: 'new_product', productId: event.params.productId, link } }, buildPushConfig({ imageUrl: image })));
+            await admin.messaging().send(Object.assign({ topic: 'buyers', notification: Object.assign({ title, body }, (image ? { imageUrl: image } : {})), data: { type: 'new_product', productId: event.params.productId, link } }, buildPushConfig({ imageUrl: image, link })));
             console.log(`📣 Push "nouveau produit" envoyé pour ${product.name}`);
         }
         catch (err) {
@@ -603,11 +622,11 @@ exports.notifyNewOrder = functions.firestore.onDocumentCreated({ document: 'orde
             // reste dans les tout premiers mots, avant toute troncature.
             title: '✅ Commande reçue !', body: itemsSummary
                 ? `${itemsSummary} · ${total} FCFA. On s'en occupe ${randomSticker(BUYER_STICKERS)}`
-                : `Votre commande de ${total} FCFA est bien enregistrée ${randomSticker(BUYER_STICKERS)}` }, (firstImage ? { imageUrl: firstImage } : {})), { type: 'order_created', orderId: event.params.orderId }),
+                : `Votre commande de ${total} FCFA est bien enregistrée ${randomSticker(BUYER_STICKERS)}` }, (firstImage ? { imageUrl: firstImage } : {})), { type: 'order_created', orderId: event.params.orderId, link: '/account/orders' }),
         order.sellerId
             ? sendToUsers([order.sellerId], Object.assign({ title: '🛒 Nouvelle commande !', body: itemsSummary
                     ? `${(_e = order.userName) !== null && _e !== void 0 ? _e : 'Un client'} a commandé ${itemsSummary} — ${total} FCFA ${randomSticker(SELLER_STICKERS)}`
-                    : `Vous avez reçu une nouvelle commande de ${total} FCFA ${randomSticker(SELLER_STICKERS)}` }, (firstImage ? { imageUrl: firstImage } : {})), { type: 'order_created', orderId: event.params.orderId })
+                    : `Vous avez reçu une nouvelle commande de ${total} FCFA ${randomSticker(SELLER_STICKERS)}` }, (firstImage ? { imageUrl: firstImage } : {})), { type: 'order_created', orderId: event.params.orderId, link: '/seller/orders' })
             : Promise.resolve(),
     ]);
 });
@@ -631,7 +650,7 @@ exports.notifyOrderCancelled = functions.firestore.onDocumentUpdated({ document:
                 body: itemsSummary
                     ? `Votre commande (${itemsSummary} — ${total} FCFA) a été annulée. Désolé pour la gêne 💙`
                     : `Votre commande #${orderId.slice(0, 6)} a été annulée. Désolé pour la gêne 💙`,
-            }, { type: 'order_cancelled', orderId })
+            }, { type: 'order_cancelled', orderId, link: '/account/orders' })
             : Promise.resolve(),
         after.sellerId
             ? sendToUsers([after.sellerId], {
@@ -639,7 +658,7 @@ exports.notifyOrderCancelled = functions.firestore.onDocumentUpdated({ document:
                 body: itemsSummary
                     ? `La commande de ${(_f = after.userName) !== null && _f !== void 0 ? _f : 'votre client'} (${itemsSummary} — ${total} FCFA) a été annulée.`
                     : `La commande #${orderId.slice(0, 6)} a été annulée.`,
-            }, { type: 'order_cancelled', orderId })
+            }, { type: 'order_cancelled', orderId, link: '/seller/orders' })
             : Promise.resolve(),
     ]);
 });
@@ -698,6 +717,25 @@ const STEP_NOTIFICATIONS = {
         link: '/review',
     },
 };
+// Paliers célébrés dans les notifications de livraison.
+const BUYER_MILESTONES = [5, 10, 25, 50, 100];
+const SELLER_MILESTONES = [1, 5, 10, 25, 50, 100, 250, 500, 1000];
+// Nombre de commandes livrées d'un client ou d'un vendeur (agrégation
+// count(), aucun document lu). Deux filtres d'égalité : pas d'index
+// composite nécessaire. null si indisponible → notification normale.
+async function countDeliveredOrders(field, id) {
+    try {
+        const query = admin.firestore().collection('orders').where(field, '==', id).where('status', '==', 'livre');
+        if (typeof query.count !== 'function')
+            return null;
+        const agg = await query.count().get();
+        return agg.data().count;
+    }
+    catch (err) {
+        console.warn(`⚠️ Comptage des commandes livrées impossible (${field}=${id}):`, err);
+        return null;
+    }
+}
 exports.notifyOrderStatusStep = functions.firestore.onDocumentUpdated({ document: 'orders/{orderId}', region: 'us-central1' }, async (event) => {
     var _a, _b, _c, _d, _e;
     const before = (_a = event.data) === null || _a === void 0 ? void 0 : _a.before.data();
@@ -712,8 +750,23 @@ exports.notifyOrderStatusStep = functions.firestore.onDocumentUpdated({ document
     if (await alreadyProcessed(event.id))
         return;
     const orderId = event.params.orderId;
-    const link = step.link === '/review' ? `/review?id=${orderId}` : undefined;
-    await sendToUsers([after.userId], { title: step.title, body: step.body(after, orderId) }, Object.assign({ type: 'order_status', orderId, status: after.status }, (link ? { link } : {})), { timeSensitive: after.status === 'livre' });
+    // Chaque étape ouvre la page utile : suivi en direct pendant la livraison,
+    // avis une fois livrée, mes commandes sinon.
+    const link = after.status === 'livre'
+        ? `/review?id=${orderId}`
+        : after.status === 'en_livraison'
+            ? `/tracking?orderId=${orderId}`
+            : '/account/orders';
+    // 🎉 Étapes franchies : la 5e, 10e, 25e… commande livrée d'un client
+    // change le titre de la notification (pas de push supplémentaire).
+    let buyerTitle = step.title;
+    if (after.status === 'livre' && after.userId) {
+        const n = await countDeliveredOrders('userId', after.userId);
+        if (n !== null && BUYER_MILESTONES.includes(n)) {
+            buyerTitle = `🎉 Votre ${n}e commande est arrivée — merci !`;
+        }
+    }
+    await sendToUsers([after.userId], { title: buyerTitle, body: step.body(after, orderId) }, { type: 'order_status', orderId, status: after.status, link }, { timeSensitive: after.status === 'livre' });
     // Nouveau : le vendeur n'était notifié d'une livraison confirmée que
     // si la transition passait par delivery/dashboard::markAsDelivered —
     // jamais si c'était l'admin ou le vendeur lui-même (bouton "Marquer
@@ -722,12 +775,20 @@ exports.notifyOrderStatusStep = functions.firestore.onDocumentUpdated({ document
     if (after.status === 'livre' && after.sellerId) {
         const itemsSummary = summarizeItems(after.items);
         const earned = (_e = (_d = (_c = after.total) === null || _c === void 0 ? void 0 : _c.toLocaleString) === null || _d === void 0 ? void 0 : _d.call(_c, 'fr-FR')) !== null && _e !== void 0 ? _e : after.total;
+        // 🏆 Étapes vendeur : 1re vente, 5e, 10e, 25e, 50e, 100e…
+        let sellerTitle = `✅ Commande #${orderId.slice(0, 6)} livrée !`;
+        const sellerCount = await countDeliveredOrders('sellerId', after.sellerId);
+        if (sellerCount !== null && SELLER_MILESTONES.includes(sellerCount)) {
+            sellerTitle = sellerCount === 1
+                ? '🎉 Votre toute première vente est livrée !'
+                : `🏆 ${sellerCount}e commande livrée — bravo !`;
+        }
         await sendToUsers([after.sellerId], {
-            title: `✅ Commande #${orderId.slice(0, 6)} livrée !`,
+            title: sellerTitle,
             body: itemsSummary
                 ? `${itemsSummary} livré avec succès — ${earned} FCFA encaissés. ${randomSticker(SELLER_STICKERS)}`
                 : `Livraison confirmée — ${earned} FCFA. Le paiement sera traité selon le cycle habituel. ${randomSticker(SELLER_STICKERS)}`,
-        }, { type: 'order_delivered_seller', orderId });
+        }, { type: 'order_delivered_seller', orderId, link: '/seller/orders' });
     }
 });
 const LOW_STOCK_THRESHOLD = 5;
@@ -790,7 +851,7 @@ exports.notifyNewReview = functions.firestore.onDocumentCreated({ document: 'rev
     const stars = '⭐'.repeat(rating);
     const excerpt = review.comment ? String(review.comment).slice(0, 80) : 'Un client a laissé un avis.';
     const cheer = rating >= 4 ? ` ${randomSticker(SELLER_STICKERS)}` : '';
-    await sendToUsers([review.sellerId], { title: 'Nouvel avis client 📝', body: `${stars} — ${excerpt}${cheer}` }, { type: 'new_review', reviewId: event.params.reviewId });
+    await sendToUsers([review.sellerId], { title: 'Nouvel avis client 📝', body: `${stars} — ${excerpt}${cheer}` }, { type: 'new_review', reviewId: event.params.reviewId, link: '/seller/dashboard' });
 });
 exports.remindUnconfirmedDelivery = (0, scheduler_1.onSchedule)({ schedule: 'every 60 minutes', region: 'us-central1', timeoutSeconds: 120 }, async () => {
     var _a, _b, _c;
@@ -1065,7 +1126,7 @@ exports.notifyRestockMatch = functions.firestore.onDocumentUpdated({ document: '
             ? `Le produit que vous cherchiez est de nouveau disponible — ${priceLabel}.`
             : `Le produit que vous cherchiez est de nouveau disponible.`,
         imageUrl: image,
-    }, { type: 'restock_match', productId: event.params.productId, link: '/main/products' });
+    }, { type: 'restock_match', productId: event.params.productId, link: `/product?id=${event.params.productId}` });
     await event.data.after.ref.update({
         lastRestockNotifiedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
@@ -1143,7 +1204,7 @@ exports.weeklyInterestDigest = (0, scheduler_1.onSchedule)({ schedule: 'every mo
                 ? `Disponible maintenant, et ${extraCount} autre${extraCount > 1 ? 's' : ''} produit${extraCount > 1 ? 's' : ''} qui pourraient vous plaire.`
                 : `Disponible maintenant, d'après vos recherches récentes.`,
             imageUrl: image,
-        }, { type: 'weekly_digest', link: '/main/products' });
+        }, { type: 'weekly_digest', productId: best.id, link: `/product?id=${best.id}` });
         // Historique glissant borné à 8 entrées : suffisant pour éviter la
         // répétition à court terme sans empêcher indéfiniment un produit
         // toujours pertinent de revenir après quelques semaines d'absence.
@@ -1173,6 +1234,473 @@ exports.weeklyInterestDigest = (0, scheduler_1.onSchedule)({ schedule: 'every mo
 // trajet, retards par livreur, fiabilité par vendeur. Aucun tableau de
 // bord n'est construit sur ces données pour l'instant — juste la
 // collecte, prête à être exploitée.
+// ============================================================
+//   ENGAGEMENT — des notifications qui donnent envie de revenir
+// ============================================================
+// Règle d'or : chaque notification apporte une VRAIE info utile (prix qui
+// baisse réellement, rappel basé sur les habitudes d'achat, bilan chiffré
+// du vendeur). Aucune fausse urgence. Tout ce qui est « marketing » passe
+// par passesPersonalizationGate + dispatchPersonalized : consentement,
+// préférence par catégorie, 1 push perso max par jour, heures de silence.
+// C'est ce qui fait revenir sans faire désinstaller l'app.
+const DAY_MS = 24 * 60 * 60 * 1000;
+function formatFcfa(n) {
+    return `${Math.round(n).toLocaleString('fr-FR')} FCFA`;
+}
+function productKeywordsOf(product) {
+    var _a;
+    return ((_a = product === null || product === void 0 ? void 0 : product.searchKeywords) === null || _a === void 0 ? void 0 : _a.length)
+        ? product.searchKeywords
+        : [...new Set([...(0, normalizeKeyword_1.extractKeywords)((product === null || product === void 0 ? void 0 : product.name) || ''), ...(0, normalizeKeyword_1.extractKeywords)((product === null || product === void 0 ? void 0 : product.category) || '')])];
+}
+function productSellerLabel(product) {
+    return (product === null || product === void 0 ? void 0 : product.sellerName) || (product === null || product === void 0 ? void 0 : product.farmer) || '';
+}
+// Utilisateurs dont les intérêts (recherches, produits consultés)
+// correspondent à ces mots-clés — même source que notifyRestockMatch.
+async function findInterestedUsers(keywords, excludeIds = []) {
+    const ids = new Set();
+    for (const kw of keywords.slice(0, 10)) {
+        const snap = await admin.firestore()
+            .collection('users')
+            .where('interestKeywords', 'array-contains', kw)
+            .limit(500)
+            .get();
+        snap.docs.forEach((d) => ids.add(d.id));
+    }
+    excludeIds.forEach((id) => ids.delete(id));
+    if (ids.size === 0)
+        return [];
+    const users = [];
+    for (const part of chunk([...ids], 300)) {
+        const snaps = await admin.firestore().getAll(...part.map((id) => admin.firestore().collection('users').doc(id)));
+        snaps.forEach((s) => { if (s.exists)
+            users.push({ id: s.id, data: s.data() }); });
+    }
+    return users;
+}
+// ── 📉 Baisse de prix ────────────────────────────────────────────────
+// Un vendeur baisse son prix d'au moins 10 % → les clients intéressés
+// par ce produit sont prévenus. Si le stock est réellement bas, on le
+// dit (vraie rareté, jamais inventée).
+const PRICE_DROP_MIN_PCT = 10;
+exports.notifyPriceDrop = functions.firestore.onDocumentUpdated({ document: 'products/{productId}', region: 'us-central1' }, async (event) => {
+    var _a, _b, _c, _d, _e, _f;
+    const before = (_a = event.data) === null || _a === void 0 ? void 0 : _a.before.data();
+    const after = (_b = event.data) === null || _b === void 0 ? void 0 : _b.after.data();
+    if (!before || !after)
+        return;
+    const oldPrice = Number(before.price);
+    const newPrice = Number(after.price);
+    if (!(oldPrice > 0) || !(newPrice > 0) || newPrice >= oldPrice)
+        return;
+    const pct = Math.round(((oldPrice - newPrice) / oldPrice) * 100);
+    if (pct < PRICE_DROP_MIN_PCT)
+        return;
+    if (typeof after.stock === 'number' && after.stock <= 0)
+        return; // rupture : notifyRestockMatch prendra le relais
+    const lastMs = (_e = (_d = (_c = after.lastPriceDropNotifiedAt) === null || _c === void 0 ? void 0 : _c.toMillis) === null || _d === void 0 ? void 0 : _d.call(_c)) !== null && _e !== void 0 ? _e : 0;
+    if (Date.now() - lastMs < DAY_MS)
+        return; // 1 alerte max / jour / produit
+    if (await alreadyProcessed(event.id))
+        return;
+    // Posé AVANT l'envoi : même si l'envoi échoue, pas de rafale si le
+    // vendeur ajuste son prix plusieurs fois de suite.
+    await event.data.after.ref.update({ lastPriceDropNotifiedAt: admin.firestore.FieldValue.serverTimestamp() });
+    const productId = event.params.productId;
+    const candidates = await findInterestedUsers(productKeywordsOf(after), [after.sellerId].filter(Boolean));
+    const eligible = candidates.filter((u) => passesPersonalizationGate(u.data, 'price_drop', after.region));
+    if (eligible.length === 0)
+        return;
+    const unit = (_f = after.unit) !== null && _f !== void 0 ? _f : 'unité';
+    const seller = productSellerLabel(after);
+    const scarcity = typeof after.stock === 'number' && after.stock <= 10
+        ? ` Plus que ${after.stock} ${unit} en stock.`
+        : '';
+    await dispatchPersonalized(eligible, {
+        title: `📉 ${after.name} : -${pct}% !`,
+        body: `${formatFcfa(oldPrice)} → ${formatFcfa(newPrice)}/${unit}${seller ? ` chez ${seller}` : ''}.${scarcity}`,
+        imageUrl: Array.isArray(after.images) ? after.images[0] : undefined,
+    }, { type: 'price_drop', productId, link: `/product?id=${productId}` });
+    console.log(`📉 Baisse de prix -${pct}% sur "${after.name}" : ${eligible.length}/${candidates.length} client(s) prévenu(s).`);
+});
+// ── 🛒 Réachat intelligent ───────────────────────────────────────────
+// Chaque matin, on regarde ce que chaque client achète régulièrement.
+// Quelqu'un qui prend du riz tous les 12 jours reçoit, vers le 11e jour,
+// un rappel pour le recommander en 2 clics. Un seul produit par client,
+// jamais deux fois pour le même achat.
+const REORDER_LOOKBACK_DAYS = 120;
+const REORDER_DEFAULT_CYCLE_DAYS = 10; // un seul achat connu
+exports.smartReorderReminder = (0, scheduler_1.onSchedule)({ schedule: 'every day 10:00', region: 'us-central1', timeZone: 'Africa/Dakar', timeoutSeconds: 540 }, async () => {
+    var _a, _b, _c, _d, _e;
+    const now = Date.now();
+    const cutoff = admin.firestore.Timestamp.fromMillis(now - REORDER_LOOKBACK_DAYS * DAY_MS);
+    // Filtre sur un seul champ (createdAt) : aucun index composite requis.
+    const ordersSnap = await admin.firestore().collection('orders').where('createdAt', '>=', cutoff).get();
+    // userId → productId → dates d'achat
+    const history = new Map();
+    ordersSnap.docs.forEach((d) => {
+        var _a, _b, _c, _d;
+        const o = d.data();
+        if (o.status !== 'livre' || !o.userId || !Array.isArray(o.items))
+            return;
+        const t = (_b = (_a = o.createdAt) === null || _a === void 0 ? void 0 : _a.toMillis) === null || _b === void 0 ? void 0 : _b.call(_a);
+        if (typeof t !== 'number')
+            return;
+        const perUser = (_c = history.get(o.userId)) !== null && _c !== void 0 ? _c : new Map();
+        for (const it of o.items) {
+            if (!(it === null || it === void 0 ? void 0 : it.productId) || it.productId === 'unknown')
+                continue;
+            const h = (_d = perUser.get(it.productId)) !== null && _d !== void 0 ? _d : { times: [] };
+            h.times.push(t);
+            perUser.set(it.productId, h);
+        }
+        history.set(o.userId, perUser);
+    });
+    // Pour chaque client : le produit le plus « dû » aujourd'hui.
+    const picks = new Map();
+    history.forEach((perUser, userId) => {
+        let best = null;
+        perUser.forEach((h, productId) => {
+            const times = [...new Set(h.times)].sort((a, b) => a - b);
+            const lastAt = times[times.length - 1];
+            const cycleDays = times.length >= 2
+                ? Math.min(60, Math.max(3, (lastAt - times[0]) / (times.length - 1) / DAY_MS))
+                : REORDER_DEFAULT_CYCLE_DAYS;
+            const ratio = (now - lastAt) / DAY_MS / cycleDays;
+            if (ratio < 0.9 || ratio > 3)
+                return; // pas encore l'heure, ou habitude perdue
+            if (!best || ratio > best.ratio)
+                best = { productId, cycleDays, purchases: times.length, lastAt, ratio };
+        });
+        if (best)
+            picks.set(userId, best);
+    });
+    if (picks.size === 0) {
+        console.log('🛒 Réachat : aucun client à relancer aujourd\'hui.');
+        return;
+    }
+    const userIds = [...picks.keys()];
+    const productIds = [...new Set([...picks.values()].map((p) => p.productId))];
+    const userDocs = new Map();
+    for (const part of chunk(userIds, 300)) {
+        const snaps = await admin.firestore().getAll(...part.map((id) => admin.firestore().collection('users').doc(id)));
+        snaps.forEach((s) => { if (s.exists)
+            userDocs.set(s.id, s.data()); });
+    }
+    const products = new Map();
+    for (const part of chunk(productIds, 300)) {
+        const snaps = await admin.firestore().getAll(...part.map((id) => admin.firestore().collection('products').doc(id)));
+        snaps.forEach((s) => { if (s.exists)
+            products.set(s.id, s.data()); });
+    }
+    let sent = 0;
+    for (const [userId, pick] of picks) {
+        const userData = userDocs.get(userId);
+        const product = products.get(pick.productId);
+        if (!userData || !product)
+            continue;
+        if (typeof product.stock === 'number' && product.stock <= 0)
+            continue;
+        const remindedAt = (_d = (_c = (_b = (_a = userData.reorderRemindedAt) === null || _a === void 0 ? void 0 : _a[pick.productId]) === null || _b === void 0 ? void 0 : _b.toMillis) === null || _c === void 0 ? void 0 : _c.call(_b)) !== null && _d !== void 0 ? _d : 0;
+        if (remindedAt > pick.lastAt)
+            continue; // déjà relancé pour cet achat
+        if (!passesPersonalizationGate(userData, 'reorder', product.region))
+            continue;
+        const seller = productSellerLabel(product);
+        const unit = (_e = product.unit) !== null && _e !== void 0 ? _e : 'unité';
+        const notification = pick.purchases >= 2
+            ? {
+                title: `🛒 Bientôt à court de ${product.name} ?`,
+                body: `Vous en reprenez environ tous les ${Math.round(pick.cycleDays)} jours. Recommandez en 2 clics${seller ? ` chez ${seller}` : ''}.`,
+            }
+            : {
+                title: `😋 Envie de reprendre du ${product.name} ?`,
+                body: typeof product.price === 'number'
+                    ? `Toujours disponible${seller ? ` chez ${seller}` : ''} — ${formatFcfa(product.price)}/${unit}.`
+                    : `Toujours disponible${seller ? ` chez ${seller}` : ''}.`,
+            };
+        await dispatchPersonalized([{ id: userId, data: userData }], Object.assign(Object.assign({}, notification), { imageUrl: Array.isArray(product.images) ? product.images[0] : undefined }), { type: 'smart_reorder', productId: pick.productId, link: `/product?id=${pick.productId}` });
+        await admin.firestore().collection('users').doc(userId).set({ reorderRemindedAt: { [pick.productId]: admin.firestore.FieldValue.serverTimestamp() } }, { merge: true });
+        sent++;
+    }
+    console.log(`🛒 Réachat : ${sent} rappel(s) envoyé(s) sur ${picks.size} client(s) candidat(s).`);
+});
+// ── 🧺 Panier en attente ─────────────────────────────────────────────
+// Le panier est enregistré dans carts/{uid} (hooks/useCart.tsx), avec
+// `updatedAt` à chaque modification. Deux relances maximum par panier :
+//  1. après 3 h sans modification : rappel simple du panier ;
+//  2. après 24 h : SEULEMENT s'il y a une vraie raison (un prix a baissé
+//     depuis l'ajout, ou un produit est presque épuisé). Sinon, silence.
+// Toute modification du panier remet le compteur à zéro. Rien n'est envoyé
+// si le client a commandé entre-temps, ou si tout est en rupture.
+const CART_FIRST_REMINDER_MS = 3 * 60 * 60 * 1000;
+const CART_SECOND_REMINDER_MS = 24 * 60 * 60 * 1000;
+const CART_MAX_AGE_MS = 72 * 60 * 60 * 1000;
+const CART_LOW_STOCK = 5;
+exports.abandonedCartReminder = (0, scheduler_1.onSchedule)({ schedule: 'every 60 minutes', region: 'us-central1', timeZone: 'Africa/Dakar', timeoutSeconds: 300 }, async () => {
+    var _a, _b, _c, _d, _e;
+    const now = Date.now();
+    const cartsSnap = await admin.firestore()
+        .collection('carts')
+        .where('updatedAt', '<=', admin.firestore.Timestamp.fromMillis(now - CART_FIRST_REMINDER_MS))
+        .where('updatedAt', '>=', admin.firestore.Timestamp.fromMillis(now - CART_MAX_AGE_MS))
+        .get();
+    let sent = 0;
+    for (const cartDoc of cartsSnap.docs) {
+        const cart = cartDoc.data();
+        const userId = cartDoc.id;
+        const items = Array.isArray(cart.items)
+            ? cart.items.filter((it) => { var _a; return ((_a = it === null || it === void 0 ? void 0 : it.product) === null || _a === void 0 ? void 0 : _a.id) && Number(it === null || it === void 0 ? void 0 : it.quantity) > 0; })
+            : [];
+        if (items.length === 0)
+            continue;
+        const updatedAtMs = (_c = (_b = (_a = cart.updatedAt) === null || _a === void 0 ? void 0 : _a.toMillis) === null || _b === void 0 ? void 0 : _b.call(_a)) !== null && _c !== void 0 ? _c : 0;
+        const age = now - updatedAtMs;
+        const sameCart = cart.reminderForUpdatedAt === updatedAtMs;
+        const stageDone = sameCart ? Number(cart.reminderStage) || 0 : 0;
+        const stage = stageDone === 0 ? 1 : stageDone === 1 && age >= CART_SECOND_REMINDER_MS ? 2 : 0;
+        if (stage === 0)
+            continue;
+        // Commande passée depuis la dernière modification du panier → rien.
+        const ordersSnap = await admin.firestore().collection('orders').where('userId', '==', userId).select('createdAt').get();
+        const orderedSince = ordersSnap.docs.some((o) => { var _a, _b, _c; return ((_c = (_b = (_a = o.data().createdAt) === null || _a === void 0 ? void 0 : _a.toMillis) === null || _b === void 0 ? void 0 : _b.call(_a)) !== null && _c !== void 0 ? _c : 0) >= updatedAtMs; });
+        if (orderedSince)
+            continue;
+        const userSnap = await admin.firestore().collection('users').doc(userId).get();
+        if (!userSnap.exists)
+            continue;
+        const userData = userSnap.data();
+        if (!passesPersonalizationGate(userData, 'cart'))
+            continue;
+        // Prix et stocks ACTUELS (ceux du panier datent de l'ajout).
+        const productSnaps = await admin.firestore().getAll(...items.slice(0, 30).map((it) => admin.firestore().collection('products').doc(String(it.product.id))));
+        const current = new Map();
+        productSnaps.forEach((ps) => { if (ps.exists)
+            current.set(ps.id, ps.data()); });
+        const available = items.filter((it) => {
+            const p = current.get(String(it.product.id));
+            return p && !(typeof p.stock === 'number' && p.stock <= 0);
+        });
+        if (available.length === 0)
+            continue;
+        const total = available.reduce((sum, it) => {
+            var _a, _b;
+            const price = Number((_b = (_a = current.get(String(it.product.id))) === null || _a === void 0 ? void 0 : _a.price) !== null && _b !== void 0 ? _b : it.product.price) || 0;
+            return sum + price * Number(it.quantity);
+        }, 0);
+        const count = available.reduce((sum, it) => sum + Number(it.quantity), 0);
+        const first = current.get(String(available[0].product.id));
+        const firstName = (first === null || first === void 0 ? void 0 : first.name) || available[0].product.name || 'vos produits';
+        const image = Array.isArray(first === null || first === void 0 ? void 0 : first.images) ? first.images[0] : (_d = available[0].product.images) === null || _d === void 0 ? void 0 : _d[0];
+        let notification = null;
+        if (stage === 1) {
+            notification = {
+                title: available.length === 1 ? `🧺 Votre ${firstName} vous attend` : '🧺 Votre panier vous attend',
+                body: `${count} article${count > 1 ? 's' : ''} pour ${formatFcfa(total)}. Finalisez votre commande en 1 minute.`,
+                imageUrl: image,
+            };
+        }
+        else {
+            const dropped = available.find((it) => {
+                var _a;
+                const nowPrice = Number((_a = current.get(String(it.product.id))) === null || _a === void 0 ? void 0 : _a.price);
+                return nowPrice > 0 && nowPrice < Number(it.product.price);
+            });
+            const scarce = available.find((it) => {
+                var _a;
+                const st = (_a = current.get(String(it.product.id))) === null || _a === void 0 ? void 0 : _a.stock;
+                return typeof st === 'number' && st <= CART_LOW_STOCK;
+            });
+            if (dropped) {
+                const p = current.get(String(dropped.product.id));
+                notification = {
+                    title: `📉 Bonne nouvelle pour votre panier`,
+                    body: `${p.name} est passé de ${formatFcfa(Number(dropped.product.price))} à ${formatFcfa(Number(p.price))}. Votre panier est toujours prêt.`,
+                    imageUrl: Array.isArray(p.images) ? p.images[0] : image,
+                };
+            }
+            else if (scarce) {
+                const p = current.get(String(scarce.product.id));
+                notification = {
+                    title: `⏳ ${p.name} bientôt épuisé`,
+                    body: `Plus que ${p.stock} ${(_e = p.unit) !== null && _e !== void 0 ? _e : 'unité'} en stock. Il est encore dans votre panier.`,
+                    imageUrl: Array.isArray(p.images) ? p.images[0] : image,
+                };
+            }
+        }
+        // Étape marquée même sans envoi (étape 2 sans raison valable) :
+        // le panier ne sera plus examiné tant qu'il n'est pas modifié.
+        await cartDoc.ref.set({ reminderStage: stage, reminderForUpdatedAt: updatedAtMs }, { merge: true });
+        if (!notification)
+            continue;
+        await dispatchPersonalized([{ id: userId, data: userData }], notification, { type: 'abandoned_cart', stage: String(stage), link: '/cart' });
+        sent++;
+    }
+    console.log(`🧺 Paniers en attente : ${sent} relance(s) sur ${cartsSnap.size} panier(s) examiné(s).`);
+});
+// ── 📊 Bilan du soir pour les vendeurs ───────────────────────────────
+// Tous les soirs à 20h : « 5 commandes aujourd'hui pour 42 000 FCFA 📈 ».
+// Uniquement les vendeurs qui ont vendu dans la journée (pas de « 0
+// commande » décourageant). Désactivable : notificationPreferences.seller_recap = false.
+exports.sellerDailyRecap = (0, scheduler_1.onSchedule)({ schedule: 'every day 20:00', region: 'us-central1', timeZone: 'Africa/Dakar', timeoutSeconds: 300 }, async () => {
+    var _a;
+    const nowDate = new Date();
+    // Dakar = UTC+0 toute l'année : minuit UTC == minuit à Dakar.
+    const startToday = Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth(), nowDate.getUTCDate());
+    const startYesterday = startToday - DAY_MS;
+    const snap = await admin.firestore()
+        .collection('orders')
+        .where('createdAt', '>=', admin.firestore.Timestamp.fromMillis(startYesterday))
+        .get();
+    const stats = new Map();
+    snap.docs.forEach((d) => {
+        var _a, _b, _c;
+        const o = d.data();
+        if (!o.sellerId || o.status === 'annule')
+            return;
+        const t = (_b = (_a = o.createdAt) === null || _a === void 0 ? void 0 : _a.toMillis) === null || _b === void 0 ? void 0 : _b.call(_a);
+        if (typeof t !== 'number')
+            return;
+        const s = (_c = stats.get(o.sellerId)) !== null && _c !== void 0 ? _c : { today: 0, revenue: 0, yesterday: 0 };
+        if (t >= startToday) {
+            s.today++;
+            s.revenue += Number(o.total) || 0;
+        }
+        else {
+            s.yesterday++;
+        }
+        stats.set(o.sellerId, s);
+    });
+    const sellerIds = [...stats.entries()].filter(([, s]) => s.today > 0).map(([id]) => id);
+    if (sellerIds.length === 0)
+        return;
+    const sellerDocs = new Map();
+    for (const part of chunk(sellerIds, 300)) {
+        const snaps = await admin.firestore().getAll(...part.map((id) => admin.firestore().collection('users').doc(id)));
+        snaps.forEach((s) => { if (s.exists)
+            sellerDocs.set(s.id, s.data()); });
+    }
+    let sent = 0;
+    for (const sellerId of sellerIds) {
+        const data = sellerDocs.get(sellerId);
+        if (!data || ((_a = data.notificationPreferences) === null || _a === void 0 ? void 0 : _a.seller_recap) === false)
+            continue;
+        const s = stats.get(sellerId);
+        const diff = s.today - s.yesterday;
+        const trend = diff > 0 && s.yesterday > 0 ? ` 📈 +${diff} par rapport à hier.` : '';
+        const plural = s.today > 1 ? 's' : '';
+        await sendToUsers([sellerId], {
+            title: s.today >= 5 ? `🔥 Grosse journée : ${s.today} commandes !` : '📊 Votre journée sur Sunu Mëñëf',
+            body: `${s.today} commande${plural} aujourd'hui pour ${formatFcfa(s.revenue)}.${trend} ${randomSticker(SELLER_STICKERS)}`,
+        }, { type: 'seller_daily_recap', link: '/seller/dashboard' });
+        sent++;
+    }
+    console.log(`📊 Bilan du soir envoyé à ${sent} vendeur(s).`);
+});
+// ── Synchronisation du point de retrait vendeur ─────────────────────────
+// Quand un vendeur enregistre un nouveau point de retrait (users/{uid}.lat/
+// lng), on le recopie :
+//  - sur TOUS ses produits (distance « près de chez vous », frais et délai
+//    au checkout, qui lisent le document produit) — avant, un produit gardait
+//    à vie la position du jour de sa création ;
+//  - sur ses commandes pas encore récupérées par un livreur (en attente /
+//    en préparation, ou attribuées mais pas encore « en route »), pour que le
+//    livreur n'aille pas à l'ancienne adresse. Les commandes déjà en route ou
+//    livrées gardent leur historique.
+const GEOHASH_BASE32 = '0123456789bcdefghjkmnpqrstuvwxyz';
+function encodeGeohash(lat, lng, precision = 10) {
+    let idx = 0, bit = 0, evenBit = true, hash = '';
+    let latMin = -90, latMax = 90, lngMin = -180, lngMax = 180;
+    while (hash.length < precision) {
+        if (evenBit) {
+            const mid = (lngMin + lngMax) / 2;
+            if (lng >= mid) {
+                idx = idx * 2 + 1;
+                lngMin = mid;
+            }
+            else {
+                idx = idx * 2;
+                lngMax = mid;
+            }
+        }
+        else {
+            const mid = (latMin + latMax) / 2;
+            if (lat >= mid) {
+                idx = idx * 2 + 1;
+                latMin = mid;
+            }
+            else {
+                idx = idx * 2;
+                latMax = mid;
+            }
+        }
+        evenBit = !evenBit;
+        if (++bit === 5) {
+            hash += GEOHASH_BASE32.charAt(idx);
+            bit = 0;
+            idx = 0;
+        }
+    }
+    return hash;
+}
+exports.syncSellerLocation = functions.firestore.onDocumentUpdated({ document: 'users/{userId}', region: 'us-central1' }, async (event) => {
+    var _a, _b;
+    const before = (_a = event.data) === null || _a === void 0 ? void 0 : _a.before.data();
+    const after = (_b = event.data) === null || _b === void 0 ? void 0 : _b.after.data();
+    if (!before || !after)
+        return;
+    if (after.role !== 'seller')
+        return;
+    if (!isValidCoordinate({ lat: after.lat, lng: after.lng }))
+        return;
+    if (before.lat === after.lat && before.lng === after.lng && before.locationAddress === after.locationAddress)
+        return;
+    if (after.locationSource === 'GPS_LIVE')
+        return; // position en direct (livreur), pas un point de retrait
+    if (await alreadyProcessed(event.id))
+        return;
+    const sellerId = event.params.userId;
+    const db = admin.firestore();
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    const address = typeof after.locationAddress === 'string' && after.locationAddress
+        ? after.locationAddress
+        : `${after.lat.toFixed(5)}, ${after.lng.toFixed(5)}`;
+    const source = after.locationSource || 'GPS';
+    const accuracy = typeof after.locationAccuracy === 'number' ? after.locationAccuracy : null;
+    const productsSnap = await db.collection('products').where('sellerId', '==', sellerId).get();
+    const productWrites = productsSnap.docs.map((d) => ({
+        ref: d.ref,
+        data: {
+            lat: after.lat,
+            lng: after.lng,
+            geohash: encodeGeohash(after.lat, after.lng),
+            locationAddress: address,
+            locationSource: source,
+            locationAccuracy: accuracy,
+            locationUpdatedAt: now,
+        },
+    }));
+    const ordersSnap = await db.collection('orders').where('sellerId', '==', sellerId).get();
+    const openOrders = ordersSnap.docs.filter((d) => {
+        var _a;
+        const o = d.data();
+        const phase = (_a = o.tracking) === null || _a === void 0 ? void 0 : _a.phase;
+        return ['en_attente', 'en_preparation', 'en_livraison'].includes(o.status)
+            && (!phase || phase === 'assigned');
+    });
+    const sellerLocation = Object.assign(Object.assign({ lat: after.lat, lng: after.lng, address, isDefault: false, locationSource: source }, (accuracy !== null ? { accuracy } : {})), { locationUpdatedAt: now });
+    const orderWrites = [];
+    for (const d of openOrders) {
+        orderWrites.push({ ref: d.ref, data: { sellerLocation } });
+        const mirror = db.collection('seller_orders').doc(d.id);
+        const mirrorSnap = await mirror.get();
+        if (mirrorSnap.exists)
+            orderWrites.push({ ref: mirror, data: { sellerLocation } });
+    }
+    await setManyMerge([...productWrites, ...orderWrites]);
+    console.log(`📍 Point de retrait de ${sellerId} recopié sur ${productWrites.length} produit(s) et ${openOrders.length} commande(s) en cours.`);
+});
 const SEUIL_PROCHE_METRES = 500;
 // Au-delà de cette imprécision GPS, une lecture ne suffit plus à
 // conclure une proximité : mieux vaut attendre le point suivant (plus
@@ -1227,6 +1755,13 @@ exports.checkDeliveryProximity = functions.firestore.onDocumentUpdated({ documen
         return;
     const dest = after.customerLocation;
     if (!isValidCoordinate(dest))
+        return;
+    // Adresse client non confirmée (ancien repli Dakar/IP) ou imprécise : ne
+    // jamais annoncer « votre livreur arrive » sur la base d'un point faux.
+    const destInfo = after.customerLocation;
+    if (destInfo.isDefault === true)
+        return;
+    if (typeof destInfo.accuracy === 'number' && destInfo.accuracy > MAX_TRUSTED_ACCURACY_M)
         return;
     // Seconde ligne de défense (voir MAX_TRUSTED_ACCURACY_M ci-dessus) :
     // un point GPS de mauvaise qualité ne doit jamais, à lui seul,
@@ -1300,7 +1835,7 @@ exports.notifyDeliveryPhaseChange = functions.firestore.onDocumentUpdated({ docu
     // TTL court : "votre livreur arrive" n'a aucun sens reçu 2h plus tard
     // parce que l'appareil était hors-ligne (TTL par défaut FCM : 4
     // semaines). 15 min de marge suffisent largement pour ce type d'étape.
-    await sendToUsers([after.userId], { title: step.title, body: step.body(after) }, { type: 'delivery_phase', orderId: event.params.orderId, phase: afterPhase, link: `/tracking?id=${event.params.orderId}` }, { timeSensitive: afterPhase === 'arrived', ttlSeconds: 15 * 60 });
+    await sendToUsers([after.userId], { title: step.title, body: step.body(after) }, { type: 'delivery_phase', orderId: event.params.orderId, phase: afterPhase, link: `/tracking?orderId=${event.params.orderId}` }, { timeSensitive: afterPhase === 'arrived', ttlSeconds: 15 * 60 });
 });
 // ── Purge du registre d'idempotence ────────────────────────────────────────
 // _processedNotificationEvents ne sert qu'à détecter les redéclenchements

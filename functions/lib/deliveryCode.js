@@ -80,7 +80,7 @@ async function ensureGuestUser(uid, normalizedPhone, displayName) {
     if (!userSnap.exists) {
         await userRef.set({
             uid, phone: normalizedPhone, role: 'buyer', isGuest: true,
-            displayName: displayName || 'Client AgriMarché',
+            displayName: displayName || 'Client Sunu Mëñëf',
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
         });
     }
@@ -234,7 +234,7 @@ exports.confirmDeliveryWithCode = (0, https_1.onCall)({ region: REGION }, async 
         }
         const attempts = (_a = order.deliveryCodeAttempts) !== null && _a !== void 0 ? _a : 0;
         if (attempts >= MAX_CODE_ATTEMPTS) {
-            throw new https_1.HttpsError('resource-exhausted', 'Trop de tentatives sur cette commande — contactez le support AgriMarché.');
+            throw new https_1.HttpsError('resource-exhausted', 'Trop de tentatives sur cette commande — contactez le support Sunu Mëñëf.');
         }
         const submitted = hashCode(String(code).trim(), order.deliveryCodeSalt);
         if (submitted !== order.deliveryCodeHash) {

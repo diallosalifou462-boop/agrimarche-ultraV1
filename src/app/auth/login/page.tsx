@@ -95,7 +95,8 @@ function LoginContent() {
 
   useEffect(() => {
     if (!mounted || authLoading || !user) return;
-    router.replace(getRedirectPath(profile?.role));
+    const requested = searchParams.get('redirect');
+    router.replace(requested && requested.startsWith('/') && !requested.startsWith('//') ? requested : getRedirectPath(profile?.role));
   }, [user, profile, authLoading, mounted, router]);
 
   useEffect(() => {
@@ -184,76 +185,9 @@ function LoginContent() {
       }
       if (!signedIn) throw lastErr ?? Object.assign(new Error('invalid'), { code: 'auth/invalid-credential' });
 
-      // Mot de passe OK → envoie l'OTP
-      const phoneE164 = toE164(phone);
-
-      const carrier = detectCarrier(phone);
-      if (carrier === 'free' || carrier === 'expresso') {
-        useCustomOtpRef.current = true;
-        // Fetch isolé + log automatique (Firestore) : une erreur réseau
-        // (CORS/ATS/DNS/timeout côté iOS) ne doit pas être confondue avec
-        // un vrai rejet du code par le serveur/Infobip — voir même fix sur
-        // auth/register/page.tsx, et otpDiagnostics.ts pour le détail.
-        const fetchStartedAt = Date.now();
-        logOtpAttempt({ flow: 'login', step: 'fetch_start', phoneE164, carrier });
-        let res: Response;
-        try {
-          res = await fetch(apiUrl('/api/otp/send'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phone: phoneE164 }),
-          });
-        } catch (networkErr: any) {
-          const msg = String(networkErr?.message || networkErr);
-          console.error('[DEBUG] /api/otp/send — échec RÉSEAU:', networkErr);
-          logOtpAttempt({
-            flow: 'login', step: 'fetch_network_error', phoneE164, carrier,
-            errorMessage: msg, durationMs: Date.now() - fetchStartedAt,
-          });
-          setError(`Connexion au serveur impossible (réseau). Détail: ${msg}`);
-          setLoading(false);
-          return;
-        }
-        const json = await res.json().catch(() => null);
-        if (!res.ok) {
-          console.error('[DEBUG] /api/otp/send — erreur API:', res.status, json);
-          logOtpAttempt({
-            flow: 'login', step: 'fetch_api_error', phoneE164, carrier,
-            httpStatus: res.status, errorMessage: json?.error,
-            durationMs: Date.now() - fetchStartedAt,
-          });
-          setError(json?.error || `Erreur lors de l'envoi du code (HTTP ${res.status})`);
-          setLoading(false);
-          return;
-        }
-        logOtpAttempt({
-          flow: 'login', step: 'fetch_success', phoneE164, carrier,
-          httpStatus: res.status, durationMs: Date.now() - fetchStartedAt,
-        });
-        setStep('otp');
-        setResendCooldown(60);
-        setLoading(false);
-        return;
-      }
-      useCustomOtpRef.current = false;
-
-      const bridgeLikelyNative = Capacitor.isNativePlatform() || (await waitForNativeBridge());
-      isNativeRef.current = bridgeLikelyNative;
-      if (bridgeLikelyNative) {
-        try {
-          // APK : la suite est gérée par le listener 'phoneCodeSent'
-          await FirebaseAuthentication.signInWithPhoneNumber({ phoneNumber: phoneE164 });
-          return;
-        } catch (nativeErr: any) {
-          const msg = String(nativeErr?.message || nativeErr);
-          if (!/not implemented|not available|unimplemented/i.test(msg)) throw nativeErr;
-        }
-      }
-      setupRecaptcha();
-      const result = await signInWithPhoneNumber(auth, phoneE164, recaptchaRef.current!);
-      setConfirmResult(result);
-      setStep('otp');
-      setResendCooldown(60);
+      // Numéro + mot de passe corrects → connexion directe, AUCUN code
+      // envoyé, quel que soit l'opérateur. La redirection (selon le rôle,
+      // ou vers ?redirect=) est faite par l'effet qui surveille `user`.
       setLoading(false);
     } catch (err: any) {
       const code = err?.code;
@@ -494,13 +428,7 @@ function LoginContent() {
             <BrandLogo size={96} variant="full" className="w-full h-full rounded-full" />
           </div>
           <h1 className="text-2xl font-bold mt-3">Bienvenue sur Sunu Mëñëf</h1>
-          <p className="text-sm text-gray-500 mt-1">Connexion sécurisée par SMS</p>
-        </div>
-
-        {/* SMS badge */}
-        <div className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-xl px-3 py-2 mb-4">
-          <MessageSquare size={13} className="text-green-600 flex-shrink-0" />
-          <p className="text-xs text-green-700">Un code SMS vous sera envoyé pour confirmer</p>
+          <p className="text-sm text-gray-500 mt-1">Connectez-vous avec votre numéro et votre mot de passe</p>
         </div>
 
         {error && (
@@ -544,8 +472,8 @@ function LoginContent() {
           disabled={loading}
           className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 rounded-xl transition disabled:opacity-50 flex items-center justify-center gap-2"
         >
-          <MessageSquare size={16} />
-          {loading ? 'Envoi du SMS...' : 'Se connecter'}
+          <Lock size={16} />
+          {loading ? 'Connexion...' : 'Se connecter'}
         </button>
 
         <p className="text-center mt-5 text-sm">

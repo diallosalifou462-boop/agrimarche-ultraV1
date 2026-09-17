@@ -76,10 +76,33 @@ function clientIp(rawRequest) {
         ((_c = (_b = (_a = rawRequest === null || rawRequest === void 0 ? void 0 : rawRequest.headers) === null || _a === void 0 ? void 0 : _a['x-forwarded-for']) === null || _b === void 0 ? void 0 : _b.split(',')[0]) === null || _c === void 0 ? void 0 : _c.trim()) ||
         'unknown');
 }
+// Choix du token push pour la réinitialisation :
+// 1. le token de l'appareil qui fait la demande, SEULEMENT s'il est déjà
+//    enregistré sur ce compte (users/{uid}/tokens/{token}) — sinon un
+//    tiers pourrait fournir son propre token et recevoir le code ;
+// 2. sinon le token le plus récent du compte ;
+// 3. sinon aucun → SMS Infobip.
+async function resolvePushToken(uid, clientToken) {
+    if (clientToken) {
+        try {
+            const doc = await admin.firestore().collection('users').doc(uid).collection('tokens').doc(clientToken).get();
+            if (doc.exists)
+                return clientToken;
+        }
+        catch (err) {
+            console.warn(`⚠️ Vérification du token client impossible pour ${uid}:`, err);
+        }
+    }
+    return (0, otpChannel_1.getMostRecentPushToken)(uid);
+}
 exports.resetPasswordSendOtp = (0, https_1.onCall)({ region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: true }, async (request) => {
-    var _a, _b;
+    var _a, _b, _c, _d;
     const phoneRaw = String((_b = (_a = request.data) === null || _a === void 0 ? void 0 : _a.phone) !== null && _b !== void 0 ? _b : '');
     const phone = (0, carrier_1.normalizePhoneSN)(phoneRaw);
+    // Optionnels : token push de l'appareil qui fait la demande, et
+    // `forceSms` quand l'utilisateur n'a pas reçu la notification.
+    const clientPushToken = typeof ((_c = request.data) === null || _c === void 0 ? void 0 : _c.pushToken) === 'string' ? request.data.pushToken.trim() : '';
+    const forceSms = ((_d = request.data) === null || _d === void 0 ? void 0 : _d.forceSms) === true;
     if (!phone)
         throwLocalized('invalid-argument', 'INVALID_PHONE');
     const ip = clientIp(request.rawRequest);
@@ -126,7 +149,7 @@ exports.resetPasswordSendOtp = (0, https_1.onCall)({ region: 'us-central1', secr
     // chercher un token push déjà enregistré pour lui, même si
     // l'utilisateur n'est plus authentifié sur CETTE session (mot de
     // passe oublié) — voir otpChannel.ts.
-    const pushToken = await (0, otpChannel_1.getMostRecentPushToken)(uid);
+    const pushToken = forceSms ? undefined : await resolvePushToken(uid, clientPushToken);
     let channel;
     try {
         channel = await (0, otpChannel_1.decideChannelAndSend)(sessionRef.id, phone, pushToken, code, 'réinitialisation', 'reset');
@@ -136,7 +159,7 @@ exports.resetPasswordSendOtp = (0, https_1.onCall)({ region: 'us-central1', secr
         throw err; // déjà un HttpsError('unavailable', 'SMS_SEND_FAILED') localisé côté client
     }
     await (0, audit_1.logAuditEvent)({ type: 'reset_otp_sent', sessionId: sessionRef.id, phone, ip, channel });
-    return { sessionId: sessionRef.id, otpTtlSeconds: OTP_TTL_MS / 1000 };
+    return { sessionId: sessionRef.id, channel, otpTtlSeconds: OTP_TTL_MS / 1000 };
 });
 exports.resetPasswordVerifyOtp = (0, https_1.onCall)({ region: 'us-central1', secrets: ['OTP_HASH_PEPPER'], enforceAppCheck: true }, async (request) => {
     var _a, _b, _c, _d;

@@ -36,6 +36,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.normalizePhoneSN = normalizePhoneSN;
 exports.detectCarrier = detectCarrier;
 exports.phoneToSyntheticEmail = phoneToSyntheticEmail;
+exports.syntheticEmailCandidates = syntheticEmailCandidates;
 // ============================================================
 //   carrier.ts — Détection d'opérateur (Sénégal) pour le ROUTAGE
 //   de la vérification d'inscription.
@@ -120,14 +121,23 @@ async function detectCarrier(phoneE164) {
     }
     return 'unknown';
 }
-// ⚠️ Doit produire EXACTEMENT la même chaîne que phoneToEmail() côté
-// frontend (src/contexts/AuthContext.tsx : `${phone.replace(/\D/g,'')}@agrimarche.sn`),
-// qui s'applique au numéro LOCAL tel que tapé par l'utilisateur (sans
-// indicatif +221 — le formulaire n'en demande pas). normalizePhoneSN()
-// renvoie lui la forme E.164 complète (+221XXXXXXXXX) ; on retire donc
-// l'indicatif ici avant de reconstituer l'email, sous peine de générer
-// un email qui ne correspond à aucun compte pour le login/reset.
+// Email synthétique des NOUVEAUX comptes : 221XXXXXXXXX@sunnumenef.sn —
+// même format que la route /api/otp/verify et que phoneToEmail() de l'app.
+// ⚠️ Avant : XXXXXXXXX@gmail.com, un format qu'AUCUN écran de connexion ne
+// savait retrouver. La connexion ne fabrique plus l'email elle-même : elle
+// demande au serveur l'email réel du compte (/api/auth/check-phone), et
+// syntheticEmailCandidates() couvre tous les formats ayant existé.
 function phoneToSyntheticEmail(phoneE164) {
-    const digits = phoneE164.replace(/\D/g, '').replace(/^221/, '');
-    return `${digits}@agrimarche.sn`;
+    return `${phoneE164.replace(/\D/g, '')}@sunnumenef.sn`;
+}
+function syntheticEmailCandidates(phoneE164) {
+    const local = phoneE164.replace(/\D/g, '').replace(/^221/, '');
+    return [
+        `221${local}@sunnumenef.sn`,
+        `${local}@sunnumenef.sn`,
+        `221${local}@agrimarche.sn`,
+        `${local}@agrimarche.sn`,
+        `${local}@gmail.com`,
+        `221${local}@gmail.com`,
+    ];
 }

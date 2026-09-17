@@ -126,28 +126,17 @@ function throwLocalized(httpsCode: FunctionsErrorCode, techCode: string): never 
 // On garde les noms de métriques historiques (sent_push, sent_sms...)
 // plutôt que de migrer vers otpChannel.ts, pour ne pas casser le
 // dashboard admin qui les lit sous ces noms précis pour l'inscription.
-async function decideChannelAndSend(sessionId: string, phone: string, pushToken: string | undefined, code: string): Promise<Channel> {
-  if (pushToken) {
-    try {
-      await admin.messaging().send({
-        token: pushToken,
-        notification: {
-          title: 'Sunu Mëñëf',
-          body: `Votre code de confirmation Sunu Mëñëf est : ${code}. Ce code expire dans 5 minutes.`,
-        },
-        data: { type: 'registration_otp', sessionId },
-        android: { priority: 'high' },
-        apns: { payload: { aps: { sound: 'default', 'interruption-level': 'time-sensitive' } } },
-      });
-      await bumpRegistrationMetric('sent_push');
-      return 'push';
-    } catch (err: any) {
-      console.error(`❌ Échec envoi push OTP (session ${sessionId}):`, err?.code || err);
-      await bumpRegistrationMetric('send_failed_push');
-      // tombe dans l'envoi SMS ci-dessous plutôt que d'échouer ici
-    }
-  }
-
+// 🔒 INSCRIPTION = SMS UNIQUEMENT.
+// Avant, le code partait par notification push vers l'appareil QUI FAIT
+// l'inscription. Ça ne prouve PAS que la personne possède le numéro : on
+// pouvait inscrire n'importe quel numéro depuis n'importe quel téléphone ou
+// navigateur. En plus, sur le web, la notification n'arrivait souvent pas
+// (clé VAPID absente, onglet au premier plan…) et l'utilisateur restait
+// bloqué sans code. Le token push reçu reste enregistré sur la session pour
+// les notifications APRÈS inscription, mais le code part toujours par SMS.
+// (Le mot de passe oublié garde le push : il n'est envoyé qu'à un appareil
+// déjà rattaché au compte, voir passwordReset.ts.)
+async function decideChannelAndSend(sessionId: string, phone: string, _pushToken: string | undefined, code: string): Promise<Channel> {
   try {
     await sendOtpSmsInfobip(phone, code);
   } catch (err: any) {

@@ -75,8 +75,7 @@ function sanitizeSelfRegisteredRole(candidate) {
         ? candidate
         : 'client';
 }
-// enforceAppCheck désactivé temporairement — voir commentaire dans
-// registration.ts sur registrationStart (même cause, même fix).
+// enforceAppCheck désactivé — voir commentaire dans registration.ts.
 exports.completeOrangeRegistration = (0, https_1.onCall)({ region: 'us-central1', enforceAppCheck: false }, async (request) => {
     var _a, _b, _c, _d, _e, _f;
     if (!request.auth)
@@ -106,6 +105,17 @@ exports.completeOrangeRegistration = (0, https_1.onCall)({ region: 'us-central1'
     const password = typeof profile.password === 'string' ? profile.password : '';
     if (password.length < 6)
         throwLocalized('invalid-argument', 'PASSWORD_REQUIRED');
+    // Ce numéro a déjà un VRAI compte (souvent : email seul, sans numéro
+    // attaché) → Firebase Phone Auth vient de créer un doublon vide (uid
+    // courant). On le supprime et on refuse l'inscription au lieu de laisser
+    // deux comptes pour le même numéro.
+    const existingAccount = await (0, phoneUniqueness_1.findAuthAccountForPhone)(phone);
+    if (existingAccount && existingAccount !== uid) {
+        await admin.auth().deleteUser(uid).catch(() => { });
+        await (0, metrics_1.bumpRegistrationMetric)('rejected_phone_used');
+        await (0, audit_1.logAuditEvent)({ type: 'account_creation_failed', phone, carrier, accountId: uid, reason: 'phone_has_existing_account' });
+        throwLocalized('already-exists', 'PHONE_ALREADY_USED');
+    }
     const syntheticEmail = (0, carrier_1.phoneToSyntheticEmail)(phone);
     try {
         await (0, phoneUniqueness_1.claimPhoneForAccount)(phone, `orange:${uid}`, uid);

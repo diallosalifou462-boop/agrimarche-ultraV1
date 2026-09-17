@@ -98,7 +98,7 @@ const TRANSITIONS = {
 };
 exports.updateOrderStatus = (0, https_1.onCall)({
     region: 'us-central1', // aligné sur le reste de functions/src/index.ts
-    // ✅ App Check obligatoire : seule l'app AgriMarché légitime (iOS/Android/
+    // ✅ App Check obligatoire : seule l'app Sunu Mëñëf légitime (iOS/Android/
     // web enregistrée) peut appeler cette fonction — bloque les scripts qui
     // tenteraient d'appeler l'endpoint callable directement avec un simple
     // ID token vol é/rejoué. Nécessite d'avoir activé App Check côté client

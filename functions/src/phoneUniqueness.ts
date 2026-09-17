@@ -59,7 +59,14 @@ export async function reservePhoneForSession(
       data.pendingExpiresAt &&
       (data.pendingExpiresAt as FirebaseFirestore.Timestamp).toMillis() > now.toMillis();
 
-    if (pendingStillValid) throw new PhoneReservationConflictError();
+    // Une nouvelle demande de code pour le même numéro REMPLACE la précédente
+    // (au lieu de bloquer 15 minutes avec REGISTRATION_IN_PROGRESS). C'est ce
+    // qui empêchait « Renvoyer le code » et toute nouvelle tentative. Sans
+    // risque : le compte n'est créé qu'avec le code SMS reçu sur ce numéro,
+    // et claimPhoneForAccount refuse tout second compte.
+    if (pendingStillValid) {
+      console.log(`[phoneIndex] session ${data?.pendingSessionId} remplacée par ${sessionId} pour ${phone}`);
+    }
 
     tx.set(
       ref,

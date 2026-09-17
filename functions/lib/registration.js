@@ -138,8 +138,8 @@ async function decideChannelAndSend(sessionId, phone, pushToken, code) {
             await admin.messaging().send({
                 token: pushToken,
                 notification: {
-                    title: 'AgriMarché',
-                    body: `Votre code de confirmation AgriMarché est : ${code}. Ce code expire dans 5 minutes.`,
+                    title: 'Sunu Mëñëf',
+                    body: `Votre code de confirmation Sunu Mëñëf est : ${code}. Ce code expire dans 5 minutes.`,
                 },
                 data: { type: 'registration_otp', sessionId },
                 android: { priority: 'high' },
@@ -167,13 +167,10 @@ async function decideChannelAndSend(sessionId, phone, pushToken, code) {
 }
 // ── POST /registration/start ────────────────────────────────────────────
 exports.registrationStart = (0, https_1.onCall)(
-// enforceAppCheck: active en code la protection décrite dans fraud.ts —
-// sans ce flag, App Check n'était que "recommandé côté client" mais
-// jamais réellement vérifié côté serveur ; un appelant sans jeton valide
-// était accepté quand même. À activer seulement après avoir déployé
-// App Check (Play Integrity / DeviceCheck) sur l'app mobile, sous peine
-// de bloquer les inscriptions légitimes.
-{ region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: true }, async (request) => {
+// enforceAppCheck: DÉSACTIVÉ (12/09, ré-confirmé 14/09) — App Check
+// n'est toujours pas initialisé côté app mobile. À réactiver
+// seulement une fois App Check déployé et testé côté client.
+{ region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: false }, async (request) => {
     var _a, _b, _c;
     const phoneRaw = String((_b = (_a = request.data) === null || _a === void 0 ? void 0 : _a.phone) !== null && _b !== void 0 ? _b : '');
     const pushToken = ((_c = request.data) === null || _c === void 0 ? void 0 : _c.pushToken) || undefined;
@@ -261,7 +258,9 @@ exports.registrationStart = (0, https_1.onCall)(
     return { sessionId: sessionRef.id, channel, maxAttempts: MAX_VERIFY_ATTEMPTS, otpTtlSeconds: OTP_TTL_MS / 1000 };
 });
 // ── POST /registration/resend ───────────────────────────────────────────
-exports.registrationResend = (0, https_1.onCall)({ region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: true }, async (request) => {
+exports.registrationResend = (0, https_1.onCall)(
+// enforceAppCheck désactivé — voir commentaire sur registrationStart.
+{ region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: false }, async (request) => {
     var _a, _b, _c, _d, _e;
     const sessionId = String((_b = (_a = request.data) === null || _a === void 0 ? void 0 : _a.sessionId) !== null && _b !== void 0 ? _b : '');
     const newPushToken = ((_c = request.data) === null || _c === void 0 ? void 0 : _c.pushToken) || undefined;
@@ -341,7 +340,9 @@ async function purgeOldRegistrationSessions(olderThanMs) {
     return snap.size;
 }
 // ── POST /registration/verify ───────────────────────────────────────────
-exports.registrationVerify = (0, https_1.onCall)({ region: 'us-central1', secrets: ['OTP_HASH_PEPPER'], enforceAppCheck: true }, async (request) => {
+exports.registrationVerify = (0, https_1.onCall)(
+// enforceAppCheck désactivé — voir commentaire sur registrationStart.
+{ region: 'us-central1', secrets: ['OTP_HASH_PEPPER'], enforceAppCheck: false }, async (request) => {
     var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l;
     const sessionId = String((_b = (_a = request.data) === null || _a === void 0 ? void 0 : _a.sessionId) !== null && _b !== void 0 ? _b : '');
     const code = String((_d = (_c = request.data) === null || _c === void 0 ? void 0 : _c.code) !== null && _d !== void 0 ? _d : '');

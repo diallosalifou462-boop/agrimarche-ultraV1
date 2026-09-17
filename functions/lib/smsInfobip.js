@@ -16,7 +16,7 @@ exports.sendOtpSmsInfobip = sendOtpSmsInfobip;
 // ============================================================
 const INFOBIP_BASE_URL = process.env.INFOBIP_BASE_URL; // ex: https://xxxxx.api.infobip.com
 const INFOBIP_API_KEY = process.env.INFOBIP_API_KEY;
-const INFOBIP_SENDER = (_a = process.env.INFOBIP_SENDER) !== null && _a !== void 0 ? _a : 'AgriMarche';
+const INFOBIP_SENDER = (_a = process.env.INFOBIP_SENDER) !== null && _a !== void 0 ? _a : 'SunuMenef';
 async function sendOtpSmsInfobip(phoneE164, code, purpose = 'confirmation') {
     if (!INFOBIP_BASE_URL || !INFOBIP_API_KEY) {
         throw new Error('Configuration InfoBip manquante (INFOBIP_BASE_URL / INFOBIP_API_KEY).');
@@ -26,7 +26,7 @@ async function sendOtpSmsInfobip(phoneE164, code, purpose = 'confirmation') {
             {
                 destinations: [{ to: phoneE164.replace('+', '') }],
                 from: INFOBIP_SENDER,
-                text: `Votre code de ${purpose} AgriMarché est : ${code}. Ce code expire dans 5 minutes.`,
+                text: `Votre code de ${purpose} Sunu Mëñëf est : ${code}. Ce code expire dans 5 minutes.`,
             },
         ],
     };

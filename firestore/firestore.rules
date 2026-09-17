@@ -303,11 +303,20 @@ service cloud.firestore {
                     || isAdmin()
                     // Décrément de stock à l'achat (checkout/page.tsx) : n'importe
                     // quel acheteur connecté, limité strictement au champ stock.
-                    || (isAuth() && onlyChanges(['stock']) && isValidStock())
+                    // 🔒 DÉCRÉMENT UNIQUEMENT : avant, n'importe quel compte
+                    // pouvait mettre le stock de n'importe quel produit à 0
+                    // (sabotage) ou le faire passer de 0 à 999 (fausses alertes
+                    // « retour en stock » envoyées aux clients).
+                    || (isAuth() && onlyChanges(['stock']) && isValidStock()
+                        && resource.data.stock is int
+                        && request.resource.data.stock < resource.data.stock)
                     // Compteur de clics WhatsApp (main/products/page.tsx) : cette
                     // page est publique, sans garde de connexion — donc même un
                     // visiteur NON connecté peut déclencher cet incrément.
-                    || onlyChanges(['whatsappClicks']);
+                    // 🔒 +1 UNIQUEMENT (increment(1) côté client) : avant, on
+                    // pouvait écrire 999999 et truquer « Les plus demandés ».
+                    || (onlyChanges(['whatsappClicks'])
+                        && request.resource.data.whatsappClicks == resource.data.get('whatsappClicks', 0) + 1);
 
       // ✅ FIX : le vendeur peut supprimer SES PROPRES produits
       // (seller/products/page.tsx a un vrai bouton supprimer pour lui) —
@@ -423,6 +432,20 @@ service cloud.firestore {
     // produit visait à interdire. Seule confirmDeliveryWithCode (livreur +
     // code du client, Cloud Function Admin SDK) peut désormais faire
     // passer une commande à 'livre'.
+    // Livreur qui LIBÈRE une course pas encore commencée (bouton « Libérer
+    // cette commande ») : il se retire, la commande repasse en préparation.
+    // Avant, aucune règle ne l'autorisait → l'action échouait toujours.
+    function isDelivererReleaseUpdate() {
+      return onlyChanges([
+          'delivererId', 'delivererName', 'delivererPhone', 'delivererAssignedAt',
+          'status', 'tracking', 'updatedAt',
+        ])
+        && request.resource.data.delivererId == null
+        && request.resource.data.status == 'en_preparation'
+        && resource.data.get('status', null) == 'en_livraison'
+        && resource.data.get('tracking', {}).get('phase', 'assigned') == 'assigned';
+    }
+
     function isSellerOrderUpdate() {
       return request.resource.data.get('status', resource.data.get('status', null)) != 'livre'
           || resource.data.get('status', null) == 'livre';
@@ -486,7 +509,8 @@ service cloud.firestore {
                     // serait contourner la génération/vérification du code.
                     // Seule reste la mise à jour de suivi GPS sur une commande
                     // déjà assignée à l'appelant.
-                    || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid && isDelivererTrackingUpdate())
+                    || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid
+                        && (isDelivererTrackingUpdate() || isDelivererReleaseUpdate()))
                     || isAdmin();
 
       allow delete: if false;
@@ -563,7 +587,8 @@ service cloud.firestore {
       allow update: if (isSeller() && resource.data.sellerId == request.auth.uid && isSellerOrderUpdate())
                     // 🔐 Même durcissement que sur /orders ci-dessus : plus de
                     // branche "commande libre, auto-assignation directe".
-                    || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid && isDelivererTrackingUpdate())
+                    || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid
+                        && (isDelivererTrackingUpdate() || isDelivererReleaseUpdate()))
                     || isAdmin();
 
       allow delete: if false;
@@ -590,6 +615,9 @@ service cloud.firestore {
     // =========================================================
     // PANIER
     // =========================================================
+    // Champs écrits : items, total, itemCount, updatedAt (hooks/useCart.tsx)
+    // + reminderStage, reminderForUpdatedAt (function abandonedCartReminder,
+    // Admin SDK). Aucune liste de champs imposée ici : rien à modifier.
     match /carts/{userId} {
       allow read: if isOwner(userId);
       allow write: if isOwner(userId) && isReasonableCartSize();
