@@ -46,7 +46,7 @@ interface Order {
   // ✅ NOUVEAU — signalement de problème posé par le livreur depuis
   // delivery/dashboard/page.tsx (bouton "Problème"). Rien ne l'affichait
   // encore côté admin jusqu'ici : ces signalements étaient écrits sur la
-  // commande mais invisibles nulle part pour l'équipe AgriMarché.
+  // commande mais invisibles nulle part pour l'équipe Sunu Mëñëf.
   dateProbleme?: string;
   noteProbleme?: string;
 }

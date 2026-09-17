@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { Geolocation } from '@capacitor/geolocation';
+import { watchPosition, clearWatch, requestLocationPermission } from '@/lib/geolocation';
+import { distanceKm as geoDistanceKm } from '@/lib/geo/distance';
 import { useAuth } from '@/hooks/useAuth';
 import { useRouter } from 'next/navigation';
 import { db } from '@/lib/firebase/firebase';
@@ -37,7 +38,7 @@ interface Order {
   userName?: string;
   userPhone?: string;
   status: string;
-  customerLocation?: { address?: string; lat?: number; lng?: number; isDefault?: boolean };
+  customerLocation?: { address?: string; lat?: number; lng?: number; isDefault?: boolean; instructions?: string; accuracy?: number; source?: string };
   // ✅ Écrit par checkout/page.tsx : 'MANUAL_PIN' | 'MAP_SEARCH' quand le
   // client a corrigé sa position lui-même, 'GPS' | 'IP_FALLBACK' sinon.
   locationSource?: string;
@@ -271,7 +272,7 @@ const PROBLEM_REASONS = [
   'Autre',
 ] as const;
 
-function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLocation }: { order: Order; onMarkDelivered: (id: string) => void; onMarkArrived: (id: string) => void; onRelease: (id: string) => void; currentLocation?: Location | null }) {
+function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, onPickedUp, currentLocation }: { order: Order; onMarkDelivered: (id: string) => void; onMarkArrived: (id: string) => void; onRelease: (id: string) => void; onPickedUp: (id: string) => void; currentLocation?: Location | null }) {
   const [expanded, setExpanded] = useState(false);
   const [showDates, setShowDates] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -308,8 +309,15 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
   }, [order.dateDepart, order.dateArrivee, order.dateRetour, order.dateLivree, order.dateProbleme, order.noteProbleme]);
 
   const lastUpdateStr = timeSinceMinutes(order.tracking?.lastUpdate);
-  const dest = (order.customerLocation?.lat && order.customerLocation?.lng)
-    ? { lat: order.customerLocation.lat, lng: order.customerLocation.lng } : undefined;
+  // Tant que le colis n'est pas récupéré (phase 'assigned'), la destination
+  // est le VENDEUR ; ensuite seulement, le client.
+  const toPickup = !order.tracking?.phase || order.tracking.phase === 'assigned';
+  const pickupPoint = (!order.sellerLocation?.isDefault && isValidCoordinate(order.sellerLocation?.lat, order.sellerLocation?.lng))
+    ? { lat: order.sellerLocation!.lat!, lng: order.sellerLocation!.lng! } : undefined;
+  const customerPoint = isValidCoordinate(order.customerLocation?.lat, order.customerLocation?.lng)
+    ? { lat: order.customerLocation!.lat!, lng: order.customerLocation!.lng! } : undefined;
+  const dest = toPickup ? (pickupPoint ?? customerPoint) : customerPoint;
+  const destIsPickup = toPickup && !!pickupPoint;
   const distanceKm = currentLocation && dest ? haversineKm(currentLocation, dest) : null;
   const items = order.items || [];
   // ✅ NOUVEAU — commande assignée à ce livreur mais pas encore confirmée
@@ -362,9 +370,9 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
   // ✅ NOUVEAU — signalement rapide. Écrit dateProbleme + noteProbleme (même
   // champs que le panneau "Dates suivi", donc rien de nouveau côté
   // Firestore/règles/admin) dans 'orders' ET 'seller_orders' pour que le
-  // vendeur et AgriMarché voient immédiatement le blocage, avec le même
+  // vendeur et Sunu Mëñëf voient immédiatement le blocage, avec le même
   // motif choisi affiché dans la note. Ne touche jamais `status` : une
-  // livraison signalée reste "en cours" tant qu'AgriMarché ou le livreur ne
+  // livraison signalée reste "en cours" tant que Sunu Mëñëf ou le livreur ne
   // la referme pas explicitement — pas de fermeture forcée depuis ce bouton.
   const reportProblem = async () => {
     if (!problemReason) return;
@@ -458,14 +466,14 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
         {/* 🐛 FIX confidentialité (v2) — ce bloc affichait auparavant le
             numéro brut du client ET du vendeur (order.userPhone /
             order.sellerPhone en clair, cliquables en tel:), puis un texte
-            "Téléphone : appel via AgriMarché" qui laissait croire à un
+            "Téléphone : appel via Sunu Mëñëf" qui laissait croire à un
             canal de contact par commande — canal qu'on a justement décidé
             de ne PAS construire. Décision produit finale (architecture
             "0 FCFA") : le livreur n'a besoin ni du numéro client ni du
             numéro vendeur pour livrer — adresse + code commande + OTP de
             livraison suffisent. S'il doit absolument joindre quelqu'un,
             il utilise le bouton "🆘 Support" plus bas, qui contacte
-            directement AgriMarché (admin) — jamais le client ou le
+            directement Sunu Mëñëf (admin) — jamais le client ou le
             vendeur en direct.
             🐛 FIX adresses — ce bloc affichait #numéro de commande côté
             "Client" et juste le nom côté "Vendeur", sans jamais l'adresse
@@ -491,8 +499,11 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
                   adresse saisie à la main par le client (checkout, bouton
                   "Livrer à une autre adresse") est signalée comme fiable et
                   intentionnelle, à distinguer d'un simple relevé GPS. */}
-              {!order.customerLocation?.isDefault && (order.locationSource === 'MANUAL_PIN' || order.locationSource === 'MAP_SEARCH') && (
-                <span style={{ color: '#10b981', fontWeight: 700 }}> · ✏️ Confirmée par le client</span>
+              {!order.customerLocation?.isDefault && (order.locationSource === 'MANUAL_PIN' || order.locationSource === 'MAP_SEARCH' || order.locationSource === 'GPS') && (
+                <span style={{ color: '#10b981', fontWeight: 700 }}> · ✅ Confirmée par le client</span>
+              )}
+              {order.customerLocation?.instructions && (
+                <span style={{ display: 'block', color: '#0f172a', marginTop: '3px' }}>📝 {order.customerLocation.instructions}</span>
               )}
             </span>
           </div>
@@ -503,8 +514,8 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
               {order.sellerLocation?.isDefault && (
                 <span style={{ color: '#b45309', fontWeight: 600 }}> · ⚠️ position approximative</span>
               )}
-              {!order.sellerLocation?.isDefault && order.sellerLocation?.locationSource === 'MANUAL_PIN' && (
-                <span style={{ color: '#10b981', fontWeight: 700 }}> · ✏️ Confirmée par le vendeur</span>
+              {!order.sellerLocation?.isDefault && order.sellerLocation?.locationSource && (
+                <span style={{ color: '#10b981', fontWeight: 700 }}> · ✅ Point de retrait du vendeur</span>
               )}
             </span>
           </div>
@@ -515,7 +526,7 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: '9px' }}>
             <MapPin size={13} style={{ color: '#f97316', marginTop: '2px', flexShrink: 0 }} />
             <span style={{ color: '#334155', fontSize: '13px', lineHeight: 1.4, flex: 1 }}>
-              {order.customerLocation?.address || 'Adresse non spécifiée'}
+              {destIsPickup ? `🏪 ${order.sellerLocation?.address || 'Vendeur'}` : (order.customerLocation?.address || 'Adresse non spécifiée')}
             </span>
             {distanceKm !== null && (
               <span style={{ flexShrink: 0, padding: '2px 8px', background: '#eff6ff', borderRadius: '99px', color: '#2563eb', fontSize: '10px', fontWeight: 700, whiteSpace: 'nowrap' }}>
@@ -554,7 +565,7 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
               boxShadow: '0 4px 14px rgba(37,99,235,0.28)',
             }}
           >
-            <Navigation size={15} /> Itinéraire GPS{distanceKm !== null ? ` · ${formatDistance(distanceKm)}` : ''}
+            <Navigation size={15} /> {destIsPickup ? 'Itinéraire vers le vendeur' : 'Itinéraire vers le client'}{distanceKm !== null ? ` · ${formatDistance(distanceKm)}` : ''}
           </a>
         )}
 
@@ -562,7 +573,7 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
         {(order.tracking?.currentLocation || dest) && (
           <div style={{ marginBottom: '14px' }}>
             <MiniMap deliveryLocation={order.tracking?.currentLocation} destinationLocation={dest} orderId={order.id} />
-            <p style={{ color: '#94a3b8', fontSize: '10px', marginTop: '6px', textAlign: 'center' }}>📍 Livreur · 🏠 Client</p>
+            <p style={{ color: '#94a3b8', fontSize: '10px', marginTop: '6px', textAlign: 'center' }}>📍 Livreur · {destIsPickup ? '🏪 Vendeur' : '🏠 Client'}</p>
           </div>
         )}
 
@@ -571,7 +582,7 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
             "proxy d'appel vers le client" : sur décision produit, le
             livreur n'a JAMAIS besoin ni du numéro client, ni du numéro
             vendeur, ni même d'un numéro masqué dédié à chaque commande.
-            S'il doit joindre quelqu'un, il passe par AgriMarché — et ce
+            S'il doit joindre quelqu'un, il passe par Sunu Mëñëf — et ce
             canal existe déjà juste en dessous : le bouton "🆘 Support"
             (wa.me/221779747073, numéro admin) fait exactement ce rôle.
             Le bouton "Contacter le client" + contactClientViaProxy() +
@@ -613,6 +624,15 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
             la première position reçue) — donc jamais une fois la course
             réellement commencée sur le terrain. Remet la commande dans le
             pool `en_preparation` pour qu'un autre livreur puisse la prendre. */}
+        {toPickup && (
+          <button
+            onClick={() => onPickedUp(order.id)}
+            style={{ ...btnStyleBtn('#ecfdf5', '#047857'), width: '100%', marginBottom: '8px' }}
+          >
+            📦 J'ai récupéré la commande chez le vendeur
+          </button>
+        )}
+
         {order.tracking?.phase === 'assigned' && (
           <button
             onClick={() => onRelease(order.id)}
@@ -779,7 +799,7 @@ function btnStyleBtn(bg: string, color: string): React.CSSProperties {
 // ✅ NOUVEAU — remplace le window.confirm() aveugle de markAsDelivered.
 // Le livreur ne voit JAMAIS le code : il saisit ici exactement ce que le
 // CLIENT vient de lui dicter à voix haute, après avoir ouvert lui-même
-// AgriMarché. Le serveur (confirmDeliveryWithCode) tranche.
+// Sunu Mëñëf. Le serveur (confirmDeliveryWithCode) tranche.
 
 function DeliveryCodeModal({
   orderId, orderNumber, onClose, onSubmit,
@@ -826,7 +846,7 @@ function DeliveryCodeModal({
           </button>
         </div>
         <p style={{ color: '#64748b', fontSize: '13px', lineHeight: 1.5, margin: '8px 0 18px' }}>
-          Demandez au client d'ouvrir AgriMarché{orderNumber ? ` (commande #${orderNumber})` : ''} et de vous
+          Demandez au client d'ouvrir Sunu Mëñëf{orderNumber ? ` (commande #${orderNumber})` : ''} et de vous
           communiquer le code affiché dans sa commande. Vous seul ne pouvez pas le connaître.
         </p>
         <input
@@ -1159,48 +1179,83 @@ export default function DeliveryDashboard() {
   };
 
   // GPS
+  // Suivi GPS du livreur. Règles :
+  //  - un point à ±150 m ou plus n'est jamais envoyé (affiché seulement) ;
+  //  - écriture Firestore seulement si le livreur a bougé de 25 m, ou toutes
+  //    les 30 s au plus (avant : à CHAQUE point, soit des milliers
+  //    d'écritures par course et une batterie vidée) ;
+  //  - la position partagée ne fait PLUS passer la commande « en route » :
+  //    c'est le bouton « J'ai récupéré la commande » qui le fait (avant, le
+  //    client recevait « votre livreur est en route avec vos produits »
+  //    alors qu'il n'était pas encore passé chez le vendeur) ;
+  //  - la position est aussi posée sur le profil (toutes les 60 s) pour la
+  //    carte de flotte de l'admin.
+  const lastSentRef = useRef<{ lat: number; lng: number; t: number } | null>(null);
+  const lastProfileSentRef = useRef(0);
+  const MAX_SHARED_ACCURACY_M = 150;
+
   const startSharingLocation = useCallback(async () => {
     try {
-      const permission = await Geolocation.requestPermissions();
-      if (permission.location !== 'granted') {
-        setLocationError('Accès à la position refusé. Activez la géolocalisation.');
+      const permission = await requestLocationPermission();
+      if (permission === 'denied') {
+        setLocationError('Accès à la position refusé. Activez la localisation dans les réglages du téléphone.');
         return;
       }
-    } catch { /* web fallback */ }
+    } catch { /* navigateur : la demande se fait au premier point */ }
 
     setSharingLocation(true);
     setLocationError(null);
+    lastSentRef.current = null;
 
-    const id = await Geolocation.watchPosition({ enableHighAccuracy: true, timeout: 10000 }, async (pos, err) => {
-      if (err || !pos) { setLocationError('Erreur de géolocalisation'); setSharingLocation(false); return; }
+    const id = await watchPosition({ enableHighAccuracy: true, timeout: 20000 }, (pos, err) => {
+      if (err) {
+        if (err.code === 1) {
+          setLocationError('Accès à la position refusé. Activez la localisation dans les réglages du téléphone.');
+          setSharingLocation(false);
+        } else {
+          setLocationError('Signal GPS faible — nouvel essai en cours…');
+        }
+        return;
+      }
+      if (!pos) return;
       const { latitude, longitude, accuracy } = pos.coords;
       setCurrentLocation({ lat: latitude, lng: longitude });
       setGpsAccuracy(accuracy ?? null);
+      if (typeof accuracy === 'number' && accuracy > MAX_SHARED_ACCURACY_M) return;
+      setLocationError(null);
+
+      const now = Date.now();
+      const last = lastSentRef.current;
+      const movedM = last ? geoDistanceKm(last.lat, last.lng, latitude, longitude) * 1000 : Infinity;
+      if (last && movedM < 25 && now - last.t < 30_000) return;
+      lastSentRef.current = { lat: latitude, lng: longitude, t: now };
+
       const activeOrders = ordersRef.current.filter(o => o.status === 'en_livraison');
-      await Promise.all(activeOrders.map(order => {
-        const payload: Record<string, any> = {
+      activeOrders.forEach(order => {
+        updateDoc(doc(db, 'orders', order.id), {
           'tracking.currentLocation': { lat: latitude, lng: longitude },
           'tracking.lastUpdate': serverTimestamp(),
           'tracking.enabled': true,
-          'tracking.accuracy': accuracy,
-        };
-        // Premier point GPS reçu pour cette commande → passage automatique
-        // en 'en_route'. On ne touche PAS à la phase si elle est déjà plus
-        // avancée (le geofencing serveur peut déjà l'avoir mise à
-        // 'approaching', voire 'arrived' si le livreur a confirmé
-        // manuellement) — sinon un point GPS en retard pourrait faire
-        // régresser l'affichage côté acheteur.
-        if (!order.tracking?.phase || order.tracking.phase === 'assigned') {
-          payload['tracking.phase'] = 'en_route';
-        }
-        return updateDoc(doc(db, 'orders', order.id), payload).catch(console.error);
-      }));
+          'tracking.accuracy': Math.round(accuracy ?? 0),
+        }).catch(console.error);
+      });
+
+      if (user?.uid && now - lastProfileSentRef.current > 60_000) {
+        lastProfileSentRef.current = now;
+        updateDoc(doc(db, 'users', user.uid), {
+          lat: latitude,
+          lng: longitude,
+          locationSource: 'GPS_LIVE',
+          locationAccuracy: Math.round(accuracy ?? 0),
+          locationUpdatedAt: serverTimestamp(),
+        }).catch(() => {});
+      }
     });
-    setWatchId(id);
-  }, []);
+    setWatchId(String(id));
+  }, [user?.uid]);
 
   const stopSharingLocation = useCallback(async () => {
-    if (watchId !== null) await Geolocation.clearWatch({ id: watchId });
+    if (watchId !== null) await clearWatch(Number.isNaN(Number(watchId)) ? watchId : Number(watchId)).catch(() => {});
     setWatchId(null);
     setSharingLocation(false);
     setLocationError(null);
@@ -1210,27 +1265,40 @@ export default function DeliveryDashboard() {
     ));
   }, [watchId]);
 
+  // ⚠️ FIX : ces écritures utilisaient batch.set(..., { 'tracking.phase': … },
+  // { merge: true }). Avec set(), un nom contenant un point crée un champ
+  // littéral « tracking.phase » à la racine (pas tracking → phase) : les
+  // règles le refusaient, d'où l'erreur systématique sur « Marquer comme
+  // arrivé ». update() interprète correctement les chemins imbriqués.
+  const updateOrderAndMirror = async (orderId: string, payload: Record<string, any>) => {
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'orders', orderId), payload);
+    const sellerOrderSnap = await getDoc(doc(db, 'seller_orders', orderId));
+    if (sellerOrderSnap.exists()) batch.update(doc(db, 'seller_orders', orderId), payload);
+    await batch.commit();
+  };
+
   const markAsArrived = async (orderId: string) => {
     try {
-      const payload = { 'tracking.phase': 'arrived' as const };
-      const batch = writeBatch(db);
-      batch.set(doc(db, 'orders', orderId), payload, { merge: true });
-      const sellerOrderSnap = await getDoc(doc(db, 'seller_orders', orderId));
-      if (sellerOrderSnap.exists()) {
-        batch.set(doc(db, 'seller_orders', orderId), payload, { merge: true });
-      }
-      await batch.commit();
-      // Notification côté serveur (notifyDeliveryPhaseChange, sur la
-      // transition de tracking.phase) — rien à envoyer manuellement ici.
+      await updateOrderAndMirror(orderId, { 'tracking.phase': 'arrived', updatedAt: serverTimestamp() });
     } catch { toast.error("Erreur lors de la confirmation d'arrivée"); }
   };
 
-  // ✅ NOUVEAU — miroir exact de claimOrder, en sens inverse : remet la
-  // commande dans le pool des commandes disponibles pour un autre livreur.
-  // N'est appelable côté UI que quand tracking.phase === 'assigned' (voir
-  // OrderCard), donc jamais après un vrai début de course — mais on
-  // revérifie ici côté client par sécurité, au cas où l'état local serait
-  // périmé de quelques centaines de ms par rapport à Firestore.
+  const markAsPickedUp = async (orderId: string) => {
+    const order = ordersRef.current.find(o => o.id === orderId);
+    if (order?.tracking?.phase && order.tracking.phase !== 'assigned') return;
+    try {
+      await updateOrderAndMirror(orderId, {
+        'tracking.phase': 'en_route',
+        'tracking.pickedUpAt': serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      if (!sharingLocation) {
+        toast('Activez le partage de position pour que le client vous suive.');
+      }
+    } catch { toast.error('Impossible de confirmer la récupération — vérifiez votre connexion'); }
+  };
+
   const releaseOrder = async (orderId: string) => {
     const order = ordersRef.current.find(o => o.id === orderId);
     if (order?.tracking?.phase && order.tracking.phase !== 'assigned') {
@@ -1239,19 +1307,15 @@ export default function DeliveryDashboard() {
     }
     if (!confirm('Libérer cette commande ? Elle redeviendra disponible pour un autre livreur.')) return;
     try {
-      const payload = {
+      await updateOrderAndMirror(orderId, {
         delivererId: null, delivererName: null, delivererPhone: null,
         delivererAssignedAt: null,
-        status: 'en_preparation' as const,
+        status: 'en_preparation',
         'tracking.phase': null,
-      };
-      const batch = writeBatch(db);
-      batch.set(doc(db, 'orders', orderId), payload, { merge: true });
-      const sellerOrderSnap = await getDoc(doc(db, 'seller_orders', orderId));
-      if (sellerOrderSnap.exists()) {
-        batch.set(doc(db, 'seller_orders', orderId), payload, { merge: true });
-      }
-      await batch.commit();
+        'tracking.enabled': false,
+        'tracking.currentLocation': null,
+        updatedAt: serverTimestamp(),
+      });
       toast.success('Commande libérée');
     } catch { toast.error('Erreur — la commande est peut-être déjà partie plus loin.'); }
   };
@@ -1312,7 +1376,7 @@ export default function DeliveryDashboard() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             to: order.userPhone,
-            message: `AgriMarché : votre commande #${order.orderNumber || orderId.slice(-6).toUpperCase()} vient d'être livrée. Bon appétit !`,
+            message: `Sunu Mëñëf : votre commande #${order.orderNumber || orderId.slice(-6).toUpperCase()} vient d'être livrée. Bon appétit !`,
           }),
         }).catch((e) => console.warn('[delivery] SMS confirmation non envoyé:', e));
       }
@@ -1747,7 +1811,7 @@ export default function DeliveryDashboard() {
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
               {sortedActive.map(order => (
-                <OrderCard key={order.id} order={order} onMarkDelivered={markAsDelivered} onMarkArrived={markAsArrived} onRelease={releaseOrder} currentLocation={currentLocation} />
+                <OrderCard key={order.id} order={order} onMarkDelivered={markAsDelivered} onMarkArrived={markAsArrived} onRelease={releaseOrder} onPickedUp={markAsPickedUp} currentLocation={currentLocation} />
               ))}
             </div>
           )

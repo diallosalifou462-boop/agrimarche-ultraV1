@@ -58,7 +58,7 @@ export default function AddProductPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [userId, setUserId]       = useState<string | null>(null);
-  const [sellerInfo, setSellerInfo] = useState<{ name: string; region: string; city: string; phone: string; lat?: number; lng?: number } | null>(null);
+  const [sellerInfo, setSellerInfo] = useState<{ name: string; region: string; city: string; phone: string; lat?: number; lng?: number; locationAddress?: string; locationSource?: string } | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
 
   const [photos, setPhotos]       = useState<PhotoItem[]>([]);
@@ -100,6 +100,8 @@ export default function AddProductPage() {
         // inertes faute de coordonnées réelles sur les produits.
         lat: typeof d.lat === 'number' ? d.lat : undefined,
         lng: typeof d.lng === 'number' ? d.lng : undefined,
+        locationAddress: typeof d.locationAddress === 'string' ? d.locationAddress : undefined,
+        locationSource: typeof d.locationSource === 'string' ? d.locationSource : undefined,
       });
       setAuthLoading(false);
     });
@@ -261,7 +263,16 @@ export default function AddProductPage() {
         // des sections de proximité, mais tout le reste du catalogue
         // continue de fonctionner normalement.
         ...(sellerInfo.lat !== undefined && sellerInfo.lng !== undefined
-          ? { lat: sellerInfo.lat, lng: sellerInfo.lng, geohash: computeGeohash(sellerInfo.lat, sellerInfo.lng) }
+          ? {
+              lat: sellerInfo.lat,
+              lng: sellerInfo.lng,
+              geohash: computeGeohash(sellerInfo.lat, sellerInfo.lng),
+              // Point de retrait complet : relu au checkout (document produit
+              // public) pour la commande et le calcul des frais de livraison.
+              ...(sellerInfo.locationAddress ? { locationAddress: sellerInfo.locationAddress } : {}),
+              ...(sellerInfo.locationSource ? { locationSource: sellerInfo.locationSource } : {}),
+              locationUpdatedAt: serverTimestamp(),
+            }
           : {}),
         status:        'active',
         sales:         0,

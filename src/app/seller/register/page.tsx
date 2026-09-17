@@ -5,12 +5,22 @@ import { useRouter } from 'next/navigation';
 import { auth, db } from '@/lib/firebase/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
-import { ArrowLeft, Loader2, CheckCircle, User, Phone, MapPin, LocateFixed, AlertCircle } from 'lucide-react';
+import { ArrowLeft, Loader2, CheckCircle, User, Phone, MapPin, AlertCircle } from 'lucide-react';
 import { ADMIN_MARGIN_RATE } from '@/lib/pricing';
-import { getCurrentPosition } from '@/lib/geolocation';
-import { reverseGeocode } from '@/lib/geo/geocode';
-import { computeGeohash } from '@/lib/geo/geohash';
-import LocationPicker from '@/components/LocationPicker';
+import LocationEditor from '@/components/LocationEditor';
+import { saveSellerShopLocation, readSellerShopLocation } from '@/lib/geo/userLocation';
+import type { LocationRecord } from '@/lib/geo/quality';
+
+// Associe la région renvoyée par le géocodage (« Région de Thiès »,
+// « Saint-Louis Region »…) à la liste officielle, sans accents ni casse.
+function normalizeRegionName(v?: string): string {
+  return (v || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+}
+function matchRegion(raw?: string): string | undefined {
+  const n = normalizeRegionName(raw);
+  if (!n) return undefined;
+  return REGIONS.find((r) => n.includes(normalizeRegionName(r)));
+}
 
 const REGIONS = [
   'Dakar', 'Thiès', 'Saint-Louis', 'Kaolack', 'Ziguinchor',
@@ -49,44 +59,10 @@ export default function SellerRegisterPage() {
   // enregistrée : aucune coordonnée GPS réelle. Résultat, les fonctionnalités
   // de distance/proximité déjà présentes côté catalogue (main/products) ne
   // pouvaient jamais s'activer pour un vrai vendeur, faute de lat/lng.
-  const [coords, setCoords] = useState<{ lat: number; lng: number; accuracy?: number } | null>(null);
-  const [locationSource, setLocationSource] = useState<'GPS' | 'MANUAL_PIN' | null>(null);
-  const [gpsStatus, setGpsStatus] = useState<'idle' | 'searching' | 'found' | 'error'>('idle');
-  const [gpsError, setGpsError] = useState<string | null>(null);
-
-  const detectPosition = async () => {
-    setGpsStatus('searching');
-    setGpsError(null);
-    try {
-      const pos = await getCurrentPosition({ enableHighAccuracy: true, timeout: 10000 });
-      const { latitude, longitude, accuracy } = pos.coords;
-      setCoords({ lat: latitude, lng: longitude, accuracy });
-      setLocationSource('GPS');
-      setGpsStatus('found');
-
-      // Géocodage inverse : préremplit région/ville à partir du GPS, sans
-      // écraser une saisie déjà faite manuellement par le vendeur.
-      const reverse = await reverseGeocode(latitude, longitude);
-      if (reverse) {
-        const matchedRegion = REGIONS.find(r =>
-          reverse.region?.toLowerCase().includes(r.toLowerCase()) ||
-          r.toLowerCase().includes((reverse.region || '').toLowerCase())
-        );
-        setForm(f => ({
-          ...f,
-          region: f.region || matchedRegion || f.region,
-          city: f.city || reverse.city || f.city,
-        }));
-      }
-    } catch (err: any) {
-      setGpsStatus('error');
-      setGpsError(
-        err?.code === 1 ? 'Autorisez la localisation pour détecter votre position.' :
-        err?.code === 3 ? 'Délai dépassé — réessayez.' :
-        'Position indisponible pour le moment.'
-      );
-    }
-  };
+  // Point de retrait : là où le livreur vient chercher les commandes.
+  const [shopLocation, setShopLocation] = useState<LocationRecord | null>(null);
+  const [editingLocation, setEditingLocation] = useState(false);
+  const [locationError, setLocationError] = useState<string | null>(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
@@ -106,11 +82,7 @@ export default function SellerRegisterPage() {
             region: data.region || '',
             city: data.city || '',
           });
-          if (typeof data.lat === 'number' && typeof data.lng === 'number') {
-            setCoords({ lat: data.lat, lng: data.lng, accuracy: data.locationAccuracy });
-            setLocationSource(data.locationSource === 'MANUAL_PIN' ? 'MANUAL_PIN' : 'GPS');
-            setGpsStatus('found');
-          }
+          setShopLocation(readSellerShopLocation(data));
           setAcceptedTerms(!!data.termsAcceptedAt);
           setIsEditing(true);
         } else {
@@ -134,6 +106,11 @@ export default function SellerRegisterPage() {
     // usage normal, mais on revérifie ici pour ne jamais dépendre uniquement
     // de la validation du navigateur.
     if (!acceptedTerms) return;
+    if (!shopLocation) {
+      setLocationError('Indiquez votre point de retrait : les livreurs en ont besoin pour venir chercher vos commandes.');
+      setEditingLocation(true);
+      return;
+    }
 
     const user = auth.currentUser;
     if (!user) return;
@@ -170,11 +147,6 @@ export default function SellerRegisterPage() {
         uid?: string;
         termsAcceptedAt: Date;
         termsAcceptedMarginRate: number;
-        lat?: number;
-        lng?: number;
-        locationAccuracy?: number;
-        locationSource?: string;
-        locationUpdatedAt?: Date;
       } = {
         displayName: form.name.trim(),
         phone: form.phone.trim(),
@@ -190,18 +162,6 @@ export default function SellerRegisterPage() {
         termsAcceptedMarginRate: ADMIN_MARGIN_RATE,
       };
 
-      // Coordonnées GPS optionnelles — n'écrase jamais avec `undefined`
-      // (Firestore refuse `undefined` dans setDoc), donc on n'ajoute ces
-      // clés que si une position a réellement été détectée/ajustée.
-      if (coords) {
-        dataToSave.lat = coords.lat;
-        dataToSave.lng = coords.lng;
-        dataToSave.geohash = computeGeohash(coords.lat, coords.lng);
-        if (coords.accuracy !== undefined) dataToSave.locationAccuracy = coords.accuracy;
-        dataToSave.locationSource = locationSource || 'GPS';
-        dataToSave.locationUpdatedAt = new Date();
-      }
-
       if (!exists) {
         dataToSave.createdAt = new Date();
         dataToSave.uid = user.uid;
@@ -209,6 +169,9 @@ export default function SellerRegisterPage() {
       }
 
       await setDoc(userRef, dataToSave, { merge: true });
+      // Point de retrait enregistré après le profil (le document existe alors
+      // forcément) — même écriture que depuis l'espace vendeur.
+      await saveSellerShopLocation(user.uid, shopLocation);
 
       setSaveSuccess(true);
       setTimeout(() => {
@@ -252,7 +215,7 @@ export default function SellerRegisterPage() {
             {isEditing ? 'Mon profil vendeur' : 'Devenir vendeur'}
           </h1>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-            {isEditing ? 'Modifiez vos informations' : 'Rejoignez AgriMarché'}
+            {isEditing ? 'Modifiez vos informations' : 'Rejoignez Sunu Mëñëf'}
           </p>
         </div>
 
@@ -337,52 +300,46 @@ export default function SellerRegisterPage() {
             </div>
           )}
 
-          {/* ── POSITION GPS EXACTE ── */}
+          {/* ── POINT DE RETRAIT ── */}
           <div>
             <label className="block text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider mb-2">
-              Position exacte <span className="font-normal lowercase">(recommandé)</span>
+              Point de retrait <span className="font-normal lowercase">(obligatoire)</span>
             </label>
-            <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">
-              Permet aux acheteurs de vous trouver "près de chez eux" et de calculer la distance jusqu'à votre exploitation ou boutique.
-            </p>
-
-            {!coords ? (
-              <button
-                type="button"
-                onClick={detectPosition}
-                disabled={gpsStatus === 'searching'}
-                className="w-full py-3 border-2 border-dashed border-emerald-300 dark:border-emerald-700 rounded-xl flex items-center justify-center gap-2 text-emerald-700 dark:text-emerald-400 font-semibold text-sm hover:bg-emerald-50 dark:hover:bg-emerald-900/20 transition disabled:opacity-60"
-              >
-                {gpsStatus === 'searching' ? (
-                  <><Loader2 size={16} className="animate-spin" /> Localisation en cours…</>
-                ) : (
-                  <><LocateFixed size={16} /> Détecter ma position</>
-                )}
-              </button>
-            ) : (
-              <div className="space-y-2">
-                <LocationPicker
-                  lat={coords.lat}
-                  lng={coords.lng}
-                  onChange={(lat, lng) => { setCoords({ lat, lng }); setLocationSource('MANUAL_PIN'); }}
-                />
-                <p className="text-[11px] text-gray-400 dark:text-gray-500 text-center">
-                  Déplacez le marqueur pour corriger la position si nécessaire.
-                  {coords.accuracy !== undefined && ` Précision GPS : ~${Math.round(coords.accuracy)} m.`}
-                </p>
-                <button
-                  type="button"
-                  onClick={detectPosition}
-                  className="w-full py-2 text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline flex items-center justify-center gap-1"
-                >
-                  <LocateFixed size={12} /> Redétecter ma position GPS
+            {shopLocation && !editingLocation ? (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 dark:bg-emerald-900/20 p-3 flex items-start gap-2">
+                <MapPin size={16} className="text-emerald-600 mt-0.5 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-emerald-900 dark:text-emerald-200 truncate">{shopLocation.address}</p>
+                  <p className="text-[11px] text-emerald-700 dark:text-emerald-400">
+                    {shopLocation.source === 'GPS' && typeof shopLocation.accuracy === 'number'
+                      ? `GPS ±${Math.round(shopLocation.accuracy)} m`
+                      : 'Point placé sur la carte'}
+                  </p>
+                </div>
+                <button type="button" onClick={() => setEditingLocation(true)} className="text-xs font-semibold text-emerald-700 hover:underline">
+                  Modifier
                 </button>
               </div>
+            ) : (
+              <div className="rounded-xl border border-gray-200 dark:border-gray-600 p-3">
+                <LocationEditor
+                  initial={shopLocation}
+                  helper="Là où le livreur vient chercher vos commandes (exploitation, boutique, point de collecte). Faites-le sur place, ou placez le point sur la carte."
+                  confirmLabel="Valider ce point de retrait"
+                  onCancel={shopLocation ? () => setEditingLocation(false) : undefined}
+                  onConfirm={(rec) => {
+                    setShopLocation(rec);
+                    setEditingLocation(false);
+                    setLocationError(null);
+                    const region = matchRegion(rec.region);
+                    if (region) setForm((f) => (f.region ? f : { ...f, region }));
+                  }}
+                />
+              </div>
             )}
-
-            {gpsStatus === 'error' && gpsError && (
+            {locationError && (
               <p className="mt-2 text-xs text-rose-500 flex items-center gap-1">
-                <AlertCircle size={12} /> {gpsError}
+                <AlertCircle size={12} /> {locationError}
               </p>
             )}
           </div>
@@ -397,7 +354,7 @@ export default function SellerRegisterPage() {
               className="mt-1 w-4 h-4 accent-emerald-600 shrink-0"
             />
             <label htmlFor="acceptedTerms" className="text-xs text-gray-600 dark:text-gray-400 leading-relaxed">
-              J'accepte les conditions de vente d'AgriMarché, notamment l'application
+              J'accepte les conditions de vente de Sunu Mëñëf, notamment l'application
               d'une commission de X % sur les ventes réalisées via la plateforme.
             </label>
           </div>

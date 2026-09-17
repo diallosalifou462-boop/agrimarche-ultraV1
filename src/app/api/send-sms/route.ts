@@ -57,7 +57,7 @@ export async function POST(req: NextRequest) {
     // broadcasts admin).
     const infobipBaseUrl = process.env.INFOBIP_BASE_URL;
     const infobipApiKey = process.env.INFOBIP_API_KEY;
-    const senderName = process.env.INFOBIP_SENDER || 'AgriMarche';
+    const senderName = process.env.INFOBIP_SENDER || 'SunuMenef';
 
     console.log('==============================');
     console.log('INFOBIP_BASE_URL:', infobipBaseUrl || 'NON DEFINI');

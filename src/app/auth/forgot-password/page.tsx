@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, FormEvent } from 'react';
 import Link from 'next/link';
+import BrandLogo from '@/components/BrandLogo';
 import { useAuth } from '@/hooks/useAuth';
 import {
   RecaptchaVerifier,
@@ -14,6 +15,8 @@ import { auth } from '@/lib/firebase/firebase';
 import { Capacitor } from '@capacitor/core';
 import { detectCarrier } from '@/lib/carrier';
 import { apiUrl } from '@/lib/api-config';
+import { resetPasswordSendOtp, resetPasswordVerifyOtp, RegistrationActionError } from '@/lib/registrationActions';
+import { PENDING_FCM_TOKEN_KEY } from '@/hooks/useFCMToken';
 
 // ─── Attend que le pont natif Capacitor soit prêt ─────
 async function waitForNativeBridge(timeoutMs = 1500): Promise<boolean> {
@@ -25,13 +28,27 @@ async function waitForNativeBridge(timeoutMs = 1500): Promise<boolean> {
   return Capacitor.isNativePlatform();
 }
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
-import { MessageSquare, ArrowLeft, Lock, CheckCircle, Eye, EyeOff } from 'lucide-react';
+import { MessageSquare, Bell, ArrowLeft, Lock, CheckCircle, Eye, EyeOff } from 'lucide-react';
 
 function toE164(phone: string): string {
   const digits = phone.replace(/\D/g, '');
   if (digits.startsWith('221')) return `+${digits}`;
   if (digits.length === 9) return `+221${digits}`;
   return `+${digits}`;
+}
+
+// Token push de CET appareil, s'il a déjà été capté (voir useFCMToken.ts).
+// Le serveur ne l'utilise que s'il appartient bien au compte ; sinon il
+// prend le dernier appareil connu du compte, ou envoie un SMS.
+function readPendingPushToken(): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  try {
+    const raw = window.localStorage.getItem(PENDING_FCM_TOKEN_KEY);
+    if (!raw) return undefined;
+    return JSON.parse(raw)?.token || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 type Step = 'phone' | 'otp' | 'newpwd' | 'success';
@@ -51,6 +68,9 @@ export default function ForgotPasswordPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [resendCooldown, setResendCooldown] = useState(0);
+  // Free/Yas et Expresso : session côté functions + canal réellement utilisé
+  const [resetSessionId, setResetSessionId] = useState<string | null>(null);
+  const [otpChannel, setOtpChannel] = useState<'push' | 'sms'>('sms');
 
   // ─── Bypass reCAPTCHA en local (dev only, flow web) ───
   useEffect(() => {
@@ -116,6 +136,33 @@ export default function ForgotPasswordPage() {
     recaptchaRef.current = new RecaptchaVerifier(auth, 'recaptcha-container', { size: 'invisible' });
   };
 
+  const startCooldown = () => {
+    setResendCooldown(60);
+    const t = setInterval(() => setResendCooldown(v => { if (v <= 1) clearInterval(t); return v - 1; }), 1000);
+  };
+
+  // ─── Free/Yas et Expresso : functions resetPasswordSendOtp ─────────
+  // Même logique que l'inscription : notification push d'abord, SMS
+  // Infobip en secours. `forceSms` = « Recevoir le code par SMS ».
+  const sendResetCode = async (forceSms: boolean) => {
+    setError(''); setLoading(true);
+    try {
+      const { sessionId, channel } = await resetPasswordSendOtp(toE164(phone), {
+        pushToken: forceSms ? undefined : readPendingPushToken(),
+        forceSms,
+      });
+      setResetSessionId(sessionId);
+      setOtpChannel(channel === 'push' ? 'push' : 'sms');
+      setOtp(['', '', '', '', '', '']);
+      setStep('otp');
+      startCooldown();
+    } catch (err: any) {
+      setError(err instanceof RegistrationActionError ? err.message : "Erreur lors de l'envoi du code");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const sendOTP = async () => {
     if (!phone) { setError('Saisissez votre numéro'); return; }
     setError(''); setLoading(true);
@@ -128,27 +175,7 @@ export default function ForgotPasswordPage() {
       const carrier = detectCarrier(phone);
       if (carrier === 'free' || carrier === 'expresso') {
         useCustomOtpRef.current = true;
-        try {
-          const res = await fetch(apiUrl('/api/otp/send'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phone: phoneE164, purpose: 'reset' }),
-          });
-          const json = await res.json().catch(() => null);
-          if (!res.ok) {
-            setError(json?.error || `Erreur lors de l'envoi du code (HTTP ${res.status})`);
-            setLoading(false);
-            return;
-          }
-        } catch (networkErr: any) {
-          setError(`Connexion au serveur impossible (réseau). Détail: ${String(networkErr?.message || networkErr)}`);
-          setLoading(false);
-          return;
-        }
-        setStep('otp');
-        setResendCooldown(60);
-        setLoading(false);
-        const t = setInterval(() => setResendCooldown(v => { if (v <= 1) clearInterval(t); return v - 1; }), 1000);
+        await sendResetCode(false);
         return;
       }
       useCustomOtpRef.current = false;
@@ -212,23 +239,18 @@ export default function ForgotPasswordPage() {
     setLoading(true); setError('');
     try {
       if (useCustomOtpRef.current) {
-        // Free/Yas et Expresso : vérification côté serveur (Admin SDK),
-        // pas de `registration` ici (compte déjà existant) — voir
-        // /api/otp/verify. On récupère un customToken pour établir la
+        // Free/Yas et Expresso : vérification par la function
+        // resetPasswordVerifyOtp, qui renvoie un customToken pour ouvrir la
         // session Firebase et pouvoir ensuite appeler updatePassword().
-        const phoneE164 = toE164(phone);
-        const res = await fetch(apiUrl('/api/otp/verify'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phone: phoneE164, code }),
-        });
-        const json = await res.json().catch(() => null);
-        if (!res.ok) {
-          setError(json?.error || 'Code incorrect');
+        if (!resetSessionId) { setError('Session expirée, renvoyez le code'); setLoading(false); return; }
+        try {
+          const { customToken } = await resetPasswordVerifyOtp(resetSessionId, code);
+          await signInWithCustomToken(auth, customToken);
+        } catch (err: any) {
+          setError(err instanceof RegistrationActionError ? err.message : 'Code incorrect');
           setLoading(false);
           return;
         }
-        await signInWithCustomToken(auth, json.customToken);
         setStep('newpwd');
         setLoading(false);
         return;
@@ -321,16 +343,22 @@ export default function ForgotPasswordPage() {
     <div className={wrapperClass}>
       <div id="recaptcha-container" />
       <div className={cardClass}>
-        <button onClick={() => { setStep('phone'); setOtp(['','','','','','']); setError(''); }}
+        <button onClick={() => { setStep('phone'); setOtp(['','','','','','']); setError(''); setResetSessionId(null); setOtpChannel('sms'); }}
           className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 mb-6">
           <ArrowLeft size={16} /> Retour
         </button>
         <div className="text-center mb-6">
           <div className="inline-flex items-center justify-center w-14 h-14 bg-green-100 rounded-full mb-3">
-            <MessageSquare size={24} className="text-green-600" />
+            {otpChannel === 'push'
+              ? <Bell size={24} className="text-green-600" />
+              : <MessageSquare size={24} className="text-green-600" />}
           </div>
-          <h2 className="text-xl font-bold text-gray-800">Code SMS</h2>
-          <p className="text-sm text-gray-500 mt-1">Envoyé au <span className="font-semibold">{toE164(phone)}</span></p>
+          <h2 className="text-xl font-bold text-gray-800">
+            {otpChannel === 'push' ? 'Vérification par notification' : 'Code SMS'}
+          </h2>
+          {otpChannel === 'push'
+            ? <p className="text-sm text-gray-500 mt-1">Code envoyé par notification sur votre appareil Sunu Mëñëf</p>
+            : <p className="text-sm text-gray-500 mt-1">Envoyé au <span className="font-semibold">{toE164(phone)}</span></p>}
         </div>
         {error && <div className="bg-red-50 text-red-600 p-3 rounded-xl text-sm mb-4">{error}</div>}
         <div className="flex justify-center gap-2 mb-6" onPaste={handleOtpPaste}>
@@ -352,6 +380,12 @@ export default function ForgotPasswordPage() {
             ? <p className="text-sm text-gray-400">Renvoyer dans <span className="font-semibold">{resendCooldown}s</span></p>
             : <button onClick={sendOTP} disabled={loading} className="text-sm text-green-600 hover:text-green-700 font-medium">Renvoyer</button>
           }
+          {useCustomOtpRef.current && otpChannel === 'push' && (
+            <button onClick={() => sendResetCode(true)} disabled={loading}
+              className="block mx-auto mt-3 text-sm text-gray-500 hover:text-gray-700 underline">
+              Pas reçu la notification ? Recevoir le code par SMS
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -363,9 +397,9 @@ export default function ForgotPasswordPage() {
       <div id="recaptcha-container" />
       <div className={cardClass}>
         <div className="text-center mb-8">
-          <span className="text-5xl">🔑</span>
+          <BrandLogo size={88} className="mx-auto" />
           <h1 className="text-2xl font-bold text-gray-900 mt-3">Mot de passe oublié</h1>
-          <p className="text-gray-500 text-sm mt-1">Entrez votre numéro pour recevoir un SMS</p>
+          <p className="text-gray-500 text-sm mt-1">Entrez votre numéro pour recevoir un code</p>
         </div>
         {error && <div className="mb-4 bg-red-50 text-red-700 text-sm px-4 py-3 rounded-xl border border-red-200">{error}</div>}
         <div className="mb-5">
@@ -379,7 +413,7 @@ export default function ForgotPasswordPage() {
         <button onClick={sendOTP} disabled={loading}
           className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 rounded-xl transition disabled:opacity-60 flex items-center justify-center gap-2">
           <MessageSquare size={16} />
-          {loading ? 'Envoi...' : 'Envoyer le code SMS'}
+          {loading ? 'Envoi...' : 'Envoyer le code'}
         </button>
         <p className="text-center text-sm text-gray-500 mt-6">
           <Link href="/auth/login" className="text-green-600 font-semibold hover:text-green-700">← Retour à la connexion</Link>

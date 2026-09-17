@@ -1,6 +1,6 @@
 'use client';
 
-import Image from 'next/image';
+import BrandLogo from '@/components/BrandLogo';
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
@@ -107,20 +107,13 @@ export default function SplashPage() {
 
       {/* LOGO */}
       <div className="relative z-10">
-        <Image
-          src="/logo.png"
-          alt="Agrimarché"
-          width={120}
-          height={120}
-          priority
-          className="relative z-10"
-        />
+        <BrandLogo size={120} variant="full" className="relative z-10" />
       </div>
 
       {/* TITRE */}
       <div className="relative z-10 mt-6 text-center">
         <h1 className="text-3xl font-extrabold tracking-tight text-green-800">
-          AgriMarché
+          Sunu Mëñëf
         </h1>
       </div>
 

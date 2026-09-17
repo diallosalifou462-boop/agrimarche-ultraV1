@@ -237,6 +237,8 @@ interface AuthContextType {
   ) => Promise<any>;
   logout: () => Promise<void>;
   updateUserProfile: (data: { displayName?: string; phone?: string }) => Promise<void>;
+  /** Répercute tout de suite dans l'app une écriture déjà faite sur users/{uid} (ex : adresse). */
+  patchLocalProfile: (data: Record<string, any>) => void;
   resetPassword: (email: string) => Promise<void>;
   phoneToEmail: (phone: string) => string;
   suppressAutoProfileRef: React.MutableRefObject<boolean>;
@@ -391,7 +393,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         console.log('[FCM] Notification reçue en avant-plan:', payload);
         if (Notification.permission === 'granted') {
           const { title, body, icon } = payload.notification || {};
-          new Notification(title || 'AgriMarché', {
+          new Notification(title || 'Sunu Mëñëf', {
             body: body || '',
             icon: icon || '/logo.png',
             badge: '/logo.png',
@@ -482,6 +484,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setProfile((prev: any) => ({ ...prev, ...data }));
   };
 
+  // Le profil est lu une fois à la connexion : sans cette mise à jour locale,
+  // une adresse enregistrée dans « Mon adresse » n'apparaissait sur le
+  // catalogue qu'au prochain redémarrage de l'app.
+  const patchLocalProfile = (data: Record<string, any>) => {
+    setProfile((prev: any) => (prev ? { ...prev, ...data } : prev));
+  };
+
   // ─── Reset mot de passe ────────────────────────────────
   const resetPassword = async (email: string) => {
     return sendPasswordResetEmail(auth, email);
@@ -498,6 +507,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         signUp,
         logout,
         updateUserProfile,
+        patchLocalProfile,
         resetPassword,
         phoneToEmail,
         suppressAutoProfileRef,

@@ -7,7 +7,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
 import {
-  ArrowLeft, ShieldCheck, PackageSearch, CalendarClock,
+  ArrowLeft, ShieldCheck, PackageSearch, CalendarClock, TrendingDown, RefreshCw, ShoppingBasket,
   Loader2, CheckCircle2, AlertTriangle, ExternalLink,
 } from 'lucide-react';
 import {
@@ -44,6 +44,9 @@ export default function PrivacySettingsPage() {
   const [preferences, setPreferences] = useState<Record<NotificationCategory, boolean>>({
     restock: true,
     digest: true,
+    price_drop: true,
+    reorder: true,
+    cart: true,
   });
   const [profileLoading, setProfileLoading] = useState(true);
   const [savingKey, setSavingKey] = useState<string | null>(null);
@@ -51,7 +54,7 @@ export default function PrivacySettingsPage() {
   const [savedPulse, setSavedPulse] = useState(false);
 
   useEffect(() => {
-    if (!authLoading && !user) router.push('/auth/login');
+    if (!authLoading && !user) router.push('/auth/register?redirect=/account/privacy');
   }, [authLoading, user, router]);
 
   // ── Sync temps réel du profil ────────────────────────────────────────────
@@ -68,6 +71,9 @@ export default function PrivacySettingsPage() {
         setPreferences({
           restock: data.notificationPreferences?.restock !== false,
           digest: data.notificationPreferences?.digest !== false,
+          price_drop: data.notificationPreferences?.price_drop !== false,
+          reorder: data.notificationPreferences?.reorder !== false,
+          cart: data.notificationPreferences?.cart !== false,
         });
         setProfileLoading(false);
       },
@@ -148,7 +154,7 @@ export default function PrivacySettingsPage() {
           </div>
           <div>
             <h1 className="text-white text-xl font-black leading-tight">Confidentialité</h1>
-            <p className="text-white/70 text-xs mt-0.5">Contrôlez ce qu'AgriMarché personnalise pour vous</p>
+            <p className="text-white/70 text-xs mt-0.5">Contrôlez ce que Sunu Mëñëf personnalise pour vous</p>
           </div>
         </div>
       </div>
@@ -225,6 +231,30 @@ export default function PrivacySettingsPage() {
               checked={preferences.digest}
               onChange={() => handleToggleCategory('digest')}
               disabled={!personalizationEnabled || savingKey === 'digest' || profileLoading}
+            />
+            <CategoryRow
+              icon={TrendingDown}
+              title="Baisses de prix"
+              description="Le prix d'un produit qui vous intéresse baisse d'au moins 10 %"
+              checked={preferences.price_drop}
+              onChange={() => handleToggleCategory('price_drop')}
+              disabled={!personalizationEnabled || savingKey === 'price_drop' || profileLoading}
+            />
+            <CategoryRow
+              icon={RefreshCw}
+              title="Rappels de réachat"
+              description="Un rappel quand un produit que vous achetez souvent risque de manquer"
+              checked={preferences.reorder}
+              onChange={() => handleToggleCategory('reorder')}
+              disabled={!personalizationEnabled || savingKey === 'reorder' || profileLoading}
+            />
+            <CategoryRow
+              icon={ShoppingBasket}
+              title="Panier en attente"
+              description="Un rappel si vous avez laissé des produits dans votre panier"
+              checked={preferences.cart}
+              onChange={() => handleToggleCategory('cart')}
+              disabled={!personalizationEnabled || savingKey === 'cart' || profileLoading}
             />
           </div>
         </div>

@@ -712,7 +712,7 @@ export default function AgriMarket() {
       }).catch(err => console.error('Erreur increment whatsappClicks:', err));
     }
     // ⚠️ Le numéro du vendeur n'est plus utilisé ici : tout contact WhatsApp
-    // depuis les fiches produits passe par le numéro officiel AgriMarché
+    // depuis les fiches produits passe par le numéro officiel Sunu Mëñëf
     // (WA_NUMBER), afin d'éviter que les acheteurs contournent la plateforme
     // en contactant directement le vendeur.
     window.open(`https://wa.me/${WA_NUMBER}?text=${encodeURIComponent(`Bonjour, je suis intéressé par "${name}".`)}`, '_blank');
@@ -1624,7 +1624,7 @@ export default function AgriMarket() {
           <div className="g-logo-row">
             <Link href="/" className="g-logo-link">
               <div className="g-wordmark">
-                <div className="g-wordmark-main">AGRIMARCHÉ</div>
+                <div className="g-wordmark-main">SUNU MËÑËF</div>
                 <div className="g-wordmark-sub">MARCHÉ PAYSAN DU SÉNÉGAL</div>
               </div>
             </Link>
@@ -2047,7 +2047,7 @@ export default function AgriMarket() {
 
           <button
             className="g-nav-cta"
-            onClick={() => window.open(`https://wa.me/${WA_NUMBER}?text=${encodeURIComponent('Bonjour, je souhaite commander sur AgriMarché.')}`, '_blank')}
+            onClick={() => window.open(`https://wa.me/${WA_NUMBER}?text=${encodeURIComponent('Bonjour, je souhaite commander sur Sunu Mëñëf.')}`, '_blank')}
           >
             <div className="g-nav-cta-ring"><WaIcon s={26} /></div>
             <span className="g-nav-cta-lbl">WHATSAPP</span>

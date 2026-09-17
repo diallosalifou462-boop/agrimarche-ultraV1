@@ -14,7 +14,7 @@ export function InstallBanner() {
       <div className="max-w-lg mx-auto bg-white shadow-xl rounded-2xl border border-gray-100 flex items-center gap-4 p-4">
         <span className="text-4xl flex-shrink-0">📱</span>
         <div className="flex-1 min-w-0">
-          <p className="font-semibold text-green-700 text-sm">Installer AgriMarché</p>
+          <p className="font-semibold text-green-700 text-sm">Installer Sunu Mëñëf</p>
           <p className="text-xs text-gray-500 mt-0.5">Utilisez notre application pour une meilleure expérience</p>
         </div>
         <button

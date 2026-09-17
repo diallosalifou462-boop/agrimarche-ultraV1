@@ -72,7 +72,7 @@ function OrdersContent() {
 
   useEffect(() => {
     if (authLoading) return;
-    if (!user) { router.push('/auth/login?redirect=/account/orders'); return; }
+    if (!user) { router.push('/auth/register?redirect=/account/orders'); return; }
 
     const q = query(
       collection(db, 'orders'),
@@ -84,10 +84,10 @@ function OrdersContent() {
       const data = snap.docs.map(d => {
         const raw = (d.data() as any).status || 'en_attente';
         const normalized = normalizeStatus(raw);
-        console.log(`[AgriMarché/AccountOrders] Order ${d.id.slice(-6)} | raw="${raw}" → "${normalized}"`);
+        console.log(`[Sunu Mëñëf/AccountOrders] Order ${d.id.slice(-6)} | raw="${raw}" → "${normalized}"`);
         return { ...d.data(), id: d.id, status: normalized } as Order; // FIX: id apres le spread, sinon un champ 'id' stocke dans le doc ecrase le vrai ID Firestore
       });
-      console.log(`[AgriMarché/AccountOrders] Total=${data.length} | statuts: ${[...new Set(data.map(o=>o.status))].join(', ')}`);
+      console.log(`[Sunu Mëñëf/AccountOrders] Total=${data.length} | statuts: ${[...new Set(data.map(o=>o.status))].join(', ')}`);
       setOrders(data);
       setLoading(false);
       if (!selected && data.length > 0) setSelected(data[0].id);

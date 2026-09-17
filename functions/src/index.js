@@ -89,10 +89,10 @@ exports.processEmailQueue = functions.firestore.onDocumentCreated({
                 _a.trys.push([1, 4, , 6]);
                 console.log("\uD83D\uDCE7 Envoi r\u00E9el \u00E0: ".concat(data.to));
                 return [4 /*yield*/, resend.emails.send({
-                        from: 'SunuMëñëf <onboarding@resend.dev>',
+                        from: 'Sunu Mëñëf <onboarding@resend.dev>',
                         to: data.to,
                         subject: data.subject,
-                        html: "<div><h2>\uD83C\uDF3F SunuM\u00EB\u00F1\u00EBf</h2><p>".concat(data.body, "</p></div>"),
+                        html: "<div><h2>\uD83C\uDF3F Sunu M\u00EB\u00F1\u00EBf</h2><p>".concat(data.body, "</p></div>"),
                     })];
             case 2:
                 error = (_a.sent()).error;
@@ -240,7 +240,7 @@ exports.notifyNewProduct = functions.firestore.onDocumentCreated({ document: 'pr
                         topic: 'buyers',
                         notification: {
                             title: 'Nouveau produit 🌾',
-                            body: "".concat(product.name, " est maintenant disponible sur SunuM\u00EB\u00F1\u00EBf"),
+                            body: "".concat(product.name, " est maintenant disponible sur Sunu M\u00EB\u00F1\u00EBf"),
                         },
                         data: { type: 'new_product', productId: event.params.productId },
                     })];

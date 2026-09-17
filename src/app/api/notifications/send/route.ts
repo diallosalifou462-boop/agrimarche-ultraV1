@@ -10,8 +10,8 @@
 //   RESEND_API_KEY=re_xxxxxxxxxxxx                                  ← dashboard resend.com
 //   INFOBIP_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxx                        ← dashboard infobip.com
 //   INFOBIP_BASE_URL=xxxxx.api.infobip.com                         ← dans ton dashboard Infobip
-//   INFOBIP_SENDER=AgriMarche                                       ← nom expéditeur SMS (11 car. max)
-//   RESEND_FROM=AgriMarché <noreply@agrimarche.sn>                  ← domaine vérifié sur Resend
+//   INFOBIP_SENDER=SunuMenef                                       ← nom expéditeur SMS (11 car. max)
+//   RESEND_FROM=Sunu Mëñëf <noreply@agrimarche.sn>                  ← domaine vérifié sur Resend
 
 import { NextRequest, NextResponse } from 'next/server';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
@@ -228,7 +228,7 @@ export async function POST(request: NextRequest) {
         try {
           const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://agrimarche.vercel.app';
           const { data, error } = await resend.emails.send({
-            from: process.env.RESEND_FROM || 'AgriMarché <noreply@agrimarche.sn>',
+            from: process.env.RESEND_FROM || 'Sunu Mëñëf <noreply@agrimarche.sn>',
             to:   [userEmail],
             subject: title,
             html: buildEmailHtml({ title, body, link, appUrl }),
@@ -256,7 +256,7 @@ export async function POST(request: NextRequest) {
 
           const infobipBaseUrl = process.env.INFOBIP_BASE_URL;
           const infobipApiKey  = process.env.INFOBIP_API_KEY;
-          const senderName     = process.env.INFOBIP_SENDER || 'AgriMarche';
+          const senderName     = process.env.INFOBIP_SENDER || 'SunuMenef';
 
           if (!infobipBaseUrl || !infobipApiKey) {
             results.sms = { sent: false, reason: 'infobip_not_configured' };
@@ -382,7 +382,7 @@ function buildEmailHtml({
           <!-- Header -->
           <tr>
             <td style="background:#1A1A1A;padding:28px 36px;text-align:center;">
-              <span style="font-size:22px;font-weight:300;color:#C9A96E;letter-spacing:0.08em;">🌿 AgriMarché</span>
+              <span style="font-size:22px;font-weight:300;color:#C9A96E;letter-spacing:0.08em;">🌿 Sunu Mëñëf</span>
             </td>
           </tr>
 
@@ -406,7 +406,7 @@ function buildEmailHtml({
           <tr>
             <td style="padding:20px 36px;border-top:1px solid #F0EDE8;text-align:center;">
               <p style="margin:0;font-size:11px;color:#9A9A9A;letter-spacing:0.04em;">
-                AgriMarché Sénégal · Marché agricole en ligne<br/>
+                Sunu Mëñëf Sénégal · Marché agricole en ligne<br/>
                 <a href="${appUrl}" style="color:#C9A96E;text-decoration:none;">${appUrl}</a>
               </p>
             </td>

@@ -203,10 +203,10 @@ export default function UnlockIAPage() {
           <span className="auth-gate__icon">🔐</span>
           <p className="auth-gate__title">Connexion requise</p>
           <p className="auth-gate__body">
-            Connectez-vous pour débloquer l'accès IA Premium AgriMarché.
+            Créez votre compte pour débloquer l'accès IA Premium Sunu Mëñëf.
           </p>
-          <Link href="/auth/login" className="cta cta--green">
-            Se connecter
+          <Link href="/auth/register?redirect=/main/unlock-ia" className="cta cta--green">
+            Créer mon compte
           </Link>
         </div>
         <style>{BASE_CSS}</style>
@@ -250,7 +250,7 @@ export default function UnlockIAPage() {
                 <div className="avatar avatar--gradient-purple">🤖</div>
                 <h1 className="step-header__title">IA Premium</h1>
                 <p className="step-header__sub">
-                  Assistant IA AgriMarché propulsé par DeepSeek — conseils, météo,
+                  Assistant IA Sunu Mëñëf propulsé par DeepSeek — conseils, météo,
                   financement, marché.
                 </p>
               </div>
@@ -372,7 +372,7 @@ export default function UnlockIAPage() {
               <div className="success-icon">✅</div>
               <h2 className="success-title">Accès activé !</h2>
               <p className="success-sub">
-                Bienvenue dans l'IA Premium AgriMarché.
+                Bienvenue dans l'IA Premium Sunu Mëñëf.
                 <br />
                 Votre accès est valide{' '}
                 <strong style={{ color: '#e8f5e9' }}>{expiryDays} jours</strong>.
@@ -402,7 +402,7 @@ export default function UnlockIAPage() {
 
       <footer className="unlock-footer">
         <span>🔒</span>
-        <span>Paiement sécurisé · Données chiffrées · AgriMarché Sénégal</span>
+        <span>Paiement sécurisé · Données chiffrées · Sunu Mëñëf Sénégal</span>
       </footer>
 
       <style>{BASE_CSS}</style>

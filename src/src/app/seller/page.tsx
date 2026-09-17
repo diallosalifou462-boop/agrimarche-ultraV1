@@ -77,7 +77,7 @@ function normalizeStatus(raw: string): string {
   const normalized = LEGACY_STATUS[raw] ?? raw;
   // 🔍 LOG : affiche dans la console si un statut inconnu est détecté
   if (!['en_attente','en_preparation','en_livraison','livre','annule'].includes(normalized)) {
-    console.warn(`[AgriMarché] ⚠️ Statut inconnu après normalisation : "${raw}" → "${normalized}". Ajouter ce cas dans LEGACY_STATUS.`);
+    console.warn(`[Sunu Mëñëf] ⚠️ Statut inconnu après normalisation : "${raw}" → "${normalized}". Ajouter ce cas dans LEGACY_STATUS.`);
   }
   return normalized;
 }
@@ -293,7 +293,7 @@ export default function SellerDashboard() {
             const raw = d.data().status || 'en_attente';
             const normalized = normalizeStatus(raw);
             // 🔍 LOG : visible dans F12 → Console, pour identifier les statuts bruts reçus de Firestore
-            console.log(`[AgriMarché] Order ${d.id.slice(-6)} | raw="${raw}" → normalized="${normalized}" | amount=${d.data().total || d.data().amount || 0}`);
+            console.log(`[Sunu Mëñëf] Order ${d.id.slice(-6)} | raw="${raw}" → normalized="${normalized}" | amount=${d.data().total || d.data().amount || 0}`);
             return {
               id:           d.id,
               customerName: d.data().userName || 'Client',
@@ -311,7 +311,7 @@ export default function SellerDashboard() {
           const pendingCount    = ordersData.filter(o => ['en_attente', 'en_preparation'].includes(o.status)).length;
 
           // 🔍 LOG : résumé des stats pour déboguer les compteurs
-          console.log(`[AgriMarché] Dashboard stats | total=${ordersData.length} | livrées=${deliveredOrders.length} | CA=${totalRevenue} | en_attente=${pendingCount} | annulées=${ordersData.filter(o=>o.status==='annule').length}`);
+          console.log(`[Sunu Mëñëf] Dashboard stats | total=${ordersData.length} | livrées=${deliveredOrders.length} | CA=${totalRevenue} | en_attente=${pendingCount} | annulées=${ordersData.filter(o=>o.status==='annule').length}`);
 
           setStats(prev => ({
             ...prev,

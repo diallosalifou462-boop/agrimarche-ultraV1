@@ -305,7 +305,7 @@ export default function NotificationSystem() {
       <div style={{ width:"100%", maxWidth:540, padding:"32px 20px 0", position:"relative", zIndex:1 }}>
         <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", marginBottom:24 }}>
           <div>
-            <div style={{ fontFamily:"'Bebas Neue'", fontSize:11, letterSpacing:6, color:"#d4a853", opacity:0.7, marginBottom:4 }}>AGRIMARCHÉ</div>
+            <div style={{ fontFamily:"'Bebas Neue'", fontSize:11, letterSpacing:6, color:"#d4a853", opacity:0.7, marginBottom:4 }}>SUNU MËÑËF</div>
             <h1 style={{ fontFamily:"'Playfair Display'", fontSize:28, fontWeight:700, margin:0, lineHeight:1.1 }}>Notifications</h1>
             {unread > 0 && (
               <div style={{ marginTop:6, display:"inline-flex", alignItems:"center", gap:6, background:"rgba(212,168,83,0.12)", border:"1px solid rgba(212,168,83,0.25)", borderRadius:20, padding:"3px 10px" }}>

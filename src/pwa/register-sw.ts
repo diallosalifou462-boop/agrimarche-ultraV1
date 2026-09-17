@@ -100,7 +100,7 @@ export class ServiceWorkerRegistration {
       <div>🔄</div>
       <div>
         <strong>Nouvelle version disponible</strong>
-        <p style="margin:0;font-size:12px;opacity:0.8">Agrimarche ${version || ''} s'est amélioré</p>
+        <p style="margin:0;font-size:12px;opacity:0.8">Sunu Mëñëf ${version || ''} s'est amélioré</p>
       </div>
       <button style="background:white;color:#2e7d32;border:none;padding:8px 16px;border-radius:25px;font-weight:600;cursor:pointer;">
         Mettre à jour

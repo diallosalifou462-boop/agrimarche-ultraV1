@@ -5,10 +5,41 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCart } from '@/hooks/useCart';
 import { useAuth } from '@/hooks/useAuth';
-import { useUserLocation } from '@/hooks/useUserLocation';
-import LocationPicker from '@/components/LocationPicker';
-import { reverseGeocode, searchPlaces } from '@/lib/geo/geocode';
-import type { GeocodeResult } from '@/lib/geo/types';
+import LocationEditor from '@/components/LocationEditor';
+import { distanceKm, isPlausibleSenegalCoordinate } from '@/lib/geo/distance';
+import { DAKAR_CENTER, ROAD_DISTANCE_FACTOR, isUsableRecord, type LocationRecord } from '@/lib/geo/quality';
+import { readSavedDeliveryAddress, saveDeliveryAddress } from '@/lib/geo/userLocation';
+
+// Adresse de livraison choisie, gardée le temps du paiement (retour Wave =
+// rechargement complet de la page : sans ça, l'adresse confirmée était perdue
+// et la commande repartait avec une position re-détectée ou Dakar par défaut).
+const DELIVERY_POINT_KEY = 'checkout_delivery_point';
+function readStoredDeliveryPoint(): LocationRecord | null {
+  try {
+    const raw = typeof window !== 'undefined' ? sessionStorage.getItem(DELIVERY_POINT_KEY) : null;
+    const rec = raw ? JSON.parse(raw) : null;
+    return isUsableRecord(rec) ? rec : null;
+  } catch {
+    return null;
+  }
+}
+
+// Point de retrait d'un vendeur, lu sur ses documents produits (publics).
+// Les profils users/{vendeur} ne sont PAS lisibles par un acheteur (règles
+// Firestore) : l'ancienne lecture échouait toujours en silence → toutes les
+// commandes partaient avec « Dakar, Sénégal » comme point de retrait.
+type SellerPoint = { lat: number; lng: number; address: string; source: string | null; accuracy: number | null; updatedAt: unknown };
+function sellerPointFromProduct(p: any): SellerPoint | null {
+  if (!p || !isPlausibleSenegalCoordinate(p.lat, p.lng)) return null;
+  return {
+    lat: p.lat,
+    lng: p.lng,
+    address: p.locationAddress || p.exactLocation || p.region || `${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}`,
+    source: p.locationSource || null,
+    accuracy: typeof p.locationAccuracy === 'number' ? p.locationAccuracy : null,
+    updatedAt: p.locationUpdatedAt ?? null,
+  };
+}
 import {
   collection, addDoc, Timestamp, doc, updateDoc, getDoc, setDoc, runTransaction,
 } from 'firebase/firestore';
@@ -369,12 +400,12 @@ const PAYMENT_METHODS_CONFIG = {
 // Aucun SMS envoyé ici — la session s'ouvre directement via
 // startGuestCheckoutSession.
 function GuestCheckoutModal({
-  phone, setPhone, name, setName, error, submitting, onContinue, onCancel,
+  phone, setPhone, name, setName, error, submitting, onContinue, onCreateAccount, onLogin, onClose,
 }: {
   phone: string; setPhone: (v: string) => void;
   name: string; setName: (v: string) => void;
   error: string; submitting: boolean;
-  onContinue: () => void; onCancel: () => void;
+  onContinue: () => void; onCreateAccount: () => void; onLogin: () => void; onClose: () => void;
 }) {
   return (
     <div className="modal-card" style={{ maxWidth: 420 }}>
@@ -402,8 +433,25 @@ function GuestCheckoutModal({
         <button onClick={onContinue} disabled={submitting} className="cta-btn" style={{ marginTop: 18, width: '100%' }}>
           {submitting ? 'Un instant…' : 'Continuer'}
         </button>
-        <button onClick={onCancel} style={{ marginTop: 10, width: '100%', background: 'none', border: 'none', color: 'var(--ink-lt)', fontSize: 12.5, cursor: 'pointer' }}>
-          J'ai déjà un compte — me connecter
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '18px 0 12px' }}>
+          <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+          <span style={{ fontSize: 11, color: 'var(--ink-lt)' }}>ou</span>
+          <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+        </div>
+        <button
+          onClick={onCreateAccount}
+          style={{ width: '100%', padding: '12px 16px', borderRadius: 10, border: '1.5px solid #059669', background: '#fff', color: '#059669', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}
+        >
+          Créer mon compte
+        </button>
+        <p style={{ fontSize: 11.5, color: 'var(--ink-lt)', textAlign: 'center', marginTop: 6, lineHeight: 1.4 }}>
+          Suivez vos commandes et gardez votre adresse pour la prochaine fois.
+        </p>
+        <button onClick={onLogin} style={{ marginTop: 10, width: '100%', background: 'none', border: 'none', color: 'var(--ink-lt)', fontSize: 12, cursor: 'pointer' }}>
+          Déjà inscrit ? Se connecter
+        </button>
+        <button onClick={onClose} style={{ marginTop: 2, width: '100%', background: 'none', border: 'none', color: 'var(--ink-lt)', fontSize: 12, cursor: 'pointer', textDecoration: 'underline' }}>
+          Retour
         </button>
       </div>
     </div>
@@ -482,94 +530,39 @@ function PaymentModal({ method, amount, remainingAmount, onConfirm, onBack }: { 
 ───────────────────────────────────────────── */
 export default function CheckoutPage() {
   const router = useRouter();
-  const { user, profile } = useAuth();
+  const { user, profile, patchLocalProfile } = useAuth() as any;
   const { cart, clearCart } = useCart() as { cart: { items: any[]; total: number; itemCount: number }; clearCart: () => void };
-  const { location, loading: locationLoading, detectLocation } = useUserLocation();
-  // ✅ NOUVEAU — quand la position détectée n'est pas fiable (isDefault:
-  // repli IP ou Dakar par défaut), le client doit pouvoir la corriger
-  // lui-même en plaçant un point sur la carte (point 5 de la spec géoloc :
-  // "marqueur déplaçable"), au lieu de se contenter d'un message
-  // d'avertissement passif comme avant. `manualLocation` prévaut alors sur
-  // `location` (le hook GPS/IP) pour tout le reste du flux de commande.
-  const [showLocationPicker, setShowLocationPicker] = useState(false);
-  const [manualLocation, setManualLocation] = useState<{ lat: number; lng: number; address: string; source: 'MANUAL_PIN' | 'MAP_SEARCH' } | null>(null);
-  const [manualLocationLoading, setManualLocationLoading] = useState(false);
-  const [manualPin, setManualPin] = useState<{ lat: number; lng: number } | null>(null);
-  // ✅ NOUVEAU — recherche de lieu nommé ("Ecobank UCAD", "Marché Sandaga"…)
-  // au lieu d'obliger le client à repérer l'endroit sur la carte à l'œil.
-  // C'est le point 9 de la spec géoloc ("recherche de lieux façon Yango") :
-  // le pin manuel seul ne suffit pas pour un point de repère précis que le
-  // client connaît par son nom mais pas par ses coordonnées GPS.
-  const [placeQuery, setPlaceQuery] = useState('');
-  const [placeResults, setPlaceResults] = useState<GeocodeResult[]>([]);
-  const [placeSearching, setPlaceSearching] = useState(false);
+  // ── Adresse de livraison ──────────────────────────────────────────────
+  // Une seule source : le point CONFIRMÉ par le client (GPS précis, lieu
+  // recherché ou point placé sur la carte). Plus de repli silencieux sur
+  // la position IP ou le centre de Dakar : sans adresse confirmée, pas de
+  // commande — le livreur ne doit jamais partir vers un point inventé.
+  const [deliveryPoint, setDeliveryPoint] = useState<LocationRecord | null>(null);
+  const [editingDelivery, setEditingDelivery] = useState(false);
+  const [deliveryError, setDeliveryError] = useState('');
 
-  const effectiveLocation = manualLocation
-    ? { ...manualLocation, city: manualLocation.address, region: '', country: 'Sénégal', detected: true, isDefault: false }
-    : location;
-
-  // Dès qu'une position détectée non fiable arrive, on prépare le pin
-  // manuel centré dessus (plutôt que sur Dakar par défaut) pour que le
-  // client n'ait qu'à l'affiner, pas à chercher sa position de zéro.
   useEffect(() => {
-    // 🐛 FIX : avant, ce point de départ n'était posé QUE si la position
-    // détectée était un repli (isDefault:true). Dès que le GPS renvoyait une
-    // position fiable (isDefault:false, ex: Colobane bien détecté), manualPin
-    // restait null pour toujours — et comme le bloc de correction plus bas
-    // ne s'affichait QUE si `showLocationPicker && manualPin`, le client
-    // n'avait tout simplement AUCUN moyen d'ouvrir la carte pour choisir un
-    // point de livraison différent de sa position GPS actuelle. Résultat :
-    // quoi qu'il tente de "confirmer" ailleurs dans l'app, la commande
-    // repartait toujours avec la position auto-détectée.
-    if (location?.lat && location.lng && !manualPin) {
-      setManualPin({ lat: location.lat, lng: location.lng });
+    // L'adresse gardée en session ne sert QU'AU retour du paiement Wave. Hors
+    // de ce cas, on repart de l'adresse enregistrée sur le compte : sinon une
+    // adresse modifiée entre-temps (« Mon adresse ») serait ignorée.
+    let wavePending = false;
+    try { wavePending = !!sessionStorage.getItem('wave_pending'); } catch { /* ignore */ }
+    if (!wavePending) {
+      try { sessionStorage.removeItem(DELIVERY_POINT_KEY); } catch { /* ignore */ }
+      return;
     }
-  }, [location, manualPin]);
-
-  // Recherche de lieu nommé, débouncée (300ms) pour ne pas spammer Nominatim
-  // à chaque frappe (voir la politique d'usage documentée dans geocode.ts).
-  useEffect(() => {
-    const q = placeQuery.trim();
-    if (q.length < 3) { setPlaceResults([]); return; }
-    setPlaceSearching(true);
-    const t = setTimeout(() => {
-      searchPlaces(q, 5)
-        .then(setPlaceResults)
-        .finally(() => setPlaceSearching(false));
-    }, 300);
-    return () => clearTimeout(t);
-  }, [placeQuery]);
-
-  const pickSearchedPlace = useCallback((r: GeocodeResult) => {
-    setManualPin({ lat: r.latitude, lng: r.longitude });
-    setManualLocation({
-      lat: r.latitude,
-      lng: r.longitude,
-      address: [r.address, r.city].filter(Boolean).join(', ') || r.displayName,
-      source: 'MAP_SEARCH',
-    });
-    setPlaceQuery('');
-    setPlaceResults([]);
-    setShowLocationPicker(false);
+    const stored = readStoredDeliveryPoint();
+    if (stored) setDeliveryPoint(stored);
   }, []);
-
-  const confirmManualLocation = useCallback(async () => {
-    if (!manualPin) return;
-    setManualLocationLoading(true);
-    try {
-      const reverse = await reverseGeocode(manualPin.lat, manualPin.lng);
-      const address = reverse
-        ? [reverse.neighborhood, reverse.city || reverse.region].filter(Boolean).join(', ') || reverse.displayName
-        : `${manualPin.lat.toFixed(5)}, ${manualPin.lng.toFixed(5)}`;
-      setManualLocation({ lat: manualPin.lat, lng: manualPin.lng, address, source: 'MANUAL_PIN' });
-      setShowLocationPicker(false);
-    } catch {
-      setManualLocation({ lat: manualPin.lat, lng: manualPin.lng, address: `${manualPin.lat.toFixed(5)}, ${manualPin.lng.toFixed(5)}`, source: 'MANUAL_PIN' });
-      setShowLocationPicker(false);
-    } finally {
-      setManualLocationLoading(false);
-    }
-  }, [manualPin]);
+  useEffect(() => {
+    if (deliveryPoint) return;
+    const saved = readSavedDeliveryAddress(profile);
+    if (saved) setDeliveryPoint(saved);
+  }, [profile, deliveryPoint]);
+  useEffect(() => {
+    if (!deliveryPoint) return;
+    try { sessionStorage.setItem(DELIVERY_POINT_KEY, JSON.stringify(deliveryPoint)); } catch { /* ignore */ }
+  }, [deliveryPoint]);
 
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -608,15 +601,54 @@ export default function CheckoutPage() {
   const subtotal = useMemo(() => cart?.total || 0, [cart]);
   const isFreeDelivery = subtotal >= 5000;
 
+  // Points de retrait des vendeurs du panier (documents produits relus à
+  // jour — pas la copie figée dans le panier au moment de l'ajout).
+  const [sellerPoints, setSellerPoints] = useState<Record<string, SellerPoint>>({});
+  useEffect(() => {
+    const bySeller = new Map<string, string[]>();
+    cartItems.forEach((it: any) => {
+      const sid = it?.product?.sellerId;
+      const pid = it?.product?.id;
+      if (!sid || !pid) return;
+      bySeller.set(sid, [...(bySeller.get(sid) || []), pid]);
+    });
+    let cancelled = false;
+    (async () => {
+      const next: Record<string, SellerPoint> = {};
+      for (const [sid, pids] of bySeller) {
+        for (const pid of pids.slice(0, 3)) {
+          try {
+            const snap = await getDoc(doc(db, 'products', pid));
+            const point = sellerPointFromProduct(snap.data());
+            if (point) { next[sid] = point; break; }
+          } catch { /* produit illisible : on essaie le suivant */ }
+        }
+      }
+      if (!cancelled) setSellerPoints(next);
+    })();
+    return () => { cancelled = true; };
+  }, [cartItems]);
+
+  // Distance ROUTIÈRE estimée vendeur → client (la plus longue si plusieurs
+  // vendeurs). Avant : distance au centre de Dakar, quel que soit le vendeur.
+  // Vendeur sans point connu → centre de Dakar, comme avant.
+  const deliveryDistanceKm = useMemo(() => {
+    if (!deliveryPoint) return null;
+    const sellerIds = [...new Set(cartItems.map((it: any) => it?.product?.sellerId).filter(Boolean))] as string[];
+    const origins: Array<{ lat: number; lng: number }> = sellerIds.map((sid) => sellerPoints[sid] || DAKAR_CENTER);
+    const list = origins.length ? origins : [DAKAR_CENTER];
+    return Math.max(...list.map((o) => distanceKm(o.lat, o.lng, deliveryPoint.lat, deliveryPoint.lng))) * ROAD_DISTANCE_FACTOR;
+  }, [deliveryPoint, cartItems, sellerPoints]);
+
   const deliveryFee = useMemo(() => {
     if (isFreeDelivery) return 0;
-    if (!effectiveLocation?.lat || !effectiveLocation?.lng) return 1000;
-    const dist = Math.sqrt(Math.pow(effectiveLocation.lat - 14.7167, 2) + Math.pow(effectiveLocation.lng + 17.4677, 2)) * 111;
+    if (deliveryDistanceKm === null) return 1000;
+    const dist = deliveryDistanceKm;
     if (dist <= 10) return 1000;
     if (dist <= 30) return 1000;
     if (dist <= 100) return 1500;
     return 2000;
-  }, [effectiveLocation, isFreeDelivery]);
+  }, [deliveryDistanceKm, isFreeDelivery]);
 
   const total = subtotal + deliveryFee;
   const depositAmount = Math.round(total * DEPOSIT_RATE * DEPOSIT_SURCHARGE);
@@ -624,13 +656,13 @@ export default function CheckoutPage() {
 
   const estimatedDelivery = useMemo(() => {
     if (isFreeDelivery) return '24 – 48 h (Express)';
-    if (!effectiveLocation?.lat || !effectiveLocation?.lng) return 'À confirmer';
-    const dist = Math.sqrt(Math.pow(effectiveLocation.lat - 14.7167, 2) + Math.pow(effectiveLocation.lng + 17.4677, 2)) * 111;
+    if (deliveryDistanceKm === null) return 'À confirmer';
+    const dist = deliveryDistanceKm;
     if (dist <= 10) return '24 h';
     if (dist <= 30) return '24 – 48 h';
     if (dist <= 100) return '48 – 72 h';
     return '3 – 5 jours';
-  }, [effectiveLocation, isFreeDelivery]);
+  }, [deliveryDistanceKm, isFreeDelivery]);
 
   const generateOrderNumber = useCallback(() => {
     const d = new Date();
@@ -653,6 +685,13 @@ export default function CheckoutPage() {
       setOrderError('Session expirée, reconnecte-toi pour continuer.');
       setIsProcessing(false);
       router.push('/auth/login?redirect=/checkout');
+      return false;
+    }
+    const orderDeliveryPoint = deliveryPoint ?? readStoredDeliveryPoint();
+    if (!orderDeliveryPoint) {
+      setOrderError('Indiquez votre adresse de livraison avant de commander.');
+      setEditingDelivery(true);
+      setIsProcessing(false);
       return false;
     }
     setIsProcessing(true); setOrderError('');
@@ -761,45 +800,29 @@ export default function CheckoutPage() {
         const firstItem = items[0];
         const orderNumber = isMultiVendor ? `${orderGroupId}-${String.fromCharCode(65 + i)}` : orderGroupId;
         const safeSellerId = groupSellerId || user?.uid || 'agrimarche-official';
-        const safeSellerName = firstItem?.product?.sellerName || firstItem?.product?.farmer || 'AgriMarché';
+        // Nom du vendeur : UNIQUEMENT le vrai nom du vendeur (jamais le nom de
+        // la plateforme). D'abord le nom porté par le produit, sinon le
+        // displayName du compte vendeur (lu plus bas), sinon vide — les écrans
+        // affichent alors 'Vendeur' / '—'.
+        const PLATFORM_NAMES = ['Sunu Mëñëf', 'SunuMëñëf', 'AgriMarché'];
+        const productSellerName = [firstItem?.product?.sellerName, firstItem?.product?.farmer]
+          .find((n): n is string => typeof n === 'string' && !!n.trim() && !PLATFORM_NAMES.includes(n.trim()));
+        let safeSellerName = productSellerName?.trim() || '';
         const safeSellerPhone = firstItem?.product?.sellerPhone || '221779747073';
         const safeSellerRegion = firstItem?.product?.region || 'Dakar';
-        let sellerLat = 14.7167; let sellerLng = -17.4677; let sellerAddress = 'Dakar, Sénégal';
-        // 🐛 FIX : jusqu'ici rien ne distinguait "vraie position vendeur" de
-        // "on ne sait pas, voici Dakar par défaut" — le livreur n'avait aucun
-        // moyen de savoir si le pickup affiché était fiable. isDefault reste
-        // true tant qu'aucune coordonnée réelle n'est trouvée sur le profil.
-        let sellerLocationIsDefault = true;
-        // ✅ NOUVEAU — on capture aussi *comment* et *quand* cette position a
-        // été obtenue (voir seller/page.tsx : 'MANUAL_PIN' vs 'GPS' + date),
-        // et on fige ces deux informations sur la commande elle-même au
-        // moment de la création. Sans ça, le badge de confiance affiché au
-        // livreur (delivery/dashboard) et à l'admin ne pourrait refléter que
-        // l'état ACTUEL du profil vendeur, pas celui au moment où la
-        // commande a réellement été passée — or le vendeur peut corriger sa
-        // position après coup, ce qui ne doit pas réécrire l'historique
-        // d'une commande déjà en cours de livraison.
-        let sellerLocationSource: string | null = null;
-        let sellerLocationUpdatedAt: string | null = null;
-        if (safeSellerId && safeSellerId !== 'agrimarche-official') {
-          try {
-            const sellerDoc = await getDoc(doc(db, 'users', safeSellerId));
-            if (sellerDoc.exists()) {
-              const d = sellerDoc.data();
-              sellerLat = d?.latitude || d?.lat || 14.7167;
-              sellerLng = d?.longitude || d?.lng || -17.4677;
-              // 🐛 FIX : ne lisait jamais `locationAddress` — le seul champ
-              // texte que seller/register.tsx ET seller/page.tsx (dashboard)
-              // écrivent réellement (voir leurs commentaires "FIX RACINE").
-              // `address` n'est écrit nulle part côté vendeur ; sans ce
-              // fallback, un vendeur ayant pourtant corrigé sa position à la
-              // main voyait quand même "Dakar, Sénégal" affiché au livreur.
-              sellerAddress = d?.locationAddress || d?.address || d?.city || 'Dakar, Sénégal';
-              sellerLocationIsDefault = !(d?.latitude || d?.lat);
-              sellerLocationSource = d?.locationSource || null;
-              sellerLocationUpdatedAt = d?.locationUpdatedAt || null;
-            }
-          } catch {}
+        // Point de retrait : cache des documents produits, sinon relecture
+        // directe (cas du retour Wave, où la page vient d'être rechargée).
+        let sellerPoint: SellerPoint | null = sellerPoints[safeSellerId] || null;
+        if (!sellerPoint) {
+          for (const it of items.slice(0, 3)) {
+            const pid = it?.product?.id;
+            if (!pid) continue;
+            try {
+              const snap = await getDoc(doc(db, 'products', pid));
+              sellerPoint = sellerPointFromProduct(snap.data());
+              if (sellerPoint) break;
+            } catch { /* suivant */ }
+          }
         }
 
         // Sous-total propre à ce vendeur, puis frais de livraison au
@@ -838,22 +861,35 @@ export default function CheckoutPage() {
           // faisait, sous un nom qui ne peut entrer en collision avec rien.
           sellerId: safeSellerId, sellerName: safeSellerName,
           sellerPhone: safeSellerPhone, sellerRegion: safeSellerRegion,
-          userId: user.uid, userName: user?.displayName || guestName || 'Client AgriMarché',
+          userId: user.uid, userName: user?.displayName || guestName || 'Client Sunu Mëñëf',
           userEmail: user?.email || '', userPhone: profile?.phone || guestPhone || (user as any)?.phoneNumber || '',
           // 🔐 Sert exclusivement au parcours invité (findGuestOrders) : permet
           // de retrouver cette commande par téléphone sans compte ni SMS. Vide
           // pour un compte normal (non nécessaire, userId suffit déjà).
           ...(((profile as any)?.isGuest || (guestPhone && !profile)) ? { guestPhone: guestPhone.replace(/[^\d+]/g, '') } : {}),
-          sellerLocation: {
-            lat: sellerLat, lng: sellerLng, address: sellerAddress, isDefault: sellerLocationIsDefault,
-            ...(sellerLocationSource ? { locationSource: sellerLocationSource } : {}),
-            ...(sellerLocationUpdatedAt ? { locationUpdatedAt: sellerLocationUpdatedAt } : {}),
-          },
+          sellerLocation: sellerPoint
+            ? {
+                lat: sellerPoint.lat, lng: sellerPoint.lng, address: sellerPoint.address, isDefault: false,
+                ...(sellerPoint.source ? { locationSource: sellerPoint.source } : {}),
+                ...(typeof sellerPoint.accuracy === 'number' ? { accuracy: sellerPoint.accuracy } : {}),
+                ...(sellerPoint.updatedAt ? { locationUpdatedAt: sellerPoint.updatedAt } : {}),
+              }
+            : { lat: DAKAR_CENTER.lat, lng: DAKAR_CENTER.lng, address: 'Point de retrait non renseigné', isDefault: true },
           // 🐛 FIX : isDefault (posé par useUserLocation.ts) est propagé ici —
           // avant, on écrivait lat/lng sans jamais dire si c'était une vraie
           // position ou le repli Dakar, donc impossible de le savoir plus tard
           // côté livreur.
-          customerLocation: { lat: effectiveLocation?.lat || null, lng: effectiveLocation?.lng || null, address: effectiveLocation?.address || effectiveLocation?.city || 'Adresse non détectée', isDefault: effectiveLocation?.isDefault ?? true },
+          customerLocation: {
+            lat: orderDeliveryPoint.lat,
+            lng: orderDeliveryPoint.lng,
+            address: orderDeliveryPoint.address,
+            isDefault: false,
+            source: orderDeliveryPoint.source,
+            ...(typeof orderDeliveryPoint.accuracy === 'number' ? { accuracy: Math.round(orderDeliveryPoint.accuracy) } : {}),
+            ...(orderDeliveryPoint.instructions ? { instructions: orderDeliveryPoint.instructions } : {}),
+          },
+          locationSource: orderDeliveryPoint.source,
+          ...(deliveryDistanceKm !== null ? { deliveryDistanceKm: Math.round(deliveryDistanceKm * 10) / 10 } : {}),
           date: new Date().toLocaleDateString('fr-FR', { day:'numeric', month:'long', year:'numeric', hour:'2-digit', minute:'2-digit' }),
           timestamp: new Date().toISOString(), status: 'en_attente', statusLabel: "En attente de validation - Acompte à vérifier",
           orderGroupId, isMultiVendorGroup: isMultiVendor,
@@ -931,15 +967,14 @@ export default function CheckoutPage() {
       // utilisateurs" en dehors de ça. Best-effort : ne doit jamais faire
       // échouer le checkout si l'écriture échoue (compte invité, règles
       // Firestore, etc.).
-      if (user?.uid && !(profile as any)?.isGuest && effectiveLocation?.lat && effectiveLocation?.lng) {
-        updateDoc(doc(db, 'users', user.uid), {
-          lat: effectiveLocation.lat,
-          lng: effectiveLocation.lng,
-          locationAddress: effectiveLocation.address || effectiveLocation.city || undefined,
-          locationSource: manualLocation ? manualLocation.source : (effectiveLocation.isDefault ? 'IP_FALLBACK' : 'GPS'),
-          locationUpdatedAt: Timestamp.now(),
-        }).catch(() => {});
+      // Adresse confirmée gardée pour la prochaine commande. Pour un vendeur
+      // qui achète, elle ne touche PAS à son point de retrait (voir userLocation.ts).
+      if (user?.uid && !(profile as any)?.isGuest) {
+        saveDeliveryAddress(user.uid, orderDeliveryPoint, (profile as any)?.role)
+          .then(() => patchLocalProfile?.({ deliveryLocation: { ...orderDeliveryPoint, updatedAt: Date.now() } }))
+          .catch(() => {});
       }
+      try { sessionStorage.removeItem(DELIVERY_POINT_KEY); } catch { /* ignore */ }
 
       // ✅ Relances "commandes en attente" + "clients inactifs" : pas de
       // cron, on profite du trafic organique (chaque checkout) pour
@@ -967,7 +1002,7 @@ export default function CheckoutPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             to: profile.phone,
-            message: `AgriMarché : commande #${label} confirmée. Total ${totalAmount.toLocaleString('fr-FR')} FCFA. Merci de votre confiance !`,
+            message: `Sunu Mëñëf : commande #${label} confirmée. Total ${totalAmount.toLocaleString('fr-FR')} FCFA. Merci de votre confiance !`,
           }),
         }).catch((e) => console.warn('[checkout] SMS confirmation non envoyé:', e));
       }
@@ -1000,6 +1035,12 @@ export default function CheckoutPage() {
     // créer un compte (donc, dans ce projet, un OTP SMS) juste pour
     // commander. Désormais : un simple numéro de téléphone suffit — la
     // modal ci-dessous ouvre une session invité sans SMS ni mot de passe.
+    if (!deliveryPoint) {
+      setDeliveryError('Indiquez où vous livrer : position actuelle, recherche ou point sur la carte.');
+      setEditingDelivery(true);
+      if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
     if (!user) { setShowGuestModal(true); return; }
     if (cartItems.length === 0) { setOrderError('Votre panier est vide'); return; }
     const method = PAYMENT_METHODS_CONFIG[selectedPaymentMethod as keyof typeof PAYMENT_METHODS_CONFIG];
@@ -1115,7 +1156,7 @@ export default function CheckoutPage() {
               <ArrowLeft size={18} />
             </button>
             <div>
-              <p style={{ fontSize:11, letterSpacing:'0.16em', textTransform:'uppercase', color:'var(--ink-lt)', marginBottom:2 }}>AgriMarché</p>
+              <p style={{ fontSize:11, letterSpacing:'0.16em', textTransform:'uppercase', color:'var(--ink-lt)', marginBottom:2 }}>Sunu Mëñëf</p>
               <h1 className="serif" style={{ fontSize:28, fontWeight:400, color:'var(--ink)', lineHeight:1 }}>Validation de commande</h1>
             </div>
             <div style={{ marginLeft:'auto', display:'flex', alignItems:'center', gap:6 }}>
@@ -1139,138 +1180,49 @@ export default function CheckoutPage() {
                   <span className="card-header-title">Adresse de livraison</span>
                 </div>
                 <div className="card-body">
-                  {/* ✅ NOUVEAU — dès qu'une adresse manuelle est confirmée
-                      (manualLocation posé), le bouton de détection GPS est
-                      masqué : on ne veut plus qu'un clic accidentel relance
-                      le GPS et sème le doute, même si effectiveLocation
-                      privilégie déjà manualLocation à l'enregistrement. Le
-                      GPS est réellement "arrêté" tant que le client n'a pas
-                      cliqué sur "Modifier la position corrigée" ci-dessous. */}
-                  {!manualLocation && (
-                    <button className="location-btn" onClick={detectLocation}>
-                      <div style={{ display:'flex', alignItems:'center', gap:14 }}>
-                        <div className="icon-circle"><Navigation size={16} /></div>
-                        <div style={{ textAlign:'left' }}>
-                          <p style={{ fontSize:14, fontWeight:500, color:'var(--ink)', marginBottom:2 }}>Utiliser ma position GPS</p>
-                          {locationLoading
-                            ? <p style={{ fontSize:12, color:'var(--ink-lt)' }}>Détection en cours…</p>
-                            : location?.city
-                              ? <p style={{ fontSize:12, color:'var(--gold)' }}>{location.city}{location.region ? `, ${location.region}` : ''}</p>
-                              : <p style={{ fontSize:12, color:'var(--ink-lt)' }}>Cliquez pour détecter automatiquement</p>}
+                  {deliveryPoint && !editingDelivery ? (
+                    <div style={{ padding:'12px 16px', background:'rgba(16,185,129,.08)', borderRadius:10, border:'1px solid rgba(16,185,129,.3)' }}>
+                      <div style={{ display:'flex', alignItems:'flex-start', gap:10 }}>
+                        <MapPin size={16} style={{ color:'#059669', flexShrink:0, marginTop:2 }} />
+                        <div style={{ flex:1, minWidth:0 }}>
+                          <p style={{ fontSize:14, fontWeight:600, color:'var(--ink)' }}>{deliveryPoint.address}</p>
+                          <p style={{ fontSize:11.5, color:'var(--ink-lt)', marginTop:2 }}>
+                            {deliveryPoint.source === 'GPS' && typeof deliveryPoint.accuracy === 'number'
+                              ? `Position GPS (±${Math.round(deliveryPoint.accuracy)} m)`
+                              : deliveryPoint.source === 'MAP_SEARCH' ? 'Lieu choisi par la recherche' : 'Point placé sur la carte'}
+                            {deliveryDistanceKm !== null && ` · ~${Math.round(deliveryDistanceKm)} km du vendeur`}
+                          </p>
+                          {deliveryPoint.instructions && (
+                            <p style={{ fontSize:12, color:'var(--ink-md)', marginTop:4 }}>📝 {deliveryPoint.instructions}</p>
+                          )}
                         </div>
+                        <button
+                          type="button"
+                          onClick={() => setEditingDelivery(true)}
+                          style={{ fontSize:12, fontWeight:600, color:'#059669', background:'none', border:'none', cursor:'pointer', flexShrink:0 }}
+                        >
+                          Modifier
+                        </button>
                       </div>
-                      <ChevronRight size={16} style={{ color:'var(--gold)', flexShrink:0 }} />
-                    </button>
-                  )}
-                  {manualLocation?.address ? (
-                    <div style={{ marginTop:12, padding:'12px 16px', background:'rgba(16,185,129,.08)', borderRadius:10, border:'1px solid rgba(16,185,129,.3)', display:'flex', alignItems:'center', gap:8 }}>
-                      <MapPin size={14} style={{ color:'#059669', flexShrink:0 }} />
-                      <span style={{ fontSize:13, color:'var(--ink-md)' }}>
-                        {manualLocation.address} <span style={{ color:'#059669', fontWeight:600 }}>(position corrigée)</span>
-                        <br /><span style={{ fontSize:11, color:'var(--ink-lt)' }}>📍 GPS désactivé — cette adresse sera utilisée telle quelle</span>
-                      </span>
                     </div>
-                  ) : location?.address && (
-                    <div style={{ marginTop:12, padding:'12px 16px', background:'var(--ivory)', borderRadius:10, border:'1px solid var(--border)', display:'flex', alignItems:'center', gap:8 }}>
-                      <MapPin size={14} style={{ color:'var(--gold)', flexShrink:0 }} />
-                      <span style={{ fontSize:13, color:'var(--ink-md)' }}>{location.address}</span>
+                  ) : (
+                    <LocationEditor
+                      initial={deliveryPoint}
+                      withInstructions
+                      helper="Où voulez-vous être livré ? Le livreur ira exactement à ce point."
+                      confirmLabel="Livrer ici"
+                      onCancel={deliveryPoint ? () => setEditingDelivery(false) : undefined}
+                      onConfirm={(rec) => {
+                        setDeliveryPoint(rec);
+                        setEditingDelivery(false);
+                        setDeliveryError('');
+                      }}
+                    />
+                  )}
+                  {deliveryError && (
+                    <div style={{ marginTop:10, display:'flex', alignItems:'flex-start', gap:6, color:'#b45309', fontSize:12 }}>
+                      <AlertCircle size={13} style={{ flexShrink:0, marginTop:1 }} /> {deliveryError}
                     </div>
-                  )}
-                  {/* 🐛 FIX : avant, une position de repli (GPS/IP indisponible)
-                      s'affichait avec le même style qu'une vraie position détectée
-                      — le client n'avait aucun signal fort que le livreur risquait
-                      de ne pas savoir où aller. */}
-                  {/* ✅ NOUVEAU : quand la position n'est pas fiable, le client
-                      peut désormais la corriger lui-même en plaçant un point sur
-                      la carte (spec géoloc, point 5 : marqueur déplaçable), au
-                      lieu de se contenter d'un avertissement passif. Une fois
-                      corrigée (manualLocation posé), ce bloc d'avertissement
-                      disparaît — la position corrigée fait foi. */}
-                  {location?.isDefault && !locationLoading && !manualLocation && (
-                    <div style={{ marginTop:12, padding:'12px 16px', background:'rgba(217,119,6,.08)', borderRadius:10, border:'1px solid rgba(217,119,6,.25)' }}>
-                      <div style={{ display:'flex', alignItems:'flex-start', gap:8 }}>
-                        <AlertCircle size={14} style={{ color:'#b45309', flexShrink:0, marginTop:1 }} />
-                        <span style={{ fontSize:12, color:'#b45309', lineHeight:1.4 }}>Position approximative — le livreur pourrait ne pas trouver l'adresse exacte. Réessayez la détection GPS, ou placez vous-même le point sur la carte ci-dessous.</span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setShowLocationPicker(v => !v)}
-                        style={{ marginTop:10, fontSize:12, fontWeight:600, color:'#b45309', background:'rgba(217,119,6,.12)', border:'1px solid rgba(217,119,6,.35)', borderRadius:8, padding:'7px 12px', cursor:'pointer' }}
-                      >
-                        {showLocationPicker ? 'Masquer la carte' : '📍 Corriger ma position sur la carte'}
-                      </button>
-                    </div>
-                  )}
-                  {/* 🐛 FIX RACINE : ce bouton était auparavant enfermé DANS le bloc
-                      ci-dessus, donc invisible dès que le GPS renvoyait une position
-                      jugée fiable (isDefault:false — ex: Colobane correctement détecté).
-                      Le client n'avait alors aucun moyen d'ouvrir la carte pour livrer
-                      à une autre adresse que sa position actuelle : quoi qu'il tente,
-                      la commande repartait toujours avec la position auto-détectée.
-                      Ce bouton est maintenant TOUJOURS accessible, position fiable ou
-                      non, et pilote le même panneau de correction (recherche + carte). */}
-                  {!locationLoading && !manualLocation && !location?.isDefault && (location?.lat || manualPin) && (
-                    <button
-                      type="button"
-                      onClick={() => setShowLocationPicker(v => !v)}
-                      style={{ marginTop:10, fontSize:12, fontWeight:600, color:'var(--gold-dk, #b8935a)', background:'rgba(201,169,110,.12)', border:'1px solid rgba(201,169,110,.35)', borderRadius:8, padding:'7px 12px', cursor:'pointer' }}
-                    >
-                      {showLocationPicker ? 'Masquer la carte' : '📍 Livrer à une autre adresse'}
-                    </button>
-                  )}
-                  {showLocationPicker && manualPin && !manualLocation && (
-                    <div style={{ marginTop:12 }}>
-                      <div style={{ position:'relative', marginBottom:10 }}>
-                        <input
-                          type="text"
-                          value={placeQuery}
-                          onChange={e => setPlaceQuery(e.target.value)}
-                          placeholder="Rechercher un lieu (ex : Ecobank UCAD, Marché Sandaga…)"
-                          style={{ width:'100%', fontSize:13, padding:'9px 12px', borderRadius:8, border:'1px solid var(--border)', outline:'none' }}
-                        />
-                        {placeSearching && (
-                          <div style={{ position:'absolute', right:10, top:'50%', transform:'translateY(-50%)', width:14, height:14, border:'2px solid #10b981', borderTopColor:'transparent', borderRadius:'50%', animation:'spin 0.8s linear infinite' }} />
-                        )}
-                        {placeResults.length > 0 && (
-                          <div style={{ marginTop:4, background:'#fff', border:'1px solid var(--border)', borderRadius:8, overflow:'hidden', boxShadow:'0 4px 14px rgba(0,0,0,.08)' }}>
-                            {placeResults.map((r, i) => (
-                              <button
-                                key={i}
-                                type="button"
-                                onClick={() => pickSearchedPlace(r)}
-                                style={{ display:'block', width:'100%', textAlign:'left', padding:'9px 12px', fontSize:12, color:'var(--ink-md)', background:'none', border:'none', borderTop: i>0 ? '1px solid var(--border)' : 'none', cursor:'pointer' }}
-                              >
-                                {r.displayName}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                      <p style={{ fontSize:11, color:'var(--ink-lt)', marginBottom:6 }}>Ou déplacez directement le point sur la carte :</p>
-                      <LocationPicker
-                        lat={manualPin.lat}
-                        lng={manualPin.lng}
-                        onChange={(lat, lng) => setManualPin({ lat, lng })}
-                      />
-                      <p style={{ fontSize:11, color:'var(--ink-lt)', marginTop:6 }}>Déplacez le point exactement à l'endroit où vous voulez être livré.</p>
-                      <button
-                        type="button"
-                        onClick={confirmManualLocation}
-                        disabled={manualLocationLoading}
-                        style={{ marginTop:8, width:'100%', fontSize:13, fontWeight:600, color:'#04140d', background:'#10b981', border:'none', borderRadius:8, padding:'10px 12px', cursor: manualLocationLoading ? 'default' : 'pointer', opacity: manualLocationLoading ? 0.7 : 1 }}
-                      >
-                        {manualLocationLoading ? 'Confirmation…' : 'Confirmer cette localisation'}
-                      </button>
-                    </div>
-                  )}
-                  {manualLocation && (
-                    <button
-                      type="button"
-                      onClick={() => { setManualLocation(null); setShowLocationPicker(true); }}
-                      style={{ marginTop:8, fontSize:11, color:'var(--ink-lt)', background:'none', border:'none', textDecoration:'underline', cursor:'pointer', padding:0 }}
-                    >
-                      Modifier la position corrigée
-                    </button>
                   )}
                 </div>
               </div>
@@ -1284,7 +1236,7 @@ export default function CheckoutPage() {
                 </div>
                 <div className="card-body" style={{ display:'flex', flexDirection:'column', gap:10 }}>
                   {[
-                    { icon: <User size={15} />, label:'Nom complet', value: user?.displayName || 'Client AgriMarché' },
+                    { icon: <User size={15} />, label:'Nom complet', value: user?.displayName || 'Client Sunu Mëñëf' },
                     { icon: <Mail size={15} />, label:'Adresse e-mail', value: user?.email || 'Non renseigné' },
                     { icon: <Phone size={15} />, label:'Téléphone', value: (user as any)?.phoneNumber || 'À renseigner' },
                   ].map((row) => (
@@ -1445,7 +1397,9 @@ export default function CheckoutPage() {
             name={guestName} setName={setGuestName}
             error={guestError} submitting={guestSubmitting}
             onContinue={handleGuestContinue}
-            onCancel={() => { setShowGuestModal(false); router.push('/auth/login?redirect=/checkout'); }}
+            onCreateAccount={() => { setShowGuestModal(false); router.push('/auth/register?redirect=/checkout'); }}
+            onLogin={() => { setShowGuestModal(false); router.push('/auth/login?redirect=/checkout'); }}
+            onClose={() => setShowGuestModal(false)}
           />
         </div>
       )}

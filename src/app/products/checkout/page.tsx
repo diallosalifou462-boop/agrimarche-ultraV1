@@ -42,7 +42,7 @@ export default function CheckoutPage() {
 
   const handleSubmit = async () => {
     if (!form.street || !form.city) { setError('Veuillez remplir l\'adresse de livraison.'); return; }
-    if (!user) { router.push('/auth/login?redirect=/checkout'); return; }
+    if (!user) { router.push('/checkout'); return; }
     setLoading(true);
     setError('');
     try {

@@ -761,7 +761,14 @@ export default function CheckoutPage() {
         const firstItem = items[0];
         const orderNumber = isMultiVendor ? `${orderGroupId}-${String.fromCharCode(65 + i)}` : orderGroupId;
         const safeSellerId = groupSellerId || user?.uid || 'agrimarche-official';
-        const safeSellerName = firstItem?.product?.sellerName || firstItem?.product?.farmer || 'AgriMarché';
+        // Nom du vendeur : UNIQUEMENT le vrai nom du vendeur (jamais le nom de
+        // la plateforme). D'abord le nom porté par le produit, sinon le
+        // displayName du compte vendeur (lu plus bas), sinon vide — les écrans
+        // affichent alors 'Vendeur' / '—'.
+        const PLATFORM_NAMES = ['Sunu Mëñëf', 'SunuMëñëf', 'AgriMarché'];
+        const productSellerName = [firstItem?.product?.sellerName, firstItem?.product?.farmer]
+          .find((n): n is string => typeof n === 'string' && !!n.trim() && !PLATFORM_NAMES.includes(n.trim()));
+        let safeSellerName = productSellerName?.trim() || '';
         const safeSellerPhone = firstItem?.product?.sellerPhone || '221779747073';
         const safeSellerRegion = firstItem?.product?.region || 'Dakar';
         let sellerLat = 14.7167; let sellerLng = -17.4677; let sellerAddress = 'Dakar, Sénégal';
@@ -775,6 +782,9 @@ export default function CheckoutPage() {
             const sellerDoc = await getDoc(doc(db, 'users', safeSellerId));
             if (sellerDoc.exists()) {
               const d = sellerDoc.data();
+              if (!safeSellerName && firstItem?.product?.sellerId && typeof d?.displayName === 'string') {
+                safeSellerName = d.displayName.trim();
+              }
               sellerLat = d?.latitude || d?.lat || 14.7167;
               sellerLng = d?.longitude || d?.lng || -17.4677;
               sellerAddress = d?.address || d?.city || 'Dakar, Sénégal';
@@ -819,7 +829,7 @@ export default function CheckoutPage() {
           // faisait, sous un nom qui ne peut entrer en collision avec rien.
           sellerId: safeSellerId, sellerName: safeSellerName,
           sellerPhone: safeSellerPhone, sellerRegion: safeSellerRegion,
-          userId: user.uid, userName: user?.displayName || guestName || 'Client AgriMarché',
+          userId: user.uid, userName: user?.displayName || guestName || 'Client Sunu Mëñëf',
           userEmail: user?.email || '', userPhone: profile?.phone || guestPhone || (user as any)?.phoneNumber || '',
           // 🔐 Sert exclusivement au parcours invité (findGuestOrders) : permet
           // de retrouver cette commande par téléphone sans compte ni SMS. Vide
@@ -944,7 +954,7 @@ export default function CheckoutPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             to: profile.phone,
-            message: `AgriMarché : commande #${label} confirmée. Total ${totalAmount.toLocaleString('fr-FR')} FCFA. Merci de votre confiance !`,
+            message: `Sunu Mëñëf : commande #${label} confirmée. Total ${totalAmount.toLocaleString('fr-FR')} FCFA. Merci de votre confiance !`,
           }),
         }).catch((e) => console.warn('[checkout] SMS confirmation non envoyé:', e));
       }
@@ -1092,7 +1102,7 @@ export default function CheckoutPage() {
               <ArrowLeft size={18} />
             </button>
             <div>
-              <p style={{ fontSize:11, letterSpacing:'0.16em', textTransform:'uppercase', color:'var(--ink-lt)', marginBottom:2 }}>AgriMarché</p>
+              <p style={{ fontSize:11, letterSpacing:'0.16em', textTransform:'uppercase', color:'var(--ink-lt)', marginBottom:2 }}>Sunu Mëñëf</p>
               <h1 className="serif" style={{ fontSize:28, fontWeight:400, color:'var(--ink)', lineHeight:1 }}>Validation de commande</h1>
             </div>
             <div style={{ marginLeft:'auto', display:'flex', alignItems:'center', gap:6 }}>
@@ -1249,7 +1259,7 @@ export default function CheckoutPage() {
                 </div>
                 <div className="card-body" style={{ display:'flex', flexDirection:'column', gap:10 }}>
                   {[
-                    { icon: <User size={15} />, label:'Nom complet', value: user?.displayName || 'Client AgriMarché' },
+                    { icon: <User size={15} />, label:'Nom complet', value: user?.displayName || 'Client Sunu Mëñëf' },
                     { icon: <Mail size={15} />, label:'Adresse e-mail', value: user?.email || 'Non renseigné' },
                     { icon: <Phone size={15} />, label:'Téléphone', value: (user as any)?.phoneNumber || 'À renseigner' },
                   ].map((row) => (

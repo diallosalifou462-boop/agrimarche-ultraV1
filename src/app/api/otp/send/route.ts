@@ -63,7 +63,7 @@ async function sendInfobipSms(
   const infobipBaseUrl = process.env.INFOBIP_BASE_URL;
   const infobipApiKey = process.env.INFOBIP_API_KEY;
   const senderName =
-    process.env.INFOBIP_SENDER || 'AgriMarche';
+    process.env.INFOBIP_SENDER || 'SunuMenef';
   if (!infobipBaseUrl || !infobipApiKey) {
     throw new Error(
       'INFOBIP_BASE_URL ou INFOBIP_API_KEY manquant'
@@ -238,7 +238,7 @@ export async function POST(req: NextRequest) {
     try {
       result = await sendInfobipSms(
         phoneE164,
-        `Votre code AgriMarché : ${code} (valable 5 minutes)`
+        `Votre code Sunu Mëñëf : ${code} (valable 5 minutes)`
       );
     } catch (infobipErr: any) {
       const msg = String(

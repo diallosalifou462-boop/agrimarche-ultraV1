@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import Image from 'next/image';
+import BrandLogo from '@/components/BrandLogo';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import {
@@ -17,6 +17,8 @@ import { detectCarrier } from '@/lib/carrier';
 import { apiUrl } from '@/lib/api-config';
 import { startRegistration, verifyRegistrationCode, completeOrangeRegistration, RegistrationActionError } from '@/lib/registrationActions';
 import { useFCMToken, PENDING_FCM_TOKEN_KEY } from '@/hooks/useFCMToken';
+import PushDiagnosticPanel from '@/components/PushDiagnosticPanel';
+import { pushDiag, maskToken, type ServerPushDiag } from '@/lib/pushDiagnostics';
 
 // ─── Attend que le pont natif Capacitor soit prêt ─────
 // Sur certains démarrages, window.Capacitor s'injecte avec
@@ -84,6 +86,15 @@ function toE164(phone: string): string {
 }
 
 type Step = 'form' | 'otp' | 'success';
+
+// Page où revenir après l'inscription (ex : /checkout quand on crée son
+// compte au moment de commander). Chemins internes uniquement. Le compte est
+// déjà connecté à la fin de l'inscription : inutile de repasser par la connexion.
+function getSafeRedirect(): string {
+  if (typeof window === 'undefined') return '/main/products';
+  const r = new URLSearchParams(window.location.search).get('redirect');
+  return r && r.startsWith('/') && !r.startsWith('//') ? r : '/main/products';
+}
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -171,11 +182,14 @@ export default function RegisterPage() {
   requestPushRef.current = requestPushPermission;
   // Canal réellement utilisé par le serveur, pour l'afficher à l'écran OTP.
   const [otpChannel, setOtpChannel] = useState<'push' | 'sms' | null>(null);
+  // Diagnostic renvoyé par le serveur (voir PushDiagnosticPanel).
+  const [serverPushDiag, setServerPushDiag] = useState<ServerPushDiag | null>(null);
   useEffect(() => {
     let cancelled = false;
     (async () => {
       // Laisse le pont Capacitor s'injecter, sinon on part en branche web.
-      await waitForNativeBridge();
+      const bridge = await waitForNativeBridge();
+      pushDiag('platform', 'info', bridge ? 'Pont Capacitor prêt (app native)' : 'Pas de pont Capacitor (navigateur web)');
       if (cancelled) return;
       const first = await requestPushRef.current().catch(() => null);
       if (first || cancelled) return;
@@ -194,7 +208,7 @@ export default function RegisterPage() {
 
   useEffect(() => {
     if (isClient && user && !authLoading && !registrationInProgressRef.current) {
-      router.push('/');
+      router.push(getSafeRedirect());
     }
   }, [user, authLoading, router, isClient]);
 
@@ -284,6 +298,7 @@ export default function RegisterPage() {
       const carrier = detectCarrier(formData.phone);
       if (carrier === 'free' || carrier === 'expresso') {
         useCustomOtpRef.current = true;
+        pushDiag('carrier', 'info', `Opérateur : ${carrier}`, carrier);
 
         // Le diagnostic réseau détaillé (logOtpAttempt) visait spécifiquement
         // le fetch() brut vers l'ancienne route Vercel /api/otp/send (CORS,
@@ -294,21 +309,47 @@ export default function RegisterPage() {
           // (formulaire rempli très vite, APNs lent sur iOS...), dernière
           // tentative bornée à 5 s avant de se résigner au SMS.
           let pushToken = readPendingPushToken();
-          if (!pushToken) {
+          if (pushToken) {
+            pushDiag('token', 'ok', 'Token trouvé sur l’appareil au moment de l’envoi', maskToken(pushToken));
+          } else {
+            pushDiag('send_token', 'warn', 'Pas de token au moment de l’envoi — dernière tentative (5 s max)…');
             const fresh = await Promise.race([
               requestPushRef.current().catch(() => null),
               new Promise<null>((r) => setTimeout(() => r(null), 5000)),
             ]);
             pushToken = fresh || readPendingPushToken();
           }
+          pushDiag(
+            'send_token',
+            pushToken ? 'ok' : 'error',
+            pushToken ? 'Token envoyé au serveur (registrationStart)' : 'AUCUN token envoyé au serveur → le code partira par SMS',
+            pushToken ? maskToken(pushToken) : undefined,
+          );
           console.log('[Push] Token envoyé à registrationStart :', pushToken ? `${pushToken.slice(0, 12)}…` : 'AUCUN → SMS');
-          const { sessionId: newSessionId, channel } = await startRegistration(phoneE164, pushToken);
+          const { sessionId: newSessionId, channel, pushDiag: srv } = await startRegistration(phoneE164, pushToken);
           setOtpChannel(channel === 'push' ? 'push' : 'sms');
+          if (srv) {
+            setServerPushDiag(srv);
+            pushDiag(
+              'server',
+              srv.pushOk ? 'ok' : srv.pushAttempted ? 'error' : 'warn',
+              srv.pushOk
+                ? 'Serveur : push accepté par Firebase (FCM)'
+                : srv.pushAttempted
+                ? 'Serveur : FCM a REFUSÉ le push → SMS envoyé à la place'
+                : 'Serveur : aucun token reçu → SMS envoyé',
+              srv.errorCode ? `${srv.errorCode}${srv.errorMessage ? ` — ${srv.errorMessage}` : ''}` : undefined,
+            );
+          } else {
+            pushDiag('server', 'warn', `Serveur : canal ${channel} (functions pas encore redéployées, pas de détail)`);
+          }
           setSessionId(newSessionId);
           setStep('otp');
           setResendCooldown(60);
         } catch (err: any) {
           const msg = err instanceof RegistrationActionError ? err.message : "Erreur lors de l'envoi du code";
+          pushDiag('server', 'error', 'registrationStart a échoué', err?.techCode || err?.code || msg);
+          if (err?.details?.pushDiag) setServerPushDiag(err.details.pushDiag);
           setError(msg);
         } finally {
           setLoading(false);
@@ -316,6 +357,7 @@ export default function RegisterPage() {
         return;
       }
       useCustomOtpRef.current = false;
+      pushDiag('carrier', 'warn', `Opérateur : ${carrier} → Firebase Phone Auth (SMS Google, pas de push)`, carrier);
 
       // ─── Vérif préalable (Orange) ────────────────────────────────
       // Aucun envoi de SMS, aucun coût : bloque une réinscription sur un
@@ -488,7 +530,7 @@ export default function RegisterPage() {
     // explicite (/auth/login), plus besoin que le useEffect générique
     // s'en charge.
     registrationInProgressRef.current = false;
-    setTimeout(() => router.push('/auth/login'), 2500);
+    setTimeout(() => router.push(getSafeRedirect()), 2500);
   };
 
   // ─── Vérification OTP + création compte ───────────────
@@ -520,7 +562,7 @@ export default function RegisterPage() {
           await signInWithCustomToken(auth, customToken);
           suppressAutoProfileRef.current = false;
           setStep('success');
-          setTimeout(() => router.push('/auth/login'), 2500);
+          setTimeout(() => router.push(getSafeRedirect()), 2500);
         } catch (err: any) {
           setError(err instanceof RegistrationActionError ? err.message : 'Code incorrect');
         } finally {
@@ -580,9 +622,14 @@ export default function RegisterPage() {
   // ═══════════════════════════════════════════════════════
   // ÉCRAN OTP
   // ═══════════════════════════════════════════════════════
+  const pushPanel = (
+    <PushDiagnosticPanel serverDiag={serverPushDiag} onRetryToken={() => { setServerPushDiag(null); requestPushRef.current(); }} />
+  );
+
   if (step === 'otp') {
     return (
       <div className="min-h-screen bg-gradient-to-br from-green-50 via-white to-emerald-50 flex items-center justify-center p-4">
+        {pushPanel}
         <div id="recaptcha-container" />
         <div className="w-full max-w-md">
           <div className="bg-white rounded-2xl shadow-xl p-8">
@@ -663,6 +710,7 @@ export default function RegisterPage() {
   if (step === 'success') {
     return (
       <div className="min-h-screen bg-gradient-to-br from-green-50 via-white to-emerald-50 flex items-center justify-center p-4">
+        {pushPanel}
         <div className="bg-white rounded-2xl shadow-xl p-8 w-full max-w-md text-center">
           <div className="inline-flex items-center justify-center w-20 h-20 bg-green-100 rounded-full mb-4">
             <CheckCircle size={40} className="text-green-600" />
@@ -679,6 +727,7 @@ export default function RegisterPage() {
   // ═══════════════════════════════════════════════════════
   return (
     <div className="min-h-screen bg-gradient-to-br from-green-50 via-white to-emerald-50 flex items-center justify-center p-4">
+      {pushPanel}
       <div id="recaptcha-container" />
       <div className="w-full max-w-md">
         <div className="bg-white rounded-2xl shadow-xl p-8">
@@ -686,10 +735,10 @@ export default function RegisterPage() {
           {/* HEADER */}
           <div className="text-center mb-6">
             <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-white shadow-lg ring-4 ring-green-100 mb-4 overflow-hidden">
-              <Image src="/logo.png" alt="SunuMëñëf" width={80} height={80} className="w-full h-full object-cover rounded-full" />
+              <BrandLogo size={80} variant="full" className="w-full h-full rounded-full" />
             </div>
             <h2 className="text-2xl font-bold text-gray-800">Inscription</h2>
-            <p className="text-gray-500 text-sm mt-1">Créez votre compte SunuMëñëf</p>
+            <p className="text-gray-500 text-sm mt-1">Créez votre compte Sunu Mëñëf</p>
           </div>
 
           {/* SMS badge */}
@@ -856,7 +905,7 @@ export default function RegisterPage() {
 
           <p className="text-center text-sm text-gray-600 mt-6">
             Déjà un compte ?{' '}
-            <Link href="/auth/login" className="text-green-600 font-semibold hover:text-green-700">Se connecter</Link>
+            <Link href={`/auth/login?redirect=${encodeURIComponent(getSafeRedirect())}`} className="text-green-600 font-semibold hover:text-green-700">Se connecter</Link>
           </p>
 
           <div className="mt-6 pt-4 border-t border-gray-100 flex justify-center gap-4 text-xs text-gray-400">

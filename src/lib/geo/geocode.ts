@@ -8,7 +8,7 @@
  *
  * ⚠️ Nominatim impose une politique d'usage raisonnable (≈1 req/s, User-Agent
  * identifiable, pas de gros volume). Cette implémentation convient pour du
- * développement et un usage modéré ; si AgriMarché grandit, prévoir de faire
+ * développement et un usage modéré ; si Sunu Mëñëf grandit, prévoir de faire
  * transiter ces appels par un petit endpoint backend (cache + throttling),
  * comme évoqué dans src/lib/geo/types.ts — l'interface publique ci-dessous
  * ne changerait pas, seule l'implémentation basculerait vers ce endpoint.
@@ -21,7 +21,7 @@ import type { GeocodeResult, ReverseGeocodeResult } from './types';
 
 const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
 
-// Limité au Sénégal par défaut — pertinent pour AgriMarché, évite des
+// Limité au Sénégal par défaut — pertinent pour Sunu Mëñëf, évite des
 // résultats hors zone sur des noms de lieux ambigus. `countryCode: null`
 // permet de désactiver ce filtre si besoin (recherche internationale).
 const DEFAULT_COUNTRY_CODES = 'sn';

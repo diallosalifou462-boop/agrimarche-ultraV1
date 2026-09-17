@@ -9,17 +9,15 @@ import {
   Store, Truck, CheckCircle, AlertCircle, Sun, Moon, Pencil, X,
 } from 'lucide-react';
 import { auth, db } from '@/lib/firebase/firebase';
-import { getCurrentPosition } from '@/lib/geolocation';
 import { onAuthStateChanged } from 'firebase/auth';
 // ✅ NOUVEAU — permet au vendeur de saisir/corriger lui-même sa position
 // (recherche de lieu + carte), au lieu de dépendre uniquement du GPS
 // automatique. Mêmes briques que checkout/page.tsx côté client, pour rester
 // cohérent (même fournisseur, même UX de correction).
-import { searchPlaces, reverseGeocode } from '@/lib/geo/geocode';
-import { computeGeohash } from '@/lib/geo/geohash';
 import { isPlausibleSenegalCoordinate } from '@/lib/geo/distance';
-import type { GeocodeResult } from '@/lib/geo/types';
-import LocationPicker from '@/components/LocationPicker';
+import LocationEditor from '@/components/LocationEditor';
+import { saveSellerShopLocation, readSellerShopLocation } from '@/lib/geo/userLocation';
+import { toMillis, type LocationRecord } from '@/lib/geo/quality';
 import {
   collection,
   query,
@@ -78,7 +76,7 @@ function normalizeStatus(raw: string): string {
   const normalized = LEGACY_STATUS[raw] ?? raw;
   // 🔍 LOG : affiche dans la console si un statut inconnu est détecté
   if (!['en_attente','en_preparation','en_livraison','livre','annule'].includes(normalized)) {
-    console.warn(`[AgriMarché] ⚠️ Statut inconnu après normalisation : "${raw}" → "${normalized}". Ajouter ce cas dans LEGACY_STATUS.`);
+    console.warn(`[Sunu Mëñëf] ⚠️ Statut inconnu après normalisation : "${raw}" → "${normalized}". Ajouter ce cas dans LEGACY_STATUS.`);
   }
   return normalized;
 }
@@ -116,73 +114,19 @@ export default function SellerDashboard() {
     pendingCount: 0,
   });
   const [darkMode, setDarkMode] = useState(false);
-  // ✅ NOUVEAU — saisie manuelle de la localisation boutique.
+  // Point de retrait du vendeur : modifié UNIQUEMENT par lui, jamais
+  // réécrit en silence par le GPS à l'ouverture du tableau de bord (ce qui
+  // déplaçait la boutique là où le vendeur se trouvait ce jour-là).
   const [sellerUid, setSellerUid] = useState<string | null>(null);
   const [showLocationEditor, setShowLocationEditor] = useState(false);
-  const [manualPin, setManualPin] = useState<{ lat: number; lng: number } | null>(null);
-  const [placeQuery, setPlaceQuery] = useState('');
-  const [placeResults, setPlaceResults] = useState<GeocodeResult[]>([]);
-  const [placeSearching, setPlaceSearching] = useState(false);
-  const [savingLocation, setSavingLocation] = useState(false);
-  // ✅ NOUVEAU — provenance et fraîcheur de la position, pour afficher un
-  // signal de confiance (voir badge dans le rendu) plutôt que de traiter
-  // toute position connue comme également fiable.
-  const [sellerLocationSource, setSellerLocationSource] = useState<string | null>(null);
-  const [sellerLocationUpdatedAt, setSellerLocationUpdatedAt] = useState<string | null>(null);
+  const [shopLocation, setShopLocation] = useState<(LocationRecord & { updatedAtRaw?: unknown }) | null>(null);
 
-  useEffect(() => {
-    const q = placeQuery.trim();
-    if (q.length < 3) { setPlaceResults([]); return; }
-    setPlaceSearching(true);
-    const t = setTimeout(() => {
-      searchPlaces(q, 5).then(setPlaceResults).finally(() => setPlaceSearching(false));
-    }, 300);
-    return () => clearTimeout(t);
-  }, [placeQuery]);
-
-  const pickSearchedPlace = (r: GeocodeResult) => {
-    setManualPin({ lat: r.latitude, lng: r.longitude });
-    setPlaceQuery('');
-    setPlaceResults([]);
-  };
-
-  const saveManualLocation = async () => {
-    if (!sellerUid || !manualPin) return;
-    setSavingLocation(true);
-    try {
-      const geocoded = await reverseGeocode(manualPin.lat, manualPin.lng);
-      const address =
-        [geocoded?.neighborhood, geocoded?.city].filter(Boolean).join(', ') ||
-        `${manualPin.lat.toFixed(5)}, ${manualPin.lng.toFixed(5)}`;
-
-      // 🔗 FIX RACINE : ces trois champs (lat/lng/locationAddress) sont
-      // exactement ceux que app/admin/page.tsx lit pour chaque utilisateur
-      // (isValidCoordinate(user.lat, user.lng), user.locationAddress) —
-      // voir l'interface UserProfile là-bas. Le code précédent écrivait
-      // `latitude`/`longitude` (aucun champ `locationAddress` du tout), des
-      // noms que l'admin ne lit jamais : la position du vendeur pouvait donc
-      // être enregistrée avec succès sans JAMAIS apparaître dans l'onglet
-      // Utilisateurs. `locationSource: 'MANUAL_PIN'` reprend la valeur déjà
-      // utilisée par seller/register.tsx pour une saisie manuelle, afin de
-      // rester cohérent dans toute l'app.
-      await setDoc(doc(db, 'users', sellerUid), {
-        lat: manualPin.lat,
-        lng: manualPin.lng,
-        geohash: computeGeohash(manualPin.lat, manualPin.lng),
-        locationAddress: address,
-        locationSource: 'MANUAL_PIN',
-        locationUpdatedAt: new Date().toISOString(),
-      }, { merge: true });
-
-      setSellerLocation(address);
-      setSellerLocationSource('MANUAL_PIN');
-      setSellerLocationUpdatedAt(new Date().toISOString());
-      setShowLocationEditor(false);
-    } catch (err) {
-      console.error('Erreur enregistrement position boutique:', err);
-    } finally {
-      setSavingLocation(false);
-    }
+  const saveShopLocation = async (rec: LocationRecord) => {
+    if (!sellerUid) return;
+    await saveSellerShopLocation(sellerUid, rec);
+    setShopLocation({ ...rec, updatedAtRaw: Date.now() });
+    setSellerLocation(rec.address);
+    setShowLocationEditor(false);
   };
 
   useEffect(() => {
@@ -226,16 +170,10 @@ export default function SellerDashboard() {
       const profileExists = !!(data?.displayName?.trim() && data?.phone?.trim() && data?.region?.trim());
       setHasProfile(profileExists);
 
-      // Pré-remplit le point de départ de la carte de correction avec la
-      // position déjà connue du vendeur (saisie manuelle antérieure ou GPS),
-      // pour que "Modifier" ouvre directement sur son quartier au lieu de
-      // repartir de zéro.
-      if (data?.lat && data?.lng) {
-        setManualPin({ lat: data.lat, lng: data.lng });
-        if (data?.locationAddress) setSellerLocation(data.locationAddress);
-        if (data?.locationSource) setSellerLocationSource(data.locationSource);
-        if (data?.locationUpdatedAt) setSellerLocationUpdatedAt(data.locationUpdatedAt);
-      }
+      const shop = readSellerShopLocation(data);
+      setShopLocation(shop);
+      setSellerLocation(shop?.address || '');
+      if (!shop && profileExists) setShowLocationEditor(true);
 
       if (profileExists) {
         // ── Produits (temps réel) ────────────────────────────────────────────
@@ -303,7 +241,7 @@ export default function SellerDashboard() {
             const raw = d.data().status || 'en_attente';
             const normalized = normalizeStatus(raw);
             // 🔍 LOG : visible dans F12 → Console, pour identifier les statuts bruts reçus de Firestore
-            console.log(`[AgriMarché] Order ${d.id.slice(-6)} | raw="${raw}" → normalized="${normalized}" | amount=${d.data().total || d.data().amount || 0}`);
+            console.log(`[Sunu Mëñëf] Order ${d.id.slice(-6)} | raw="${raw}" → normalized="${normalized}" | amount=${d.data().total || d.data().amount || 0}`);
             return {
               id:           d.id,
               customerName: d.data().userName || 'Client',
@@ -321,7 +259,7 @@ export default function SellerDashboard() {
           const pendingCount    = ordersData.filter(o => ['en_attente', 'en_preparation'].includes(o.status)).length;
 
           // 🔍 LOG : résumé des stats pour déboguer les compteurs
-          console.log(`[AgriMarché] Dashboard stats | total=${ordersData.length} | livrées=${deliveredOrders.length} | CA=${totalRevenue} | en_attente=${pendingCount} | annulées=${ordersData.filter(o=>o.status==='annule').length}`);
+          console.log(`[Sunu Mëñëf] Dashboard stats | total=${ordersData.length} | livrées=${deliveredOrders.length} | CA=${totalRevenue} | en_attente=${pendingCount} | annulées=${ordersData.filter(o=>o.status==='annule').length}`);
 
           setStats(prev => ({
             ...prev,
@@ -336,45 +274,6 @@ export default function SellerDashboard() {
         setLoading(false);
       }
 
-      // Géolocalisation — natif (@capacitor/geolocation) ou web selon la
-      // plateforme, voir src/lib/geolocation.ts. Sur Android ce bloc ne
-      // s'exécutait jamais (permissions manifest absentes jusqu'ici).
-      // 🐛 FIX : si le vendeur a déjà renseigné sa position À LA MAIN
-      // (locationSource:'MANUAL_PIN'), on ne l'écrase plus silencieusement
-      // avec le prochain relevé GPS auto — sinon une correction manuelle
-      // pouvait redisparaître au chargement suivant du dashboard.
-      if (data?.locationSource !== 'MANUAL_PIN') {
-        getCurrentPosition({ enableHighAccuracy: true, timeout: 10000 })
-          .then(async (pos) => {
-            // 🐛 FIX géoloc vendeur : cette position ne servait jusqu'ici qu'à
-            // l'affichage du message de bienvenue (setSellerLocation ci-dessous)
-            // et n'était enregistrée que sous `latitude`/`longitude` — des
-            // champs que app/admin/page.tsx ne lit jamais (il lit `lat`/`lng`
-            // + `locationAddress`, voir interface UserProfile là-bas). Résultat
-            // concret : la position semblait "enregistrée" côté vendeur mais
-            // n'apparaissait JAMAIS dans l'onglet Utilisateurs de l'admin, et
-            // checkout/page.tsx retombait sur le point par défaut (Dakar,
-            // 14.7167/-17.4677) faute de champ `lat`/`lng` exploitable.
-            const city = await reverseGeocode(pos.coords.latitude, pos.coords.longitude)
-              .then(g => g?.city || 'Dakar')
-              .catch(() => 'Dakar');
-
-            setDoc(doc(db, 'users', user.uid), {
-              lat: pos.coords.latitude,
-              lng: pos.coords.longitude,
-              geohash: computeGeohash(pos.coords.latitude, pos.coords.longitude),
-              locationAddress: city,
-              locationSource: 'GPS',
-              locationUpdatedAt: new Date().toISOString(),
-            }, { merge: true }).catch((err) => console.error('Maj position vendeur:', err));
-
-            setManualPin({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-            setSellerLocation(city);
-            setSellerLocationSource('GPS');
-            setSellerLocationUpdatedAt(new Date().toISOString());
-          })
-          .catch(() => { if (!data?.locationAddress) setSellerLocation('📍 Position non détectée'); });
-      }
     });
 
     const updateTime = () => {
@@ -495,9 +394,9 @@ export default function SellerDashboard() {
               <Compass size={15} className="text-white" />
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-[9px] text-emerald-600 dark:text-emerald-400 font-bold uppercase tracking-wider">📍 Votre boutique</p>
+              <p className="text-[9px] text-emerald-600 dark:text-emerald-400 font-bold uppercase tracking-wider">📍 Point de retrait</p>
               <p className="text-sm text-gray-700 dark:text-gray-300 font-medium truncate">
-                {sellerLocation || 'Position non renseignée'}
+                {sellerLocation || 'Point de retrait non renseigné'}
               </p>
               {/* ✅ NOUVEAU — signal de confiance : une position saisie/
                   corrigée à la main par le vendeur est plus fiable qu'une
@@ -507,24 +406,23 @@ export default function SellerDashboard() {
                   de voyage…) — mieux vaut le signaler tout de suite au
                   vendeur que le laisser découvrir le problème via un
                   livreur perdu. */}
-              {manualPin && (() => {
-                const implausible = !isPlausibleSenegalCoordinate(manualPin.lat, manualPin.lng);
-                const stale = sellerLocationSource === 'GPS' && sellerLocationUpdatedAt &&
-                  (Date.now() - new Date(sellerLocationUpdatedAt).getTime()) > 90 * 24 * 3600 * 1000;
+              {shopLocation ? (() => {
+                const implausible = !isPlausibleSenegalCoordinate(shopLocation.lat, shopLocation.lng);
+                const updatedMs = toMillis(shopLocation.updatedAtRaw);
+                const stale = shopLocation.source === 'GPS' && updatedMs !== null && Date.now() - updatedMs > 180 * 24 * 3600 * 1000;
                 if (implausible) {
-                  return <p className="text-[10px] text-rose-500 font-semibold mt-0.5">⚠️ Position hors du Sénégal — à vérifier</p>;
-                }
-                if (sellerLocationSource === 'MANUAL_PIN') {
-                  return <p className="text-[10px] text-emerald-500 font-semibold mt-0.5">✏️ Confirmée par vous</p>;
+                  return <p className="text-[10px] text-rose-500 font-semibold mt-0.5">⚠️ Position hors du Sénégal — à corriger</p>;
                 }
                 if (stale) {
-                  return <p className="text-[10px] text-amber-500 font-semibold mt-0.5">📡 GPS non revérifié depuis longtemps</p>;
+                  return <p className="text-[10px] text-amber-500 font-semibold mt-0.5">📡 Point non revérifié depuis plus de 6 mois</p>;
                 }
-                if (sellerLocationSource === 'GPS') {
-                  return <p className="text-[10px] text-gray-400 mt-0.5">📡 Détection GPS automatique</p>;
+                if (shopLocation.source === 'GPS' && typeof shopLocation.accuracy === 'number' && shopLocation.accuracy > 100) {
+                  return <p className="text-[10px] text-amber-500 font-semibold mt-0.5">📡 GPS approximatif (±{Math.round(shopLocation.accuracy)} m) — vérifiez le point</p>;
                 }
-                return null;
-              })()}
+                return <p className="text-[10px] text-emerald-500 font-semibold mt-0.5">✅ Point de retrait confirmé</p>;
+              })() : (
+                <p className="text-[10px] text-rose-500 font-semibold mt-0.5">⚠️ Sans point de retrait, les livreurs ne peuvent pas vous trouver</p>
+              )}
             </div>
             <button
               type="button"
@@ -536,52 +434,15 @@ export default function SellerDashboard() {
             </button>
           </div>
 
-          {showLocationEditor && (
+          {showLocationEditor && sellerUid && (
             <div className="mt-3 pt-3 border-t border-gray-100 dark:border-gray-700">
-              <div className="relative mb-2">
-                <input
-                  type="text"
-                  value={placeQuery}
-                  onChange={e => setPlaceQuery(e.target.value)}
-                  placeholder="Rechercher votre adresse (ex : Marché Sandaga, Parcelles Assainies…)"
-                  className="w-full text-sm px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-600 dark:bg-gray-900 dark:text-white outline-none focus:border-emerald-400"
-                />
-                {placeSearching && (
-                  <div className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
-                )}
-                {placeResults.length > 0 && (
-                  <div className="mt-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden shadow-lg">
-                    {placeResults.map((r, i) => (
-                      <button
-                        key={i}
-                        type="button"
-                        onClick={() => pickSearchedPlace(r)}
-                        className="block w-full text-left px-3 py-2 text-xs text-gray-700 dark:text-gray-200 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 border-t border-gray-100 dark:border-gray-700 first:border-t-0"
-                      >
-                        {r.displayName}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-              {manualPin && (
-                <>
-                  <p className="text-[11px] text-gray-500 dark:text-gray-400 mb-1.5">Ou déplacez directement le point sur la carte :</p>
-                  <LocationPicker
-                    lat={manualPin.lat}
-                    lng={manualPin.lng}
-                    onChange={(lat, lng) => setManualPin({ lat, lng })}
-                  />
-                </>
-              )}
-              <button
-                type="button"
-                onClick={saveManualLocation}
-                disabled={!manualPin || savingLocation}
-                className="mt-2 w-full text-sm font-semibold text-white bg-emerald-500 hover:bg-emerald-600 disabled:opacity-60 rounded-lg py-2.5 transition"
-              >
-                {savingLocation ? 'Enregistrement…' : 'Enregistrer cette position'}
-              </button>
+              <LocationEditor
+                initial={shopLocation}
+                helper="Votre point de retrait : là où le livreur vient chercher vos commandes. Il est recopié automatiquement sur tous vos produits et vos commandes pas encore récupérées."
+                confirmLabel="Enregistrer ce point de retrait"
+                onCancel={shopLocation ? () => setShowLocationEditor(false) : undefined}
+                onConfirm={saveShopLocation}
+              />
             </div>
           )}
         </div>

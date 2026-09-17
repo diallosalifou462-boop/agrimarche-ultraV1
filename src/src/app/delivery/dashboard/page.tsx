@@ -351,9 +351,9 @@ function OrderCard({ order, onMarkDelivered, onMarkArrived, onRelease, currentLo
   // ✅ NOUVEAU — signalement rapide. Écrit dateProbleme + noteProbleme (même
   // champs que le panneau "Dates suivi", donc rien de nouveau côté
   // Firestore/règles/admin) dans 'orders' ET 'seller_orders' pour que le
-  // vendeur et AgriMarché voient immédiatement le blocage, avec le même
+  // vendeur et Sunu Mëñëf voient immédiatement le blocage, avec le même
   // motif choisi affiché dans la note. Ne touche jamais `status` : une
-  // livraison signalée reste "en cours" tant qu'AgriMarché ou le livreur ne
+  // livraison signalée reste "en cours" tant que Sunu Mëñëf ou le livreur ne
   // la referme pas explicitement — pas de fermeture forcée depuis ce bouton.
   const reportProblem = async () => {
     if (!problemReason) return;
@@ -728,7 +728,7 @@ function btnStyleBtn(bg: string, color: string): React.CSSProperties {
 // ✅ NOUVEAU — remplace le window.confirm() aveugle de markAsDelivered.
 // Le livreur ne voit JAMAIS le code : il saisit ici exactement ce que le
 // CLIENT vient de lui dicter à voix haute, après avoir ouvert lui-même
-// AgriMarché. Le serveur (confirmDeliveryWithCode) tranche.
+// Sunu Mëñëf. Le serveur (confirmDeliveryWithCode) tranche.
 
 function DeliveryCodeModal({
   orderId, orderNumber, onClose, onSubmit,
@@ -775,7 +775,7 @@ function DeliveryCodeModal({
           </button>
         </div>
         <p style={{ color: '#64748b', fontSize: '13px', lineHeight: 1.5, margin: '8px 0 18px' }}>
-          Demandez au client d'ouvrir AgriMarché{orderNumber ? ` (commande #${orderNumber})` : ''} et de vous
+          Demandez au client d'ouvrir Sunu Mëñëf{orderNumber ? ` (commande #${orderNumber})` : ''} et de vous
           communiquer le code affiché dans sa commande. Vous seul ne pouvez pas le connaître.
         </p>
         <input
@@ -1261,7 +1261,7 @@ export default function DeliveryDashboard() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             to: order.userPhone,
-            message: `AgriMarché : votre commande #${order.orderNumber || orderId.slice(-6).toUpperCase()} vient d'être livrée. Bon appétit !`,
+            message: `Sunu Mëñëf : votre commande #${order.orderNumber || orderId.slice(-6).toUpperCase()} vient d'être livrée. Bon appétit !`,
           }),
         }).catch((e) => console.warn('[delivery] SMS confirmation non envoyé:', e));
       }

@@ -2,7 +2,7 @@
 //
 // Paire typographique dédiée à l'écran de connexion / mot de passe oublié
 // — distincte du reste de l'app (qui reste en sans-serif système) pour
-// donner à la "porte d'entrée" d'AgriMarché une identité propre : un
+// donner à la "porte d'entrée" de Sunu Mëñëf une identité propre : un
 // serif chaleureux pour les titres (registre "carnet de marché", pas
 // SaaS générique), un grotesque discret pour tout le reste.
 import { Fraunces, Work_Sans } from 'next/font/google';

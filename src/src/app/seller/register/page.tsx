@@ -252,7 +252,7 @@ export default function SellerRegisterPage() {
             {isEditing ? 'Mon profil vendeur' : 'Devenir vendeur'}
           </h1>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-            {isEditing ? 'Modifiez vos informations' : 'Rejoignez AgriMarché'}
+            {isEditing ? 'Modifiez vos informations' : 'Rejoignez Sunu Mëñëf'}
           </p>
         </div>
 
@@ -397,7 +397,7 @@ export default function SellerRegisterPage() {
               className="mt-1 w-4 h-4 accent-emerald-600 shrink-0"
             />
             <label htmlFor="acceptedTerms" className="text-xs text-gray-600 dark:text-gray-400 leading-relaxed">
-              J'accepte les conditions de vente d'AgriMarché, notamment l'application
+              J'accepte les conditions de vente de Sunu Mëñëf, notamment l'application
               d'une commission de X % sur les ventes réalisées via la plateforme.
             </label>
           </div>

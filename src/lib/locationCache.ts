@@ -32,6 +32,8 @@ export interface CachedUserLocation {
   /** true = position de repli (IP/défaut Dakar), jamais aussi fiable qu'un vrai fix GPS. */
   isDefault?: boolean;
   /** Horodatage de mise en cache — c'est ce champ qui permet l'expiration. */
+  /** Adresse enregistrée/confirmée par l'utilisateur : ne périme pas comme un point GPS. */
+  pinned?: boolean;
   cachedAt: number;
 }
 
@@ -40,6 +42,7 @@ export function getFreshCachedLocation(): CachedUserLocation | null {
   const parsed = readRaw();
   if (!parsed) return null;
   if (parsed.isDefault) return null;
+  if (parsed.pinned) return parsed;
   if (Date.now() - parsed.cachedAt > LOCATION_STALE_MS) return null;
   return parsed;
 }
@@ -54,14 +57,20 @@ export function getAnyCachedLocation(): CachedUserLocation | null {
   return readRaw();
 }
 
-export function isLocationStale(loc: Pick<CachedUserLocation, 'cachedAt' | 'isDefault'> | null): boolean {
+export function isLocationStale(loc: (Pick<CachedUserLocation, 'cachedAt' | 'isDefault'> & { pinned?: boolean }) | null): boolean {
   if (!loc) return true;
   if (loc.isDefault) return true;
+  if (loc.pinned) return false;
   return Date.now() - loc.cachedAt > LOCATION_STALE_MS;
 }
 
 export function setCachedLocation(loc: Omit<CachedUserLocation, 'cachedAt'>): void {
   try {
+    // Une adresse CONFIRMÉE par l'utilisateur (pinned) n'est jamais remplacée
+    // par un relevé automatique (GPS d'une fiche produit, etc.) : seule une
+    // nouvelle adresse confirmée peut la remplacer.
+    const existing = readRaw();
+    if (existing?.pinned && !loc.pinned) return;
     const withTimestamp: CachedUserLocation = { ...loc, cachedAt: Date.now() };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(withTimestamp));
   } catch {

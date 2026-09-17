@@ -50,7 +50,7 @@ export default function ReviewForm({ sellerId, sellerName, onReviewSubmitted }: 
 
     // Validation 1 : Utilisateur connecté
     if (!user) {
-      setError('Veuillez vous connecter pour laisser un avis');
+      setError('Créez votre compte pour laisser un avis');
       return;
     }
 
@@ -157,7 +157,7 @@ export default function ReviewForm({ sellerId, sellerName, onReviewSubmitted }: 
       {/* Message si non connecté */}
       {!user && (
         <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-xl text-yellow-700 text-sm">
-          🔒 Connectez-vous pour laisser un avis
+          🔒 Créez votre compte pour laisser un avis
         </div>
       )}
 
@@ -195,7 +195,7 @@ export default function ReviewForm({ sellerId, sellerName, onReviewSubmitted }: 
           disabled={!user || hasReviewed}
           placeholder={
             !user 
-              ? 'Connectez-vous pour laisser un avis...'
+              ? 'Créez votre compte pour laisser un avis...'
               : hasReviewed
               ? 'Vous avez déjà donné votre avis'
               : 'Partagez votre expérience avec ce vendeur...'
@@ -246,7 +246,7 @@ export default function ReviewForm({ sellerId, sellerName, onReviewSubmitted }: 
         {isSubmitting 
           ? 'Envoi en cours...' 
           : !user 
-          ? '🔒 Connectez-vous'
+          ? '🔒 Créer un compte'
           : hasReviewed 
           ? '✅ Déjà noté'
           : '📝 Publier l\'avis'}

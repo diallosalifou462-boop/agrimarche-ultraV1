@@ -18,6 +18,8 @@ interface Notification {
   read: boolean;
   createdAt: Date;
   link?: string;
+  /** Miniature (ex: photo du produit pour "nouveau produit") — optionnelle */
+  image?: string;
 }
 
 interface NotificationContextType {
@@ -145,6 +147,10 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   // Écouter les messages en temps réel
   useEffect(() => {
     const unsubscribe = onMessageReceived((payload) => {
+      // Signal lu par PushDiagnosticPanel (web) pour confirmer la réception.
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('agrimarche:push-received', { detail: payload }));
+      }
       const newNotification: Notification = {
         id: Date.now().toString(),
         title: payload.notification?.title || 'Notification',
@@ -164,7 +170,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
         window.Notification.permission === 'granted'
       ) {
         try {
-          new window.Notification(payload.notification?.title || 'AgriMarché', {
+          new window.Notification(payload.notification?.title || 'SunuMëñëf', {
             body: payload.notification?.body,
             icon: '/logo.png',
           });

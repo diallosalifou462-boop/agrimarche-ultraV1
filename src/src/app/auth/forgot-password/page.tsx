@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, FormEvent } from 'react';
 import Link from 'next/link';
+import BrandLogo from '@/components/BrandLogo';
 import { useAuth } from '@/hooks/useAuth';
 import {
   RecaptchaVerifier,
@@ -363,7 +364,7 @@ export default function ForgotPasswordPage() {
       <div id="recaptcha-container" />
       <div className={cardClass}>
         <div className="text-center mb-8">
-          <span className="text-5xl">🔑</span>
+          <BrandLogo size={88} className="mx-auto" />
           <h1 className="text-2xl font-bold text-gray-900 mt-3">Mot de passe oublié</h1>
           <p className="text-gray-500 text-sm mt-1">Entrez votre numéro pour recevoir un SMS</p>
         </div>

@@ -21,10 +21,12 @@ const functions = getFunctions(app, 'us-central1'); // même région que functio
 export class RegistrationActionError extends Error {
   code: string; // code Firebase (ex: 'functions/already-exists')
   techCode?: string; // code technique renvoyé par le serveur (ex: 'PHONE_ALREADY_USED')
-  constructor(message: string, code: string, techCode?: string) {
+  details?: any; // HttpsError.details (ex: pushDiag, lu par PushDiagnosticPanel)
+  constructor(message: string, code: string, techCode?: string, details?: any) {
     super(message);
     this.code = code;
     this.techCode = techCode;
+    this.details = details;
   }
 }
 
@@ -37,6 +39,7 @@ function toActionError(e: any): RegistrationActionError {
     localized || 'Une erreur est survenue. Réessaie.',
     e?.code || 'functions/internal',
     e?.message,
+    e?.details,
   );
 }
 
@@ -53,7 +56,9 @@ export interface RegistrationProfile {
 
 interface StartResponse {
   sessionId: string;
-  channel: 'push' | 'sms';
+  channel: 'push' | 'sms' | 'sms_infobip';
+  // Détail du push côté serveur, lu par PushDiagnosticPanel.
+  pushDiag?: import('@/lib/pushDiagnostics').ServerPushDiag;
   maxAttempts: number;
   otpTtlSeconds: number;
 }
@@ -160,10 +165,26 @@ export async function loginVerifyOtp(sessionId: string, code: string): Promise<{
 // Réinitialisation : logique INVERSE de startRegistration — un numéro
 // qui n'appartient à aucun compte est refusé (ACCOUNT_NOT_FOUND) plutôt
 // qu'accepté.
-export async function resetPasswordSendOtp(phone: string): Promise<OtpSessionResponse> {
-  const fn = httpsCallable<{ phone: string }, OtpSessionResponse>(functions, 'resetPasswordSendOtp');
+// Le code part par notification push d'abord (appareil déjà connu du
+// compte), puis par SMS Infobip en secours. `forceSms` : l'utilisateur
+// n'a pas reçu la notification et redemande explicitement un SMS.
+export interface ResetOtpSessionResponse extends OtpSessionResponse {
+  channel?: 'push' | 'sms_infobip';
+}
+
+export async function resetPasswordSendOtp(
+  phone: string,
+  opts: { pushToken?: string; forceSms?: boolean } = {},
+): Promise<ResetOtpSessionResponse> {
+  const fn = httpsCallable<{ phone: string; pushToken?: string; forceSms?: boolean }, ResetOtpSessionResponse>(
+    functions,
+    'resetPasswordSendOtp',
+  );
+  const payload: { phone: string; pushToken?: string; forceSms?: boolean } = { phone };
+  if (opts.pushToken) payload.pushToken = opts.pushToken;
+  if (opts.forceSms) payload.forceSms = true;
   try {
-    const res = await callWithRetry(() => fn({ phone }));
+    const res = await callWithRetry(() => fn(payload));
     return res.data;
   } catch (e) {
     throw toActionError(e);

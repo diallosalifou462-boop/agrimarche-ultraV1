@@ -27,6 +27,7 @@ import {
   doc,
   getDoc,
   setDoc,
+  serverTimestamp,
 } from 'firebase/firestore';
 
 import { db, waitForFirestoreReady, trace } from '@/lib/firebase/firebase';
@@ -131,6 +132,14 @@ function validateItems(raw: unknown): CartItem[] {
 //    chaque écriture pour qu'un produit incomplet ne casse jamais le panier.
 function sanitizeForFirestore<T>(value: T): T {
   return JSON.parse(JSON.stringify(value));
+}
+
+// Document Firestore du panier + date de dernière modification. `updatedAt`
+// permet à la function abandonedCartReminder de savoir depuis quand un
+// panier attend (ajouté APRÈS le nettoyage JSON, qui détruirait le
+// serverTimestamp).
+function cartDocData(cart: Cart) {
+  return { ...sanitizeForFirestore(cart), updatedAt: serverTimestamp() };
 }
 
 function readLocal(key: string): CartItem[] {
@@ -247,7 +256,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
           if (guestItems.length || localItems.length) {
             const updated = calculateCart(items);
             try { localStorage.setItem(CART_KEY, JSON.stringify(updated)); } catch { /* ignore */ }
-            setDoc(doc(db, 'carts', user.uid), sanitizeForFirestore(updated), { merge: true }).catch(console.error);
+            setDoc(doc(db, 'carts', user.uid), cartDocData(updated), { merge: true }).catch(console.error);
           }
         } catch (e) {
           console.error(e);
@@ -298,7 +307,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
     ) {
       setDoc(
         doc(db, 'carts', userIdRef.current),
-        sanitizeForFirestore(updated),
+        cartDocData(updated),
         { merge: true }
       ).catch(console.error);
     }

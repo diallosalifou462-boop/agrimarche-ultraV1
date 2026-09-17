@@ -24,7 +24,7 @@ export default function PrivacyPage() {
             <h2 className="text-xl font-semibold text-gray-900">Protection de vos données personnelles</h2>
           </div>
           <p className="text-gray-600 leading-relaxed">
-            AgriMarche attache une importance particulière à la protection de vos informations personnelles. 
+            Sunu Mëñëf attache une importance particulière à la protection de vos informations personnelles. 
             Cette politique décrit les modalités de collecte, d'utilisation et de conservation de vos données.
           </p>
         </div>
@@ -89,7 +89,7 @@ export default function PrivacyPage() {
           </div>
           <p className="text-gray-600 leading-relaxed mb-3">
             Vos données sont hébergées sur des serveurs sécurisés et font l'objet de mesures de protection techniques appropriées. 
-            AgriMarche ne commercialise aucune donnée personnelle.
+            Sunu Mëñëf ne commercialise aucune donnée personnelle.
           </p>
           <p className="text-gray-600 leading-relaxed">
             Vous pouvez à tout moment demander la suppression de vos données en nous contactant.
@@ -121,7 +121,7 @@ export default function PrivacyPage() {
         {/* Mentions légales */}
         <div className="border-t border-gray-200 pt-6 text-center">
           <p className="text-gray-400 text-xs">
-            © 2026 AgriMarche — Tous droits réservés
+            © 2026 Sunu Mëñëf — Tous droits réservés
           </p>
         </div>
       </div>

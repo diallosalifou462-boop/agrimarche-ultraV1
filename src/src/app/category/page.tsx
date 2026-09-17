@@ -31,7 +31,7 @@ function CategoryContent() {
             href="/main/products"
             className="text-2xl font-bold text-emerald-600"
           >
-            🌿 AgriMarché
+            🌿 Sunu Mëñëf
           </Link>
 
         </div>

@@ -125,7 +125,7 @@ async function generatePromoCopy(product: {
 
   try {
     const systemPrompt =
-      "Tu es le rédacteur marketing d'AgriMarché, une marketplace agricole sénégalaise. " +
+      "Tu es le rédacteur marketing de Sunu Mëñëf, une marketplace agricole sénégalaise. " +
       "On te donne un produit qui a été ajouté mais n'a encore reçu aucune commande. " +
       "Génère un titre court (max 45 caractères, avec un seul emoji pertinent en tête) et un message " +
       "(max 110 caractères) pour une notification push qui donne envie de l'acheter, sans être mensonger " +

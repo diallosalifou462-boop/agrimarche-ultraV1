@@ -185,10 +185,9 @@ export default function CartPage() {
   // La seule redirection se fait au moment du clic sur "Passer la commande"
 
   const handleCheckout = () => {
-    if (!user) {
-      router.push('/auth/login?redirect=/cart');
-      return;
-    }
+    // Un visiteur sans compte va aussi au checkout : il y choisit son adresse,
+    // puis « Continuer sans compte » ou « Créer mon compte ». On ne l'envoie
+    // plus sur l'écran de connexion alors qu'il n'a pas de compte.
     router.push('/checkout');
   };
 
@@ -279,7 +278,7 @@ export default function CartPage() {
 
         <div className="mt-10 flex items-center justify-center gap-2">
           <div className="w-12 h-px bg-gradient-to-r from-transparent to-emerald-300" />
-          <p className="text-[6px] text-gray-300 tracking-[4px] font-light">AGRIMARCHÉ SÉNÉGAL</p>
+          <p className="text-[6px] text-gray-300 tracking-[4px] font-light">SUNU MËÑËF SÉNÉGAL</p>
           <div className="w-12 h-px bg-gradient-to-l from-transparent to-emerald-300" />
         </div>
       </div>

@@ -250,7 +250,7 @@ async function runInactiveClientsCheck(db: FirebaseFirestore.Firestore, app: Ret
 
     const firstName = (user.displayName || '').split(' ')[0] || 'là-bas';
     const title = '👋 On vous a manqué !';
-    const body = `${firstName}, ça fait un moment — découvrez les nouveautés fraîches sur AgriMarché.`;
+    const body = `${firstName}, ça fait un moment — découvrez les nouveautés fraîches sur Sunu Mëñëf.`;
 
     batch.set(db.collection('notifications').doc(), {
       userId: userDoc.id, type: 'promotion', title, body, icon: '👋', deepLink: '/products',
@@ -318,7 +318,7 @@ async function runPendingSignupRemindersCheck(db: FirebaseFirestore.Firestore, a
   }
 
   if (candidates.length > 0) {
-    const title = '🌾 Votre compte AgriMarché vous attend';
+    const title = '🌾 Votre compte Sunu Mëñëf vous attend';
     const body = "Terminez votre inscription pour commander ou vendre en quelques secondes.";
     try {
       const resp = await getMessaging(app).sendEachForMulticast({

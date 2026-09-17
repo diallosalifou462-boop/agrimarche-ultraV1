@@ -162,8 +162,8 @@ interface Order {
   // voir seller/dashboard/page.tsx pour la saisie GPS/manuelle). Jamais
   // déclarés ni affichés ici jusqu'ici : l'admin n'avait aucun moyen de voir
   // où récupérer (vendeur) ni où livrer (client) pour une commande donnée.
-  sellerLocation?: { lat?: number; lng?: number; address?: string; isDefault?: boolean };
-  customerLocation?: { lat?: number; lng?: number; address?: string; isDefault?: boolean };
+  sellerLocation?: { lat?: number; lng?: number; address?: string; isDefault?: boolean; locationSource?: string; locationUpdatedAt?: any; accuracy?: number };
+  customerLocation?: { lat?: number; lng?: number; address?: string; isDefault?: boolean; instructions?: string; accuracy?: number; source?: string };
 }
 
 interface UserProfile {
@@ -2423,7 +2423,7 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
     if (!userMsg || aiLoading) return;
 
     // Contexte métier injecté automatiquement
-    const systemPrompt = `Tu es un assistant expert pour AgriMarché, une plateforme agricole sénégalaise.
+    const systemPrompt = `Tu es un assistant expert pour Sunu Mëñëf, une plateforme agricole sénégalaise.
 Contexte actuel:
 - Commandes totales: ${orders.length} (dont ${orders.filter(o=>o.status==='en_attente').length} en attente)
 - Chiffre d'affaires: ${totalRevenue.toLocaleString()} FCFA
@@ -2530,11 +2530,11 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
   // `order.sellerName ?? order.farmer ?? '—'` — mais un bug côté
   // checkout/page.tsx (produits créés sans `sellerName`, désormais corrigé
   // dans seller/products/add/page.tsx) faisait retomber `sellerName` sur
-  // le défaut littéral `'AgriMarché'`. Comme ce champ était déjà rempli
+  // le défaut littéral `'Sunu Mëñëf'`. Comme ce champ était déjà rempli
   // (avec la mauvaise valeur), le `?? order.farmer` ne se déclenchait
   // JAMAIS — `??` ne retombe que sur `null`/`undefined`, pas sur une
   // chaîne non vide mais fausse. Résultat : TOUTES les commandes
-  // affichaient "AgriMarché" au lieu du vrai vendeur, y compris celles où
+  // affichaient "Sunu Mëñëf" au lieu du vrai vendeur, y compris celles où
   // `order.farmer` contenait déjà le bon nom.
   //
   // Fix définitif et rétroactif : on résout le nom du vendeur depuis la
@@ -2544,7 +2544,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
   // ce correctif — pas seulement les nouvelles. On ne retombe sur les
   // champs stockés sur la commande (`sellerName` puis `farmer`) que si
   // aucun compte utilisateur correspondant n'est trouvé, et on ignore
-  // explicitement la valeur placeholder `'AgriMarché'` à chaque étage pour
+  // explicitement la valeur placeholder `'Sunu Mëñëf'` à chaque étage pour
   // ne jamais l'afficher tant qu'une vraie info existe quelque part.
   const usersById = useMemo(() => {
     const map = new Map<string, UserProfile>();
@@ -2552,12 +2552,13 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
     return map;
   }, [users]);
 
-  const PLACEHOLDER_SELLER_NAME = 'AgriMarché';
+  // 'AgriMarché' = ancien placeholder encore présent sur les commandes en base
+  const PLACEHOLDER_SELLER_NAMES = new Set(['Sunu Mëñëf', 'AgriMarché']);
   const getOrderSellerName = useCallback((order: Order): string => {
     const sellerAccount = usersById.get(order.sellerId || order.farmerId || '');
     if (sellerAccount?.displayName) return sellerAccount.displayName;
-    if (order.sellerName && order.sellerName !== PLACEHOLDER_SELLER_NAME) return order.sellerName;
-    if (order.farmer && order.farmer !== PLACEHOLDER_SELLER_NAME) return order.farmer;
+    if (order.sellerName && !PLACEHOLDER_SELLER_NAMES.has(order.sellerName)) return order.sellerName;
+    if (order.farmer && !PLACEHOLDER_SELLER_NAMES.has(order.farmer)) return order.farmer;
     return order.sellerName || order.farmer || '—';
   }, [usersById]);
 
@@ -2803,7 +2804,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
           {/* Logo */}
           <div style={{ padding:'20px 16px', borderBottom:'1px solid #1f2127', display:'flex', alignItems:'center', gap:12, flexShrink:0 }}>
             <div style={{ width:40, height:40, borderRadius:12, background:'linear-gradient(135deg,#10b981,#059669)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:20, fontWeight:'bold', flexShrink:0 }}>A</div>
-            {sidebarOpen && <div><div style={{ fontWeight:700, fontSize:16 }}>AgriMarché</div><div style={{ fontSize:11, color:'#6b7280' }}>Admin Dashboard</div></div>}
+            {sidebarOpen && <div><div style={{ fontWeight:700, fontSize:16 }}>Sunu Mëñëf</div><div style={{ fontSize:11, color:'#6b7280' }}>Admin Dashboard</div></div>}
           </div>
 
           {/* Nav */}
@@ -2917,7 +2918,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                         Tableau de bord
                       </h2>
                       <p style={{ fontSize:11, color:'rgba(255,255,255,0.5)', marginTop:4, letterSpacing:1.6, textTransform:'uppercase', display:'flex', alignItems:'center', gap:6 }}>
-                        <Star size={10} color="#10b981" fill="#10b981"/> Vue d'ensemble · AgriMarché · Temps réel
+                        <Star size={10} color="#10b981" fill="#10b981"/> Vue d'ensemble · Sunu Mëñëf · Temps réel
                       </p>
                     </div>
                   </div>
@@ -3330,11 +3331,13 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                                       )}
                                     </div>
                                     {!order.sellerLocation?.isDefault && order.sellerLocation?.address && (
-                                      order.sellerLocation?.locationSource === 'MANUAL_PIN' ? (
+                                      order.sellerLocation?.locationSource === 'MANUAL_PIN' || order.sellerLocation?.locationSource === 'MAP_SEARCH' ? (
                                         <span style={{ fontSize:9, fontWeight:700, color:'#10b981', marginLeft:15 }}>✏️ Confirmée par le vendeur</span>
                                       ) : (() => {
-                                        const updatedAt = order.sellerLocation?.locationUpdatedAt;
-                                        const stale = updatedAt && (Date.now() - new Date(updatedAt).getTime()) > 90 * 24 * 3600 * 1000;
+                                        // Timestamp Firestore, Date ou texte ISO selon l'ancienneté de la commande.
+                                        const raw: any = order.sellerLocation?.locationUpdatedAt;
+                                        const ms = typeof raw?.toMillis === 'function' ? raw.toMillis() : (typeof raw?.seconds === 'number' ? raw.seconds * 1000 : (raw ? new Date(raw).getTime() : NaN));
+                                        const stale = Number.isFinite(ms) && (Date.now() - ms) > 180 * 24 * 3600 * 1000;
                                         return stale
                                           ? <span style={{ fontSize:9, fontWeight:700, color:'#b45309', marginLeft:15 }}>📡 GPS non revérifié depuis longtemps</span>
                                           : null;
@@ -3363,9 +3366,15 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                                         distingue une adresse client corrigée à la main (checkout,
                                         "Livrer à une autre adresse") d'un simple GPS/IP. */}
                                     {!order.customerLocation?.isDefault && order.customerLocation?.address && (
-                                      order.locationSource === 'MANUAL_PIN' || order.locationSource === 'MAP_SEARCH' ? (
-                                        <span style={{ fontSize:9, fontWeight:700, color:'#10b981', marginLeft:15 }}>✏️ Confirmée par le client</span>
+                                      order.locationSource === 'MANUAL_PIN' || order.locationSource === 'MAP_SEARCH' || order.locationSource === 'GPS' ? (
+                                        <span style={{ fontSize:9, fontWeight:700, color:'#10b981', marginLeft:15 }}>✅ Confirmée par le client</span>
                                       ) : null
+                                    )}
+                                    {order.customerLocation?.isDefault && order.customerLocation?.address && (
+                                      <span style={{ fontSize:9, fontWeight:700, color:'#b45309', marginLeft:15 }}>⚠️ Adresse non confirmée (ancienne commande)</span>
+                                    )}
+                                    {order.customerLocation?.instructions && (
+                                      <span style={{ fontSize:10, color:'#d1d5db', marginLeft:15, display:'block' }}>📝 {order.customerLocation.instructions}</span>
                                     )}
                                   </div>
                                 </td>
@@ -3459,7 +3468,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                         Utilisateurs
                       </h2>
                       <p style={{ fontSize:11, color:'rgba(255,255,255,0.5)', marginTop:4, letterSpacing:1.6, textTransform:'uppercase', display:'flex', alignItems:'center', gap:6 }}>
-                        <Star size={10} color="#ec4899" fill="#ec4899"/> {userStatsByRole.total} compte{userStatsByRole.total>1?'s':''} · AgriMarché
+                        <Star size={10} color="#ec4899" fill="#ec4899"/> {userStatsByRole.total} compte{userStatsByRole.total>1?'s':''} · Sunu Mëñëf
                       </p>
                     </div>
                   </div>
@@ -4395,7 +4404,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                       <div style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:24, color:'#4b5563', textAlign:'center', paddingTop:60 }}>
                         <div style={{ fontSize:56 }}>🤖</div>
                         <div>
-                          <div style={{ fontSize:18, fontWeight:600, color:'#9ca3af', marginBottom:8 }}>Assistant IA AgriMarché</div>
+                          <div style={{ fontSize:18, fontWeight:600, color:'#9ca3af', marginBottom:8 }}>Assistant IA Sunu Mëñëf</div>
                           <div style={{ fontSize:13, color:'#4b5563', maxWidth:420, lineHeight:1.7 }}>Posez des questions sur vos données, demandez des analyses ou des conseils métier. Je connais votre contexte en temps réel.</div>
                         </div>
                         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, width:'100%', maxWidth:500 }}>
@@ -4593,7 +4602,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                                   📋 Copier
                                 </button>
                                 <button className="btn-secondary" style={{ fontSize:11, padding:'4px 10px' }}
-                                  onClick={() => { navigator.clipboard.writeText(`✅ Votre code AgriMarché IA Premium : ${code} (valable ${codeDays} jours)`); toast.success('Message copié !'); }}>
+                                  onClick={() => { navigator.clipboard.writeText(`✅ Votre code Sunu Mëñëf IA Premium : ${code} (valable ${codeDays} jours)`); toast.success('Message copié !'); }}>
                                   💬 Message
                                 </button>
                               </div>
@@ -5595,7 +5604,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                           }}>🌾</div>
                           <div style={{ flex:1, minWidth:0 }}>
                             <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:2 }}>
-                              <span style={{ fontSize:11, fontWeight:700, color:'#9ca3af' }}>AgriMarché</span>
+                              <span style={{ fontSize:11, fontWeight:700, color:'#9ca3af' }}>Sunu Mëñëf</span>
                               <span style={{ fontSize:10, color:'#4b5563' }}>· à l'instant</span>
                               {pushAllForm.urgent && <span style={{ fontSize:9, fontWeight:700, color:'#ef4444', background:'rgba(239,68,68,.12)', padding:'1px 6px', borderRadius:8 }}>URGENT</span>}
                             </div>
@@ -6228,7 +6237,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                         Promotions &amp; Publicités
                       </h2>
                       <p style={{ fontSize:11, color:'rgba(255,255,255,0.5)', marginTop:4, letterSpacing:1.6, textTransform:'uppercase', display:'flex', alignItems:'center', gap:6 }}>
-                        <Star size={10} color="#D4AF37" fill="#D4AF37"/> Sacré Terroir · Visibilité Premium · AgriMarché
+                        <Star size={10} color="#D4AF37" fill="#D4AF37"/> Sacré Terroir · Visibilité Premium · Sunu Mëñëf
                       </p>
                     </div>
                   </div>

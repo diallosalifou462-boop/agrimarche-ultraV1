@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import Image from 'next/image';
+import BrandLogo from '@/components/BrandLogo';
 
 export default function MainPage() {
   return (
@@ -10,8 +10,8 @@ export default function MainPage() {
       {/* HEADER — logo discret, jamais le héros */}
       <header className="flex items-center justify-between px-5 py-4 max-w-md w-full mx-auto">
         <div className="flex items-center gap-2">
-          <Image src="/logo.png" alt="Agrimarché" width={28} height={28} className="rounded-md" />
-          <span className="text-sm font-bold text-emerald-800">AgriMarché</span>
+          <BrandLogo size={28} variant="mark" className="rounded-md" />
+          <span className="text-sm font-bold text-emerald-800">Sunu Mëñëf</span>
         </div>
       </header>
 
@@ -56,7 +56,7 @@ export default function MainPage() {
 
       {/* FOOTER — minimal */}
       <footer className="text-center text-[11px] text-emerald-800/30 py-5">
-        © 2026 AgriMarché
+        © 2026 Sunu Mëñëf
       </footer>
     </div>
   );

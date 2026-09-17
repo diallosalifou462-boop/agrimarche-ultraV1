@@ -116,7 +116,7 @@ export default function AccountPage() {
       snap.docs.forEach((d: any) => {
         const raw = d.data().status || 'en_attente';
         const normalized = normalizeStatus(raw);
-        console.log(`[AgriMarché/Account] Order ${d.id.slice(-6)} | raw="${raw}" → "${normalized}"`);
+        console.log(`[Sunu Mëñëf/Account] Order ${d.id.slice(-6)} | raw="${raw}" → "${normalized}"`);
         // On garde la version la plus récente (updatedAt) si le doc existe dans les deux collections
         const existing = ordersMap.get(d.id);
         const newTs = d.data().updatedAt?.seconds || d.data().createdAt?.seconds || 0;
@@ -130,7 +130,7 @@ export default function AccountPage() {
         const tb = a.createdAt?.seconds || 0;
         return ta - tb;
       });
-      console.log(`[AgriMarché/Account] Stats | total=${ordersData.length} | en_cours=${ordersData.filter((o:any)=>['en_attente','en_preparation','en_livraison'].includes(o.status)).length} | livrées=${ordersData.filter((o:any)=>o.status==='livre').length} | annulées=${ordersData.filter((o:any)=>o.status==='annule').length}`);
+      console.log(`[Sunu Mëñëf/Account] Stats | total=${ordersData.length} | en_cours=${ordersData.filter((o:any)=>['en_attente','en_preparation','en_livraison'].includes(o.status)).length} | livrées=${ordersData.filter((o:any)=>o.status==='livre').length} | annulées=${ordersData.filter((o:any)=>o.status==='annule').length}`);
       setOrders(ordersData);
       setLoadingOrders(false);
     };

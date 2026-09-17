@@ -164,7 +164,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
         window.Notification.permission === 'granted'
       ) {
         try {
-          new window.Notification(payload.notification?.title || 'AgriMarché', {
+          new window.Notification(payload.notification?.title || 'Sunu Mëñëf', {
             body: payload.notification?.body,
             icon: '/logo.png',
           });

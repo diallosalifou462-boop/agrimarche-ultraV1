@@ -112,7 +112,7 @@ export default function AccountPage() {
 
     if (!loading && !user) {
 
-      router.push('/auth/login');
+      router.push('/auth/register?redirect=/profile');
 
     }
 

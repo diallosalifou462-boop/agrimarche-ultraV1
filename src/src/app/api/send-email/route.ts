@@ -7,7 +7,7 @@ const resend = apiKey ? new Resend(apiKey) : null;
 
 const FROM =
   process.env.RESEND_FROM_EMAIL ??
-  "AgriMarché <onboarding@resend.dev>";
+  "Sunu Mëñëf <onboarding@resend.dev>";
 
 function buildHtml({
   icon,
@@ -53,7 +53,7 @@ function buildHtml({
       <hr>
 
       <p style="font-size:12px;color:#888;text-align:center;">
-      © ${new Date().getFullYear()} AgriMarché
+      © ${new Date().getFullYear()} Sunu Mëñëf
       </p>
 
     </div>

@@ -68,14 +68,11 @@ export async function decideChannelAndSend(
       await admin.messaging().send({
         token: pushToken!,
         notification: {
-          title: 'AgriMarché',
-          body: `Votre code de ${purpose} AgriMarché est : ${code}. Ce code expire dans 5 minutes.`,
+          title: 'Sunu Mëñëf',
+          body: `Votre code de ${purpose} Sunu Mëñëf est : ${code}. Ce code expire dans 5 minutes.`,
         },
         data: { type: `${metricPrefix}_otp`, sessionId },
-        // ⚠️ FIX (16/09) : canal "urgent" (importance max, créé par
-        // useFCMToken.ts) pour que le code s'affiche en bannière, et TTL
-        // court : un code expiré 5 min plus tard ne sert à rien.
-        android: { priority: 'high', ttl: 5 * 60 * 1000, notification: { channelId: 'agrimarche_urgent', sound: 'default' } },
+        android: { priority: 'high' },
         apns: { payload: { aps: { sound: 'default', 'interruption-level': 'time-sensitive' } } },
       });
       await bumpRegistrationMetric(`${metricPrefix}_sent_push`);

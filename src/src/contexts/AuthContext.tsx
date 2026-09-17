@@ -391,7 +391,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         console.log('[FCM] Notification reçue en avant-plan:', payload);
         if (Notification.permission === 'granted') {
           const { title, body, icon } = payload.notification || {};
-          new Notification(title || 'AgriMarché', {
+          new Notification(title || 'Sunu Mëñëf', {
             body: body || '',
             icon: icon || '/logo.png',
             badge: '/logo.png',

@@ -18,7 +18,7 @@ export interface InitiatePaymentResult {
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
 
 /**
- * Initie un paiement mobile via le backend Agrimarche.
+ * Initie un paiement mobile via le backend Sunu Mëñëf.
  */
 export async function initiatePayment(
   params: InitiatePaymentParams

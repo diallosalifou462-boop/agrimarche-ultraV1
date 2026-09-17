@@ -1,7 +1,7 @@
 'use client';
 
 import { Suspense, useEffect, useState } from 'react';
-import Image from 'next/image';
+import BrandLogo from '@/components/BrandLogo';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
   verifyPasswordResetCode,
@@ -93,13 +93,7 @@ function ResetPasswordContent() {
     >
       <div className="bg-white shadow-xl rounded-2xl p-8 w-full max-w-md">
         <div className="flex flex-col items-center mb-6">
-          <Image
-            src="/logo.png"
-            alt="AgriMarché Logo"
-            width={120}
-            height={120}
-            priority
-          />
+          <BrandLogo size={120} variant="full" />
           <h1 className="text-2xl font-bold text-gray-800 mt-3">
             Nouveau mot de passe
           </h1>

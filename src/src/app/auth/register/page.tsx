@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import Image from 'next/image';
+import BrandLogo from '@/components/BrandLogo';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import {
@@ -634,10 +634,10 @@ export default function RegisterPage() {
           {/* HEADER */}
           <div className="text-center mb-6">
             <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-white shadow-lg ring-4 ring-green-100 mb-4 overflow-hidden">
-              <Image src="/logo.png" alt="AgriMarché" width={80} height={80} className="w-full h-full object-cover rounded-full" />
+              <BrandLogo size={80} variant="full" className="w-full h-full rounded-full" />
             </div>
             <h2 className="text-2xl font-bold text-gray-800">Inscription</h2>
-            <p className="text-gray-500 text-sm mt-1">Créez votre compte AgriMarché</p>
+            <p className="text-gray-500 text-sm mt-1">Créez votre compte Sunu Mëñëf</p>
           </div>
 
           {/* SMS badge */}

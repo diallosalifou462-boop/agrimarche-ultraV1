@@ -1,6 +1,6 @@
 'use client';
 
-import Image from 'next/image';
+import BrandLogo from '@/components/BrandLogo';
 import { displayFont } from './fonts';
 
 // ─── Palette "Terroir du matin" ───────────────────────────
@@ -171,7 +171,7 @@ export function AuthHero({
 
       <div className="relative flex flex-col items-center px-6 text-center">
         <div className="mb-5 h-16 w-16 overflow-hidden rounded-full ring-2 ring-[#E7A73C]/40 shadow-lg">
-          <Image src="/logo.png" alt="AgriMarché" width={64} height={64} className="h-full w-full object-cover" />
+          <BrandLogo size={64} variant="full" className="h-full w-full" />
         </div>
         <h1
           className={`${displayFont.className} text-[1.7rem] leading-tight text-[#F7F0E2]`}

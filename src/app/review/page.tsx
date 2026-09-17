@@ -75,8 +75,8 @@ function ReviewContent() {
 
   const saveReview = async () => {
     if (!user) {
-      alert('Connectez-vous pour laisser un avis');
-      router.push('/auth/login');
+      alert('Créez votre compte pour laisser un avis');
+      router.push('/auth/register');
       return;
     }
 

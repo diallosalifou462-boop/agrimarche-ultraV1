@@ -31,7 +31,7 @@ export class AfricaOptimization {
     document.documentElement.setAttribute('data-data-saver', 'true');
     this.disableAnimations();
     this.reducePrefetching();
-    console.info('[Agrimarche] Mode économie données activé');
+    console.info('[Sunu Mëñëf] Mode économie données activé');
   }
 
   private static disableAnimations(): void {

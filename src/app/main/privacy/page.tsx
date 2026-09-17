@@ -24,7 +24,7 @@ export default function PrivacyPage() {
             <h2 className="text-xl font-bold text-gray-800">Protection de vos données</h2>
           </div>
           <p className="text-gray-600 leading-relaxed">
-            Chez AgriMarche, nous accordons une importance capitale à la protection de vos informations personnelles. 
+            Chez Sunu Mëñëf, nous accordons une importance capitale à la protection de vos informations personnelles. 
             Cette politique de confidentialité explique comment nous collectons, utilisons et protégeons vos données.
           </p>
         </div>
@@ -121,7 +121,7 @@ export default function PrivacyPage() {
         {/* Contact */}
         <div className="bg-white rounded-2xl p-6 shadow-sm text-center">
           <p className="text-gray-500 text-sm">
-            © 2026 AgriMarche - Tous droits réservés
+            © 2026 Sunu Mëñëf - Tous droits réservés
           </p>
         </div>
       </div>

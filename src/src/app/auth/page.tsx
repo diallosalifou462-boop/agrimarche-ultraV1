@@ -1,6 +1,6 @@
 'use client';
 
-import Image from 'next/image';
+import BrandLogo from '@/components/BrandLogo';
 import { useState, useEffect, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
@@ -59,14 +59,8 @@ function LoginContent() {
     <div className="min-h-screen bg-gray-100 flex items-center justify-center">
       <div className="bg-white p-8 rounded-xl shadow-lg w-[350px]">
         <div className="text-center mb-6">
-          <Image
-            src="/logo.png"
-            alt="Agrimarché"
-            width={120}
-            height={120}
-            className="mx-auto"
-          />
-          <h1 className="text-2xl font-bold mt-3">Bienvenue à Agrimarche</h1>
+          <BrandLogo size={120} variant="full" className="mx-auto" />
+          <h1 className="text-2xl font-bold mt-3">Bienvenue à Sunu Mëñëf</h1>
         </div>
 
         {error && (

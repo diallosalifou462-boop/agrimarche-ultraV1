@@ -587,7 +587,7 @@ export default function BecomeSellerPage() {
                       </div>
 
                       <button
-                        onClick={() => openWhatsApp(currentChat.customerPhone, 'Bonjour depuis AgriMarché.')}
+                        onClick={() => openWhatsApp(currentChat.customerPhone, 'Bonjour depuis Sunu Mëñëf.')}
                         className="px-4 py-2 rounded-xl bg-green-500 text-white text-sm"
                       >
                         WhatsApp
@@ -826,7 +826,7 @@ export default function BecomeSellerPage() {
             <h3 className="font-bold text-lg mb-2">Support WhatsApp</h3>
             <p className="text-emerald-100 text-sm mb-5">Assistance rapide et personnalisée.</p>
             <button
-              onClick={() => openWhatsApp('221779747073', 'Bonjour AgriMarché.')}
+              onClick={() => openWhatsApp('221779747073', 'Bonjour Sunu Mëñëf.')}
               className="px-6 py-3 rounded-2xl bg-white text-emerald-600 font-semibold"
             >
               Contacter

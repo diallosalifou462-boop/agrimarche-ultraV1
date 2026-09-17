@@ -73,7 +73,7 @@ export default function AccountPage() {
 
   useEffect(() => {
     if (!loading && !user) {
-      router.push('/auth/login');
+      router.push('/auth/register?redirect=/main/profile');
     }
   }, [user, loading, router]);
 
@@ -170,7 +170,7 @@ export default function AccountPage() {
                 <p className="text-green-100 text-sm">{user.email}</p>
                 <div className="flex items-center gap-2 mt-2">
                   <div className="w-2 h-2 rounded-full bg-green-300 animate-pulse" />
-                  <span className="text-sm text-green-100">Client AgriMarché</span>
+                  <span className="text-sm text-green-100">Client Sunu Mëñëf</span>
                   <Shield size={12} className="text-green-300 ml-1" />
                 </div>
               </div>
@@ -453,7 +453,7 @@ export default function AccountPage() {
 
         {/* Version App */}
         <p className="text-center text-xs text-gray-400 mt-6">
-          AgriMarché v2.0 — ©️ 2024
+          Sunu Mëñëf v2.0 — ©️ 2024
         </p>
       </div>
 

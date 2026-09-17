@@ -5,6 +5,7 @@ import { getMessaging, getToken, onMessage, isSupported } from 'firebase/messagi
 import { doc, setDoc, deleteDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase/firebase';
 import { useAuth } from './useAuth';
+import { pushDiag, maskToken } from '@/lib/pushDiagnostics';
 
 // Détecte le contexte Capacitor (APK Android / iOS natif)
 function isNativePlatform(): boolean {
@@ -125,11 +126,15 @@ export function useFCMToken() {
         // registrationStart retombait TOUJOURS sur SMS.
         if (typeof window !== 'undefined') {
           window.localStorage.setItem(PENDING_FCM_TOKEN_KEY, JSON.stringify({ token: fcmToken, platform }));
+          pushDiag('local_save', 'ok', 'Token mémorisé sur l’appareil (localStorage)');
         }
         try {
           await setDoc(doc(db, 'deviceTokens', fcmToken), payload);
+          pushDiag('firestore_save', 'ok', 'Token enregistré dans Firestore (deviceTokens)');
         } catch (err) {
           console.warn('[FCM] Écriture deviceTokens refusée (token gardé en local):', err);
+          // Non bloquant pour l'OTP : le token part au serveur depuis le localStorage.
+          pushDiag('firestore_save', 'warn', 'Firestore refuse deviceTokens (non bloquant pour l’OTP, vérifier firestore.rules)', err);
         }
         return;
       }
@@ -202,6 +207,7 @@ export function useFCMToken() {
     // l'APK comme sur le web. On détecte désormais le contexte au moment de
     // l'appel, sans dépendre de l'état React.
     const nativeNow = isNative || isNativePlatform();
+    pushDiag('platform', 'info', `Plateforme détectée : ${nativeNow ? getNativePlatformName() : 'web'}`);
 
     // --- Branche native (Android/iOS via Capacitor) ---
     if (nativeNow) {
@@ -215,6 +221,7 @@ export function useFCMToken() {
           finalStatus = requested.receive;
         }
 
+        pushDiag('permission', finalStatus === 'granted' ? 'ok' : 'error', `Permission notifications : ${finalStatus}`);
         if (finalStatus !== 'granted') {
           setPermission('denied');
           console.warn('Permission push refusée (natif)');
@@ -228,13 +235,16 @@ export function useFCMToken() {
         // de bridger manuellement le device token dans l'AppDelegate.
         const { token: fcmToken } = await FirebaseMessaging.getToken();
         if (fcmToken) {
+          pushDiag('token', 'ok', 'Token FCM obtenu', maskToken(fcmToken));
           setToken(fcmToken);
           await saveTokenToFirestore(fcmToken, getNativePlatformName());
           return fcmToken;
         }
+        pushDiag('token_error', 'error', 'getToken() a répondu sans token', 'token vide');
         return null;
       } catch (err) {
         console.error('Erreur demande permission push native:', err);
+        pushDiag('token_error', 'error', 'Échec obtention du token (natif)', err);
         return null;
       }
     }
@@ -243,10 +253,12 @@ export function useFCMToken() {
     const supportedNow = isSupportedBrowser || (await isSupported().catch(() => false));
     if (!supportedNow || typeof window === 'undefined' || !('Notification' in window)) {
       console.warn('Notifications non supportées sur ce navigateur');
+      pushDiag('token_error', 'error', 'Navigateur sans support des notifications push', 'not available');
       return null;
     }
 
     if (Notification.permission === 'denied') {
+      pushDiag('permission', 'error', 'Permission notifications : denied (navigateur)');
       console.warn("Permission refusée par l'utilisateur");
       return null;
     }
@@ -254,6 +266,7 @@ export function useFCMToken() {
     try {
       const perm = await Notification.requestPermission();
       setPermission(perm);
+      pushDiag('permission', perm === 'granted' ? 'ok' : 'error', `Permission notifications : ${perm}`);
 
       if (perm !== 'granted') {
         console.warn('Permission non accordée');
@@ -262,7 +275,13 @@ export function useFCMToken() {
 
       await navigator.serviceWorker.register('/sw.js').catch((err) => {
         console.warn('[FCM] Échec enregistrement du Service Worker:', err);
+        pushDiag('token_error', 'warn', 'Service worker non enregistré', err);
       });
+      if (!process.env.NEXT_PUBLIC_VAPID_KEY) {
+        // Non bloquant : Firebase utilise alors une clé par défaut, mais il
+        // est recommandé de configurer la clé du projet.
+        pushDiag('platform', 'warn', 'NEXT_PUBLIC_VAPID_KEY manquante (clé par défaut utilisée, à configurer)');
+      }
       const swRegistration = await Promise.race([
         navigator.serviceWorker.ready,
         new Promise<never>((_, reject) =>
@@ -276,15 +295,18 @@ export function useFCMToken() {
       });
 
       if (fcmToken) {
+        pushDiag('token', 'ok', 'Token FCM web obtenu', maskToken(fcmToken));
         await saveTokenToFirestore(fcmToken, 'web');
         setToken(fcmToken);
         return fcmToken;
       } else {
         console.warn("Impossible d'obtenir le token FCM");
+        pushDiag('token_error', 'error', 'getToken() web a répondu sans token', 'token vide');
         return null;
       }
     } catch (error) {
       console.error('Erreur lors de la demande de permission:', error);
+      pushDiag('token_error', 'error', 'Échec obtention du token (web)', error);
       return null;
     }
   }, [isNative, isSupportedBrowser, user, saveTokenToFirestore]);

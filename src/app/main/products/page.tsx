@@ -12,6 +12,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { Network } from '@capacitor/network';
 import { distanceKm, nearbySorted, formatDistance, SEARCH_RADII_KM } from '@/lib/geo/distance';
 import { getAnyCachedLocation, isLocationStale } from '@/lib/locationCache';
+import { readSavedDeliveryAddress } from '@/lib/geo/userLocation';
 
 const CATEGORIES = [
   { label: 'Tous',              icon: '✦',  color: '#C9A84C' },
@@ -633,6 +634,24 @@ export default function AgriMarket() {
   // app/product/page.tsx (fiche produit), avec la même règle d'expiration
   // (10 min) pour ne jamais afficher une position "exacte" périmée.
   useEffect(() => {
+    // Ordre de priorité :
+    //  1. adresse de livraison ENREGISTRÉE sur le compte (confirmée par le
+    //     client, manuelle ou GPS) — elle reste tant qu'il ne la modifie pas ;
+    //  2. adresse confirmée sur cet appareil (visiteur sans compte) ;
+    //  3. relevé GPS récent (moins de 10 min).
+    const saved = readSavedDeliveryAddress(profile);
+    if (saved) {
+      setLocation({
+        address: saved.address || saved.city || '',
+        lat: saved.lat,
+        lng: saved.lng,
+        precision: typeof saved.accuracy === 'number' ? saved.accuracy : 30,
+        detailedAddress: saved.address,
+        region: saved.region,
+      });
+      setLocStatus('found');
+      return;
+    }
     const cached = getAnyCachedLocation();
     if (!cached || isLocationStale(cached)) {
       setLocStatus('found');
@@ -647,7 +666,7 @@ export default function AgriMarket() {
       region: cached.region,
     });
     setLocStatus('found');
-  }, []);
+  }, [profile]);
 
 
 
@@ -722,7 +741,7 @@ export default function AgriMarket() {
       }).catch(err => console.error('Erreur increment whatsappClicks:', err));
     }
     // ⚠️ Le numéro du vendeur n'est plus utilisé ici : tout contact WhatsApp
-    // depuis les fiches produits passe par le numéro officiel AgriMarché
+    // depuis les fiches produits passe par le numéro officiel Sunu Mëñëf
     // (WA_NUMBER), afin d'éviter que les acheteurs contournent la plateforme
     // en contactant directement le vendeur.
     window.open(`https://wa.me/${WA_NUMBER}?text=${encodeURIComponent(`Bonjour, je suis intéressé par "${name}".`)}`, '_blank');
@@ -1634,7 +1653,7 @@ export default function AgriMarket() {
           <div className="g-logo-row">
             <Link href="/" className="g-logo-link">
               <div className="g-wordmark">
-                <div className="g-wordmark-main">AGRIMARCHÉ</div>
+                <div className="g-wordmark-main">SUNU MËÑËF</div>
                 <div className="g-wordmark-sub">MARCHÉ PAYSAN DU SÉNÉGAL</div>
               </div>
             </Link>
@@ -2057,7 +2076,7 @@ export default function AgriMarket() {
 
           <button
             className="g-nav-cta"
-            onClick={() => window.open(`https://wa.me/${WA_NUMBER}?text=${encodeURIComponent('Bonjour, je souhaite commander sur AgriMarché.')}`, '_blank')}
+            onClick={() => window.open(`https://wa.me/${WA_NUMBER}?text=${encodeURIComponent('Bonjour, je souhaite commander sur Sunu Mëñëf.')}`, '_blank')}
           >
             <div className="g-nav-cta-ring"><WaIcon s={26} /></div>
             <span className="g-nav-cta-lbl">WHATSAPP</span>

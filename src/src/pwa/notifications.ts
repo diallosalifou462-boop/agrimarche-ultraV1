@@ -60,7 +60,7 @@ export class PushNotificationsManager {
         };
         if (p.notification) {
           this.showInAppNotification({
-            title: p.notification.title ?? 'Agrimarche',
+            title: p.notification.title ?? 'Sunu Mëñëf',
             body: p.notification.body ?? '',
             icon: p.notification.icon,
             url: p.data?.url,

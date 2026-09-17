@@ -102,13 +102,13 @@ function ProductDetailContent() {
   const sellerData = useMemo(
     () => ({
       id: 'agrimarche-official',
-      name: 'AgriMarché',
+      name: 'Sunu Mëñëf',
       phone: '779747073',
       photo: '/logo.png',
       region: 'Dakar, Sénégal',
       verified: true,
       whatsapp: '221779747073',
-      bio: 'Service officiel AgriMarché. Produits agricoles frais et livraison rapide.'
+      bio: 'Service officiel Sunu Mëñëf. Produits agricoles frais et livraison rapide.'
     }),
     []
   );
@@ -403,7 +403,7 @@ function ProductDetailContent() {
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <Link href="/main/products" className="flex items-center gap-3">
             <Leaf className="w-8 h-8 text-emerald-600" />
-            <span className="text-2xl font-bold text-emerald-700">AgriMarché</span>
+            <span className="text-2xl font-bold text-emerald-700">Sunu Mëñëf</span>
           </Link>
 
           <Link href="/cart" className="relative bg-emerald-600 text-white px-5 py-2 rounded-xl flex items-center gap-2">
@@ -585,7 +585,7 @@ function ProductDetailContent() {
                 </button>
 
                 <a
-                  href={`https://wa.me/${sellerData.whatsapp}?text=Bonjour%20AgriMarch%C3%A9%2C%20je%20souhaite%20commander%20${encodeURIComponent(
+                  href={`https://wa.me/${sellerData.whatsapp}?text=Bonjour%20Sunu%20M%C3%AB%C3%B1%C3%ABf%2C%20je%20souhaite%20commander%20${encodeURIComponent(
                     product.name
                   )}%20(${quantity}%20${product.unit})`}
                   target="_blank"

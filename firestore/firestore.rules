@@ -48,8 +48,16 @@ service cloud.firestore {
       return request.resource.data.diff(resource.data).affectedKeys().hasOnly(fields);
     }
 
+    // ⚠️ FIX (17/09) : `request.resource.size` N'EXISTE PAS dans les règles
+    // Firestore (seulement dans Cloud Storage). Y accéder provoque une erreur
+    // d'évaluation → la règle entière est REFUSÉE (« Missing or insufficient
+    // permissions »). Toutes les écritures qui appelaient cette fonction
+    // étaient donc bloquées côté client (deviceTokens, reviews, payments,
+    // syncQueue, chatMessages, création du doc users). Firestore ne permet
+    // pas de mesurer la taille d'un document : on borne le nombre de champs
+    // (Firestore plafonne de toute façon chaque document à 1 Mo).
     function isReasonableSize() {
-      return request.resource.size < 10240; // 10 KB max par document
+      return request.resource.data.keys().size() <= 40;
     }
 
     // ✅ Deux flux de checkout coexistent dans l'app avec des noms de champ
@@ -64,8 +72,10 @@ service cloud.firestore {
     // catégorie, tableau d'URLs d'images...) pour chaque article — la limite
     // générique de 10 Ko est trop stricte dès qu'il y a plusieurs articles.
     // On reste très en dessous du plafond réel de Firestore (1 Mo/document).
+    // ⚠️ FIX (17/09) : même bug que isReasonableSize (request.resource.size
+    // inexistant en Firestore → écriture du panier toujours refusée).
     function isReasonableCartSize() {
-      return request.resource.size < 512000; // 500 Ko
+      return request.resource.data.keys().size() <= 60;
     }
 
     // ✅ HYBRIDE : le client ne peut plus s'auto-annuler qu'avant que le
@@ -225,6 +235,39 @@ service cloud.firestore {
       }
     }
 
+    // =========================================================
+    // JETONS FCM PRÉ-INSCRIPTION (deviceTokens/{token})
+    // Un token FCM est lié à l'APPAREIL, pas au compte — le SDK Firebase
+    // Messaging peut le fournir dès que la permission notif est accordée,
+    // avant toute création de compte. On le stocke ici temporairement ;
+    // à la connexion/inscription, AuthContext le migre vers
+    // users/{uid}/tokens/{token} et supprime le doc ici (voir
+    // migratePendingFcmToken dans AuthContext.tsx).
+    //
+    // Écriture ouverte aux non-authentifiés PAR NÉCESSITÉ (c'est tout
+    // l'intérêt : capter le token avant login) mais bornée strictement :
+    // seuls ces 4 champs, taille raisonnable, et l'id du document doit
+    // être le token lui-même (empêche d'écrire des données arbitraires
+    // sous un id qu'on choisirait librement). Le contenu (un token FCM)
+    // n'est pas une donnée sensible en soi — ce n'est exploitable qu'en
+    // combinaison avec l'accès Admin SDK au serveur d'envoi de notifs.
+    // =========================================================
+    match /deviceTokens/{tokenId} {
+      allow read: if isAdmin();
+      allow create, update: if request.resource.data.token == tokenId
+                    && request.resource.data.keys().hasOnly(['token', 'createdAt', 'platform', 'userAgent'])
+                    && tokenId.size() <= 512
+                    && request.resource.data.platform in ['web', 'android', 'ios']
+                    && (!('userAgent' in request.resource.data)
+                        || (request.resource.data.userAgent is string
+                            && request.resource.data.userAgent.size() <= 512));
+      // Suppression réservée à un utilisateur authentifié (nettoyage après
+      // migration réussie vers users/{uid}/tokens/{token}) — inutile de
+      // l'ouvrir aux non-authentifiés, et sans intérêt à la restreindre à
+      // l'auteur puisque le doc ne porte aucune trace de propriétaire.
+      allow delete: if isAuth();
+    }
+
     // Requête collectionGroup('tokens') utilisée par le dashboard admin
     // pour diffuser les notifications push à tous les utilisateurs.
     match /{path=**}/tokens/{tokenId} {
@@ -334,8 +377,55 @@ service cloud.firestore {
         'delivererId', 'delivererName', 'delivererPhone', 'delivererAssignedAt',
         'status', 'statusLabel', 'updatedAt', 'deliveredAt', 'tracking',
         'dateDepart', 'dateArrivee', 'dateRetour', 'dateLivree',
-        'dateProbleme', 'noteProbleme',
+        'dateProbleme', 'noteProbleme', 'problemResolvedAt',
       ]);
+    }
+
+    // 🔐 SUPERSEDED (Cloud Functions claimOrder / confirmDeliveryWithCode,
+    // Admin SDK) : la prise en charge d'une commande et la confirmation de
+    // livraison n'écrivent plus JAMAIS delivererId/status/deliveryCode*
+    // directement depuis le client — ces deux Cloud Functions contournent
+    // de toute façon ces règles. Ce qui reste légitime ici : les mises à
+    // jour de suivi GPS en direct (fréquentes, pas besoin d'un aller-retour
+    // serveur pour chaque position), UNIQUEMENT sur une commande déjà
+    // assignée à l'appelant. isDelivererOrderUpdate() ci-dessus est
+    // conservée définie (au cas où) mais n'est plus référencée : la laisser
+    // active rouvrirait exactement la porte que le code de livraison sert à
+    // fermer (un livreur pourrait s'auto-assigner une commande, ou la faire
+    // passer à 'livre', sans jamais fournir le code que le client lui a
+    // communiqué).
+    function isDelivererTrackingUpdate() {
+      return onlyChanges([
+        'tracking', 'updatedAt', 'dateDepart', 'dateArrivee', 'dateRetour',
+        // 🔒 FIX (session signalements) : reportProblem() écrit désormais
+        // aussi `problemResolvedAt: null` sur CHAQUE signalement (voir
+        // delivery/dashboard/page.tsx) — pour qu'un nouveau signalement ne
+        // reste pas masqué par la résolution d'un signalement précédent
+        // dans l'onglet admin "Signalements livreurs" (admin/page.tsx::
+        // resolveProblem). Sans ce champ ici, onlyChanges() rejette TOUT
+        // le batch (orders ET seller_orders) dès qu'un livreur signale un
+        // problème — le champ 'problemResolvedAt' n'étant écrit QUE par
+        // le livreur (toujours à `null`, jamais une autre valeur) ou par
+        // l'admin (bypass total via isAdmin() ci-dessous), l'ouvrir ici ne
+        // permet pas au livreur de se marquer lui-même "résolu" avec autre
+        // chose que null.
+        'dateProbleme', 'noteProbleme', 'problemResolvedAt',
+      ]);
+    }
+
+    // 🔒 FIX (session "vendeur ne marque plus livré") : le bouton "Marquer
+    // comme livrée" a été retiré de seller/orders/page.tsx — mais retirer
+    // un bouton ne bloque qu'un clic dans l'UI, pas une écriture directe
+    // (devtools, requête réseau manuelle...). Sans cette garde, la règle
+    // `isSeller() && resource.data.sellerId == ...` ci-dessous n'imposait
+    // AUCUNE restriction de champ/valeur : le vendeur pouvait toujours
+    // écrire status:'livre' lui-même, exactement ce que ce changement de
+    // produit visait à interdire. Seule confirmDeliveryWithCode (livreur +
+    // code du client, Cloud Function Admin SDK) peut désormais faire
+    // passer une commande à 'livre'.
+    function isSellerOrderUpdate() {
+      return request.resource.data.get('status', resource.data.get('status', null)) != 'livre'
+          || resource.data.get('status', null) == 'livre';
     }
 
     match /orders/{orderId} {
@@ -344,18 +434,21 @@ service cloud.firestore {
                   || (isSeller() && resource.data.sellerId == request.auth.uid)
                   // Un livreur voit les commandes qui lui sont déjà assignées...
                   || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid)
-                  // ...ainsi que celles encore 'en_attente' (jamais assignées à ce stade —
-                  // claimOrder()/assignDelivery()/assignDeliveryPerson() posent delivererId
-                  // EN MÊME TEMPS que le passage à 'en_livraison', jamais avant), nécessaire
-                  // pour la liste "commandes disponibles".
-                  // ⚠️ Basé sur `status` (champ du where() de la requête) et non `delivererId`
-                  // (absent du where()) : une requête list() ne peut être autorisée que si
-                  // Firestore peut prouver la règle à partir des seuls champs filtrés par la
-                  // requête elle-même — "les règles ne sont pas des filtres". La version
-                  // précédente (`delivererId == null`) faisait échouer la requête list()
-                  // entière pour tout compte livreur réel (ne fonctionnait que pour un admin,
-                  // dont la règle ne dépend pas de resource.data).
-                  || (isDeliverer() && resource.data.status == 'en_attente');
+                  // ...ainsi que celles pas encore assignées, pour la liste
+                  // "commandes disponibles" — 'en_attente' (le vendeur n'a pas
+                  // encore confirmé, le livreur peut se positionner à l'avance)
+                  // ET 'en_preparation' (déjà confirmée, prête à partir).
+                  // 🔒 FIX RACINE : cette règle ne couvrait auparavant QUE
+                  // 'en_attente'. delivery/dashboard/page.tsx interroge
+                  // `where('status', 'in', ['en_attente', 'en_preparation'])` —
+                  // Firestore ne peut autoriser une requête list() que si la
+                  // règle est prouvable pour TOUTES les valeurs filtrées par la
+                  // requête elle-même. Résultat concret : la requête ENTIÈRE
+                  // (les deux statuts, pas seulement 'en_preparation') échouait
+                  // en permission-denied pour tout compte livreur réel — la file
+                  // "disponibles" restait vide silencieusement, quel que soit le
+                  // statut des commandes en attente.
+                  || (isDeliverer() && resource.data.status in ['en_attente', 'en_preparation']);
 
       // ✅ Assoupli : plus d'exigences sur les champs (items/total/status/
       // livraison...), qui bloquaient le checkout dès qu'un flux envoyait
@@ -386,12 +479,31 @@ service cloud.firestore {
       // isOrderCompletionUpdate() reste : c'est le checkout (finalisation
       // immédiate après création), sans rapport avec ce changement.
       allow update: if (isOwner(resource.data.userId) && isOrderCompletionUpdate())
-                    || (isSeller() && resource.data.sellerId == request.auth.uid)
-                    || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid && isDelivererOrderUpdate())
-                    || (isDeliverer() && resource.data.get('delivererId', null) == null && isDelivererOrderUpdate())
+                    || (isSeller() && resource.data.sellerId == request.auth.uid && isSellerOrderUpdate())
+                    // 🔐 Depuis claimOrder/confirmDeliveryWithCode (Cloud
+                    // Functions, Admin SDK) : plus de branche "commande libre,
+                    // le livreur se l'assigne en écrivant directement" — ce
+                    // serait contourner la génération/vérification du code.
+                    // Seule reste la mise à jour de suivi GPS sur une commande
+                    // déjà assignée à l'appelant.
+                    || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid && isDelivererTrackingUpdate())
                     || isAdmin();
 
       allow delete: if false;
+    }
+
+    // 🔐 Code de livraison en clair — écrit et lu UNIQUEMENT par les Cloud
+    // Functions claimOrder / getDeliveryCode / confirmDeliveryWithCode
+    // (Admin SDK, hors de ces règles). Aucun accès client dans aucun sens :
+    // ni le livreur (qui ne doit jamais le voir), ni même le propriétaire
+    // de la commande — lui aussi passe par getDeliveryCode(), qui vérifie
+    // order.userId == uid côté serveur avant de le renvoyer. Une règle
+    // explicite plutôt que de compter sur le "interdit par défaut" en fin
+    // de fichier : si une future règle plus permissive est ajoutée sur
+    // orders/{orderId}/{document=**}, celle-ci reste prioritaire et bloque
+    // toujours l'accès.
+    match /orders/{orderId}/secure/{docId} {
+      allow read, write: if false;
     }
 
     // Miroir de orders côté vendeur (writeBatch sur orders + seller_orders)
@@ -448,9 +560,10 @@ service cloud.firestore {
       // qu'/orders ci-dessus, pour la même raison : soit le livreur déjà
       // assigné à cette commande, soit une commande encore libre qu'il est
       // en train de réclamer.
-      allow update: if (isSeller() && resource.data.sellerId == request.auth.uid)
-                    || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid && isDelivererOrderUpdate())
-                    || (isDeliverer() && resource.data.get('delivererId', null) == null && isDelivererOrderUpdate())
+      allow update: if (isSeller() && resource.data.sellerId == request.auth.uid && isSellerOrderUpdate())
+                    // 🔐 Même durcissement que sur /orders ci-dessus : plus de
+                    // branche "commande libre, auto-assignation directe".
+                    || (isDeliverer() && resource.data.get('delivererId', null) == request.auth.uid && isDelivererTrackingUpdate())
                     || isAdmin();
 
       allow delete: if false;
@@ -677,6 +790,21 @@ service cloud.firestore {
     match /inactive_client_alerts/{docId} {
       allow read: if isAdmin();
       allow write: if false;
+    }
+    match /pending_signup_reminders/{docId} {
+      allow read: if isAdmin();
+      allow write: if false; // écrit uniquement via Admin SDK (/api/system/periodic-checks)
+    }
+
+    // =========================================================
+    // RATE-LIMIT ACCÈS INVITÉ (findGuestOrders / claimGuestOrderSession /
+    // startGuestCheckoutSession) — écrit et lu UNIQUEMENT par les Cloud
+    // Functions correspondantes (Admin SDK). Aucun accès client : exposer
+    // ne serait-ce que la lecture permettrait de sonder qui a déjà atteint
+    // la limite, ou de la remettre à zéro depuis le navigateur.
+    // =========================================================
+    match /guestAccessAttempts/{key} {
+      allow read, write: if false;
     }
 
     // =========================================================

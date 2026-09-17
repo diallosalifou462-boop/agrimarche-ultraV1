@@ -4,7 +4,7 @@ import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useRouter, usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
-import Image from "next/image";
+import BrandLogo from '@/components/BrandLogo';
 
 import { useAuth } from "@/hooks/useAuth";
 import { useCart } from "@/hooks/useCart";
@@ -95,15 +95,10 @@ function NavbarContent() {
             className="flex items-center gap-2 flex-shrink-0"
           >
 
-            <Image
-              src="/logo.png"
-              alt="Logo"
-              width={40}
-              height={40}
-            />
+            <BrandLogo size={40} variant="mark" />
 
             <span className="font-bold text-green-700 text-lg hidden sm:block tracking-tight">
-              AgriMarché
+              Sunu Mëñëf
             </span>
 
           </Link>

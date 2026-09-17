@@ -148,7 +148,7 @@ export default function PrivacySettingsPage() {
           </div>
           <div>
             <h1 className="text-white text-xl font-black leading-tight">Confidentialité</h1>
-            <p className="text-white/70 text-xs mt-0.5">Contrôlez ce qu'AgriMarché personnalise pour vous</p>
+            <p className="text-white/70 text-xs mt-0.5">Contrôlez ce que Sunu Mëñëf personnalise pour vous</p>
           </div>
         </div>
       </div>

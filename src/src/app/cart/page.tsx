@@ -279,7 +279,7 @@ export default function CartPage() {
 
         <div className="mt-10 flex items-center justify-center gap-2">
           <div className="w-12 h-px bg-gradient-to-r from-transparent to-emerald-300" />
-          <p className="text-[6px] text-gray-300 tracking-[4px] font-light">AGRIMARCHÉ SÉNÉGAL</p>
+          <p className="text-[6px] text-gray-300 tracking-[4px] font-light">SUNU MËÑËF SÉNÉGAL</p>
           <div className="w-12 h-px bg-gradient-to-l from-transparent to-emerald-300" />
         </div>
       </div>

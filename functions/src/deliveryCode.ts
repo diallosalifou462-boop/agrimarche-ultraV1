@@ -52,7 +52,7 @@ async function ensureGuestUser(uid: string, normalizedPhone: string, displayName
   if (!userSnap.exists) {
     await userRef.set({
       uid, phone: normalizedPhone, role: 'buyer', isGuest: true,
-      displayName: displayName || 'Client SunuMëñëf',
+      displayName: displayName || 'Client Sunu Mëñëf',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
   }
@@ -219,7 +219,7 @@ export const confirmDeliveryWithCode = onCall({ region: REGION }, async (request
 
     const attempts = order.deliveryCodeAttempts ?? 0;
     if (attempts >= MAX_CODE_ATTEMPTS) {
-      throw new HttpsError('resource-exhausted', 'Trop de tentatives sur cette commande — contactez le support SunuMëñëf.');
+      throw new HttpsError('resource-exhausted', 'Trop de tentatives sur cette commande — contactez le support Sunu Mëñëf.');
     }
 
     const submitted = hashCode(String(code).trim(), order.deliveryCodeSalt);

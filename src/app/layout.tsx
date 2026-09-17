@@ -34,7 +34,7 @@ import { Toaster } from 'sonner';
 // src/app/dashboard/seller/layout.tsx — rien à changer là-bas.
 
 export const metadata: Metadata = {
-  title: 'AgriMarché Sénégal',
+  title: 'Sunu Mëñëf Sénégal',
   description: 'La marketplace agricole du Sénégal',
 };
 

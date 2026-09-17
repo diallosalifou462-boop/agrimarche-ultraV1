@@ -1,6 +1,6 @@
 'use client';
 
-import Image from 'next/image';
+import BrandLogo from '@/components/BrandLogo';
 import { useState, useEffect, useRef, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
@@ -472,9 +472,9 @@ function LoginContent() {
       <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-sm">
         <div className="text-center mb-6">
           <div className="inline-flex items-center justify-center w-24 h-24 rounded-full bg-white shadow-lg ring-4 ring-green-100 mb-3 overflow-hidden">
-            <Image src="/logo.png" alt="AgriMarché" width={96} height={96} className="w-full h-full object-cover rounded-full" />
+            <BrandLogo size={96} variant="full" className="w-full h-full rounded-full" />
           </div>
-          <h1 className="text-2xl font-bold mt-3">Bienvenue sur AgriMarché</h1>
+          <h1 className="text-2xl font-bold mt-3">Bienvenue sur Sunu Mëñëf</h1>
           <p className="text-sm text-gray-500 mt-1">Connexion sécurisée par SMS</p>
         </div>
 

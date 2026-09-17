@@ -76,7 +76,7 @@ function TrackingMap({
       const L = (window as any).L;
       if (!L) return;
 
-      const center = driverLoc || destLoc || { lat: 48.8566, lng: 2.3522 };
+      const center = driverLoc || destLoc || { lat: 14.7167, lng: -17.4677 }; // Dakar (était Paris)
       const map = L.map(mapRef.current, {
         center: [center.lat, center.lng],
         zoom: 15,

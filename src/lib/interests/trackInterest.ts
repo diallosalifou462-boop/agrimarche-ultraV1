@@ -113,7 +113,7 @@ export async function setPersonalizedNotificationsEnabled(
 // le résumé hebdomadaire. setDoc avec merge:true fusionne en profondeur
 // dans la map existante, donc écrire { restock: false } ne touche pas une
 // éventuelle valeur déjà présente pour { digest: ... }.
-export type NotificationCategory = 'restock' | 'digest';
+export type NotificationCategory = 'restock' | 'digest' | 'price_drop' | 'reorder' | 'cart';
 export async function setNotificationPreference(
   userId: string,
   category: NotificationCategory,

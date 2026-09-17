@@ -148,7 +148,7 @@ export default function SellerCard({
 
         <p className="text-sm text-gray-700 leading-relaxed">
 
-          🌾 Producteur agricole présent sur AgriMarché.
+          🌾 Producteur agricole présent sur Sunu Mëñëf.
           Produits frais, livraison rapide et service fiable.
 
         </p>

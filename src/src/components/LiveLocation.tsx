@@ -166,7 +166,7 @@ export function LiveLocation() {
       const response = await fetch(url.toString(), {
         headers: {
           'Accept': 'application/json',
-          'User-Agent': 'AgriMarche/2.0',
+          'User-Agent': 'SunuMenef/2.0',
         },
       });
 

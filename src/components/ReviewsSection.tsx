@@ -82,7 +82,7 @@ export default function ReviewsSection({ sellerId, sellerName }: ReviewsSectionP
 
   const handleSubmitReview = async () => {
     if (!user) {
-      alert('Connectez-vous pour laisser un avis');
+      alert('Créez votre compte pour laisser un avis');
       return;
     }
     

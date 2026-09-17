@@ -194,7 +194,7 @@ async function fetchProductsContext(): Promise<string> {
       const p = d.data() as { name?: string; price?: number; stock?: number; region?: string; category?: string };
       return `- ${p.name} (${p.category ?? 'produit'}): ${p.price?.toLocaleString('fr-FR')} FCFA, stock: ${p.stock}${p.region ? `, région: ${p.region}` : ''}`;
     });
-    if (lines.length) return `🛒 **Catalogue AgriMarché** (${lines.length} produits récents):\n${lines.join('\n')}`;
+    if (lines.length) return `🛒 **Catalogue Sunu Mëñëf** (${lines.length} produits récents):\n${lines.join('\n')}`;
   } catch { /* ignore */ }
   return '🛒 Catalogue : Maïs hybride 25 000 FCFA, Mil certifié 22 000 FCFA, Engrais NPK 35 000 FCFA, Pesticide bio 18 000 FCFA, Semences arachide 30 000 FCFA.';
 }
@@ -219,7 +219,7 @@ async function fetchMarketPricesContext(): Promise<string> {
         const dateStr = updatedAt
           ? updatedAt.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' })
           : 'date inconnue';
-        const sourceLabel = data.source ?? 'AgriMarché';
+        const sourceLabel = data.source ?? 'Sunu Mëñëf';
         const simulatedNote = data.isSimulated
           ? ' *(données indicatives — vérifiez sur le marché local)*'
           : '';
@@ -308,15 +308,15 @@ async function callDeepSeek(
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
   });
 
-  const systemPrompt = `Tu es **Agri**, l'assistant IA officiel d'AgriMarché Sénégal — la plateforme agricole de référence au Sénégal.
+  const systemPrompt = `Tu es **Agri**, l'assistant IA officiel de Sunu Mëñëf Sénégal — la plateforme agricole de référence au Sénégal.
 
 **Ta mission principale :**
-Rendre l'abonnement AgriMarché Premium INDISPENSABLE en apportant une valeur concrète et mesurable aux agriculteurs sur ces 7 piliers :
+Rendre l'abonnement Sunu Mëñëf Premium INDISPENSABLE en apportant une valeur concrète et mesurable aux agriculteurs sur ces 7 piliers :
 
 ---
 
 ## 1. 📣 PLUS DE CLIENTS
-- Conseille l'agriculteur sur comment optimiser ses annonces AgriMarché (photos, description, prix compétitif)
+- Conseille l'agriculteur sur comment optimiser ses annonces Sunu Mëñëf (photos, description, prix compétitif)
 - Indique les périodes de forte demande par culture et région
 - Suggère des cultures à fort potentiel commercial selon la saison
 - Aide à rédiger des descriptions de produits attractives
@@ -345,7 +345,7 @@ Rendre l'abonnement AgriMarché Premium INDISPENSABLE en apportant une valeur co
 - Fournis le bilan hydrique (ETP vs précipitations) quand disponible
 
 ## 5. 🚚 LOGISTIQUE
-- Explique comment utiliser la livraison AgriMarché pour réduire les coûts de transport
+- Explique comment utiliser la livraison Sunu Mëñëf pour réduire les coûts de transport
 - Conseil sur les regroupements de commandes entre agriculteurs du même village
 - Calcule le coût logistique estimé selon la distance et le volume
 - Suggère les meilleures solutions de transport selon le produit (réfrigéré, vrac, ensaché)
@@ -356,7 +356,7 @@ Rendre l'abonnement AgriMarché Premium INDISPENSABLE en apportant une valeur co
 - Alerte sur les opportunités : "La tomate va manquer dans 3 semaines, c'est le bon moment pour planter"
 - Indique les événements qui impactent les prix : Tabaski, Korité, saison des pluies, récoltes massives
 - Compare les marges par culture pour aider les choix de diversification
-- Signale les nouveaux acheteurs professionnels actifs sur AgriMarché
+- Signale les nouveaux acheteurs professionnels actifs sur Sunu Mëñëf
 
 ## 7. 💳 ACCÈS AU CRÉDIT ET À L'ASSURANCE
 - Simule des crédits agricoles : montant, durée, taux, mensualités en FCFA
@@ -378,7 +378,7 @@ Montant : X FCFA | Durée : N mois | Taux : 10–14% | Mensualité : Y FCFA | Co
 - Sois précis, professionnel et chaleureux — tu es un conseiller de confiance
 - Termine TOUJOURS par une action concrète à faire maintenant
 - Max 350 mots sauf si calcul financier complexe (alors jusqu'à 500)
-- Ne jamais dire "je suis une IA" — tu es Agri, le conseiller d'AgriMarché
+- Ne jamais dire "je suis une IA" — tu es Agri, le conseiller de Sunu Mëñëf
 
 **Contexte utilisateur :**
 - Nom : ${userName}
@@ -414,11 +414,11 @@ ${contextParts.length ? `\n**Données temps réel :**\n${contextParts.join('\n\n
 // QUICK PROMPTS — Les 7 piliers de valeur
 // ─────────────────────────────────────────────────────────────────────────────
 const QUICK_PROMPTS = [
-  { label: '📣 Plus de clients',    q: "Comment vendre plus de produits sur AgriMarché ? Donne-moi des conseils pour attirer plus d'acheteurs." },
+  { label: '📣 Plus de clients',    q: "Comment vendre plus de produits sur Sunu Mëñëf ? Donne-moi des conseils pour attirer plus d'acheteurs." },
   { label: '💰 Meilleur prix',      q: 'Quel est le meilleur moment pour vendre mon maïs ? Analyse les prix actuels du marché.' },
   { label: '📉 Réduire les pertes', q: "Comment réduire les pertes post-récolte de mon stock de céréales ? Quelles solutions de conservation ?" },
   { label: '🌤️ Météo & cultures',  q: "Quelle est la météo à Dakar aujourd'hui et comment ça impacte mes cultures ?" },
-  { label: '🚚 Logistique',        q: "Comment utiliser la livraison AgriMarché pour réduire mes coûts de transport ?" },
+  { label: '🚚 Logistique',        q: "Comment utiliser la livraison Sunu Mëñëf pour réduire mes coûts de transport ?" },
   { label: '📊 Alertes marché',    q: "Quelles sont les tendances du marché agricole cette semaine ? Y a-t-il des opportunités à saisir ?" },
   { label: '💳 Crédit agricole',   q: 'Simule un prêt de 500 000 FCFA sur 18 mois pour acheter des intrants. Quelles banques me conseilles-tu ?' },
 ];
@@ -573,7 +573,7 @@ export default function AIAssistantPage() {
     const name = profile?.displayName || user?.email?.split('@')[0] || 'cher agriculteur';
     setMessages([{
       id: 'welcome',
-      text: `${salut}, **${name}** 👋\n\nJe suis **Agri**, votre conseiller IA d'AgriMarché Sénégal.\n\nJe suis ici pour vous aider à :\n· 📣 **Trouver plus de clients** et booster vos ventes\n· 💰 **Vendre au meilleur prix** grâce aux données marché en temps réel\n· 📉 **Réduire vos pertes** post-récolte\n· 🌤️ **Anticiper la météo** et ses impacts sur vos cultures\n· 🚚 **Optimiser votre logistique** de livraison\n· 📊 **Recevoir des alertes marché** sur les opportunités\n· 💳 **Accéder au crédit et à l'assurance** agricole\n\nQuelle est votre situation aujourd'hui ?`,
+      text: `${salut}, **${name}** 👋\n\nJe suis **Agri**, votre conseiller IA de Sunu Mëñëf Sénégal.\n\nJe suis ici pour vous aider à :\n· 📣 **Trouver plus de clients** et booster vos ventes\n· 💰 **Vendre au meilleur prix** grâce aux données marché en temps réel\n· 📉 **Réduire vos pertes** post-récolte\n· 🌤️ **Anticiper la météo** et ses impacts sur vos cultures\n· 🚚 **Optimiser votre logistique** de livraison\n· 📊 **Recevoir des alertes marché** sur les opportunités\n· 💳 **Accéder au crédit et à l'assurance** agricole\n\nQuelle est votre situation aujourd'hui ?`,
       sender: 'bot',
       timestamp: new Date(),
       model: 'deepseek-chat',
@@ -747,7 +747,7 @@ export default function AIAssistantPage() {
                 <span className="agent-name">Agri</span>
                 <span className="agent-badge">DeepSeek</span>
               </div>
-              <span className="agent-sub">AgriMarché Sénégal · IA en ligne</span>
+              <span className="agent-sub">Sunu Mëñëf Sénégal · IA en ligne</span>
             </div>
           </div>
 

@@ -55,8 +55,8 @@ export function useFCMToken() {
           // iOS et sans effet si le canal existe déjà (createChannel est idempotent).
           if (getNativePlatformName() === 'android') {
             const channels: Array<{ id: string; name: string; importance: number; visibility: number; vibration: boolean }> = [
-              { id: 'agrimarche_default', name: 'Notifications AgriMarché', importance: 4, visibility: 1, vibration: true },
-              { id: 'agrimarche_urgent', name: 'Alertes urgentes AgriMarché', importance: 5, visibility: 1, vibration: true },
+              { id: 'agrimarche_default', name: 'Notifications Sunu Mëñëf', importance: 4, visibility: 1, vibration: true },
+              { id: 'agrimarche_urgent', name: 'Alertes urgentes Sunu Mëñëf', importance: 5, visibility: 1, vibration: true },
             ];
             await Promise.all(
               channels.map((c) =>

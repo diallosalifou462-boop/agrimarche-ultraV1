@@ -69,7 +69,7 @@ export default function RetrouverCommandePage() {
     <div style={{ minHeight: '100vh', background: '#FAFAF8', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '32px 20px' }}>
       <div style={{ width: '100%', maxWidth: 420, marginTop: 24 }}>
         <p style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', color: '#C9A96E', textTransform: 'uppercase', textAlign: 'center' }}>
-          AgriMarché
+          Sunu Mëñëf
         </p>
         <h1 style={{ fontSize: 20, fontWeight: 800, color: '#1A1A1A', textAlign: 'center', margin: '6px 0 6px' }}>
           Retrouver ma commande

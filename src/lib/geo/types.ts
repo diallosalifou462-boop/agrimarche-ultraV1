@@ -1,5 +1,5 @@
 /**
- * Types du système de géolocalisation AgriMarché.
+ * Types du système de géolocalisation Sunu Mëñëf.
  *
  * Historiquement, l'app ne stockait qu'une région/ville (texte libre, choisie
  * dans un menu déroulant) pour les vendeurs, et RIEN pour les produits —

@@ -77,7 +77,7 @@ export default function HomePage() {
       {/* ── FEATURES ── */}
       <section className="max-w-5xl mx-auto px-4 py-16">
         <h2 className="text-2xl font-bold text-gray-900 text-center mb-10">
-          Pourquoi choisir AgriMarché ?
+          Pourquoi choisir Sunu Mëñëf ?
         </h2>
         <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
           {FEATURES.map((f) => (
@@ -110,7 +110,7 @@ export default function HomePage() {
 
       {/* ── FOOTER SIMPLE ── */}
       <footer className="px-4 py-8 text-center text-sm text-gray-400">
-        <p>AgriMarché © {new Date().getFullYear()} · La marketplace agricole du Sénégal</p>
+        <p>Sunu Mëñëf © {new Date().getFullYear()} · La marketplace agricole du Sénégal</p>
       </footer>
     </div>
   );

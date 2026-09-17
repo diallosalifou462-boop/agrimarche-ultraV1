@@ -45,11 +45,33 @@ function clientIp(rawRequest: any): string {
   );
 }
 
+// Choix du token push pour la réinitialisation :
+// 1. le token de l'appareil qui fait la demande, SEULEMENT s'il est déjà
+//    enregistré sur ce compte (users/{uid}/tokens/{token}) — sinon un
+//    tiers pourrait fournir son propre token et recevoir le code ;
+// 2. sinon le token le plus récent du compte ;
+// 3. sinon aucun → SMS Infobip.
+async function resolvePushToken(uid: string, clientToken: string): Promise<string | undefined> {
+  if (clientToken) {
+    try {
+      const doc = await admin.firestore().collection('users').doc(uid).collection('tokens').doc(clientToken).get();
+      if (doc.exists) return clientToken;
+    } catch (err) {
+      console.warn(`⚠️ Vérification du token client impossible pour ${uid}:`, err);
+    }
+  }
+  return getMostRecentPushToken(uid);
+}
+
 export const resetPasswordSendOtp = onCall(
   { region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: true },
   async (request) => {
     const phoneRaw = String(request.data?.phone ?? '');
     const phone = normalizePhoneSN(phoneRaw);
+    // Optionnels : token push de l'appareil qui fait la demande, et
+    // `forceSms` quand l'utilisateur n'a pas reçu la notification.
+    const clientPushToken = typeof request.data?.pushToken === 'string' ? request.data.pushToken.trim() : '';
+    const forceSms = request.data?.forceSms === true;
     if (!phone) throwLocalized('invalid-argument', 'INVALID_PHONE');
 
     const ip = clientIp(request.rawRequest);
@@ -99,7 +121,7 @@ export const resetPasswordSendOtp = onCall(
     // chercher un token push déjà enregistré pour lui, même si
     // l'utilisateur n'est plus authentifié sur CETTE session (mot de
     // passe oublié) — voir otpChannel.ts.
-    const pushToken = await getMostRecentPushToken(uid);
+    const pushToken = forceSms ? undefined : await resolvePushToken(uid!, clientPushToken);
     let channel: 'push' | 'sms_infobip';
     try {
       channel = await decideChannelAndSend(sessionRef.id, phone, pushToken, code, 'réinitialisation', 'reset');
@@ -110,7 +132,7 @@ export const resetPasswordSendOtp = onCall(
 
     await logAuditEvent({ type: 'reset_otp_sent', sessionId: sessionRef.id, phone, ip, channel });
 
-    return { sessionId: sessionRef.id, otpTtlSeconds: OTP_TTL_MS / 1000 };
+    return { sessionId: sessionRef.id, channel, otpTtlSeconds: OTP_TTL_MS / 1000 };
   }
 );
 
