@@ -73,10 +73,18 @@ export async function startRegistration(phone: string, pushToken?: string): Prom
   }
 }
 
-export async function resendRegistrationCode(sessionId: string, pushToken?: string): Promise<{ channel: 'push' | 'sms' }> {
-  const fn = httpsCallable<{ sessionId: string; pushToken?: string }, { channel: 'push' | 'sms' }>(functions, 'registrationResend');
+// forceSms : « Pas reçu la notification ? Recevoir le code par SMS ».
+export async function resendRegistrationCode(
+  sessionId: string,
+  pushToken?: string,
+  opts: { forceSms?: boolean } = {},
+): Promise<{ channel: 'push' | 'sms' }> {
+  const fn = httpsCallable<{ sessionId: string; pushToken?: string; forceSms?: boolean }, { channel: 'push' | 'sms' }>(
+    functions,
+    'registrationResend',
+  );
   try {
-    const res = await callWithRetry(() => fn({ sessionId, pushToken }));
+    const res = await callWithRetry(() => fn({ sessionId, pushToken: opts.forceSms ? undefined : pushToken, forceSms: opts.forceSms }));
     return res.data;
   } catch (e) {
     throw toActionError(e);

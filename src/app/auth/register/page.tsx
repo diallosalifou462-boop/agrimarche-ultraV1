@@ -15,7 +15,7 @@ import { auth } from '@/lib/firebase/firebase';
 import { Capacitor } from '@capacitor/core';
 import { detectCarrier } from '@/lib/carrier';
 import { apiUrl } from '@/lib/api-config';
-import { startRegistration, verifyRegistrationCode, completeOrangeRegistration, RegistrationActionError } from '@/lib/registrationActions';
+import { startRegistration, verifyRegistrationCode, completeOrangeRegistration, RegistrationActionError, resendRegistrationCode } from '@/lib/registrationActions';
 import { useFCMToken, PENDING_FCM_TOKEN_KEY } from '@/hooks/useFCMToken';
 import PushDiagnosticPanel from '@/components/PushDiagnosticPanel';
 import { pushDiag, maskToken, type ServerPushDiag } from '@/lib/pushDiagnostics';
@@ -284,6 +284,26 @@ export default function RegisterPage() {
   };
 
   // ─── Envoi OTP ────────────────────────────────────────
+  // « Renvoyer le code » : on relance la session EXISTANTE (registrationResend)
+  // au lieu d'en ouvrir une nouvelle. Une nouvelle session sur le même numéro
+  // était refusée par le serveur (« inscription déjà en cours »), donc le
+  // bouton échouait toujours.
+  const resendOTP = async (forceSms = false) => {
+    if (!sessionId) { await sendOTP(); return; }
+    setError('');
+    setLoading(true);
+    try {
+      const { channel } = await resendRegistrationCode(sessionId, readPendingPushToken(), { forceSms });
+      setOtpChannel(channel === 'push' ? 'push' : 'sms');
+      setOtp(['', '', '', '', '', '']);
+      setResendCooldown(60);
+    } catch (err: any) {
+      setError(err instanceof RegistrationActionError ? err.message : "Le code n'a pas pu être renvoyé");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const sendOTP = async () => {
     setError('');
     setLoading(true);
@@ -690,11 +710,21 @@ export default function RegisterPage() {
                 </p>
               ) : (
                 <button
-                  onClick={sendOTP}
+                  onClick={() => (useCustomOtpRef.current ? resendOTP(false) : sendOTP())}
                   disabled={loading}
                   className="text-sm text-green-600 hover:text-green-700 font-medium"
                 >
                   Renvoyer le code SMS
+                </button>
+              )}
+              {useCustomOtpRef.current && otpChannel === 'push' && (
+                <button
+                  type="button"
+                  onClick={() => resendOTP(true)}
+                  disabled={loading}
+                  className="block mx-auto mt-2 text-xs text-gray-500 hover:text-gray-700 underline"
+                >
+                  Pas reçu la notification ? Recevoir le code par SMS
                 </button>
               )}
             </div>

@@ -126,17 +126,43 @@ function throwLocalized(httpsCode: FunctionsErrorCode, techCode: string): never 
 // On garde les noms de métriques historiques (sent_push, sent_sms...)
 // plutôt que de migrer vers otpChannel.ts, pour ne pas casser le
 // dashboard admin qui les lit sous ces noms précis pour l'inscription.
-// 🔒 INSCRIPTION = SMS UNIQUEMENT.
-// Avant, le code partait par notification push vers l'appareil QUI FAIT
-// l'inscription. Ça ne prouve PAS que la personne possède le numéro : on
-// pouvait inscrire n'importe quel numéro depuis n'importe quel téléphone ou
-// navigateur. En plus, sur le web, la notification n'arrivait souvent pas
-// (clé VAPID absente, onglet au premier plan…) et l'utilisateur restait
-// bloqué sans code. Le token push reçu reste enregistré sur la session pour
-// les notifications APRÈS inscription, mais le code part toujours par SMS.
-// (Le mot de passe oublié garde le push : il n'est envoyé qu'à un appareil
-// déjà rattaché au compte, voir passwordReset.ts.)
-async function decideChannelAndSend(sessionId: string, phone: string, _pushToken: string | undefined, code: string): Promise<Channel> {
+// Envoi du code d'inscription : notification push d'abord (instantané et
+// gratuit), SMS Infobip si le push échoue ou si l'utilisateur le demande
+// (« Recevoir le code par SMS », forceSms).
+//
+// ⚠️ À SAVOIR : à l'inscription, le push part vers l'appareil QUI FAIT la
+// demande, pas vers le téléphone qui porte la carte SIM. Il ne prouve donc
+// pas la possession du numéro : quelqu'un peut inscrire le numéro d'un
+// tiers et empêcher le vrai propriétaire de créer son compte. Le SMS, lui,
+// le prouve. Choix produit assumé ; le repli SMS reste toujours possible.
+async function decideChannelAndSend(
+  sessionId: string,
+  phone: string,
+  pushToken: string | undefined,
+  code: string,
+  forceSms = false,
+): Promise<Channel> {
+  if (pushToken && !forceSms) {
+    try {
+      await admin.messaging().send({
+        token: pushToken,
+        notification: {
+          title: 'Sunu Mëñëf',
+          body: `Votre code de confirmation Sunu Mëñëf est : ${code}. Ce code expire dans 5 minutes.`,
+        },
+        data: { type: 'registration_otp', sessionId },
+        android: { priority: 'high' },
+        apns: { payload: { aps: { sound: 'default', 'interruption-level': 'time-sensitive' } } },
+      });
+      await bumpRegistrationMetric('sent_push');
+      return 'push';
+    } catch (err: any) {
+      console.error(`❌ Échec envoi push OTP (session ${sessionId}):`, err?.code || err);
+      await bumpRegistrationMetric('send_failed_push');
+      // on tombe sur le SMS ci-dessous plutôt que d'échouer
+    }
+  }
+
   try {
     await sendOtpSmsInfobip(phone, code);
   } catch (err: any) {
@@ -255,6 +281,8 @@ export const registrationResend = onCall(
   async (request) => {
     const sessionId = String(request.data?.sessionId ?? '');
     const newPushToken: string | undefined = request.data?.pushToken || undefined;
+    // « Pas reçu la notification ? Recevoir le code par SMS »
+    const forceSms = request.data?.forceSms === true;
     if (!sessionId) throwLocalized('invalid-argument', 'SESSION_NOT_FOUND');
 
     const ip = clientIp(request.rawRequest);
@@ -295,7 +323,7 @@ export const registrationResend = onCall(
 
     let channel: Channel;
     try {
-      channel = await decideChannelAndSend(sessionId, data.phone, pushToken, code);
+      channel = await decideChannelAndSend(sessionId, data.phone, pushToken, code, forceSms);
     } catch (err) {
       await ref.update({ status: 'send_failed' });
       const techCode = err instanceof HttpsError ? err.message : 'PUSH_SEND_FAILED';
