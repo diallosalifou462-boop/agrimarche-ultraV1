@@ -133,6 +133,7 @@ export default function RegisterPage() {
   const isNativeRef = useRef(false);
   // true si on utilise le système OTP maison (backend + Infobip) au lieu
   // de Firebase Phone Auth — cas des numéros Free/Yas et Expresso, voir lib/carrier.ts
+  const verifyingRef = useRef(false);
   const useCustomOtpRef = useRef(false);
 
   useEffect(() => { setIsClient(true); }, []);
@@ -555,8 +556,13 @@ export default function RegisterPage() {
 
   // ─── Vérification OTP + création compte ───────────────
   const handleVerifyOTP = async () => {
+    // Un deuxième appui pendant la vérification renvoie le même code sur une
+    // session DÉJÀ consommée : le serveur le refuse et « Code incorrect »
+    // s'affiche alors que le compte vient d'être créé.
+    if (loading || verifyingRef.current) return;
+    verifyingRef.current = true;
     const code = otp.join('');
-    if (code.length < 6) { setError('Entrez le code à 6 chiffres'); return; }
+    if (code.length < 6) { setError('Entrez le code à 6 chiffres'); verifyingRef.current = false; return; }
 
     setLoading(true);
     setError('');
@@ -568,7 +574,7 @@ export default function RegisterPage() {
         // functions/src/registration.ts. On ne rappelle plus signUp()
         // ici : le profil est déjà écrit, il ne reste qu'à établir la
         // session côté client avec le customToken renvoyé.
-        if (!sessionId) { setError('Session expirée, renvoyez le code'); setLoading(false); return; }
+        if (!sessionId) { setError('Session expirée, renvoyez le code'); setLoading(false); verifyingRef.current = false; return; }
         try {
           const { customToken } = await verifyRegistrationCode(sessionId, code, {
             password: formData.password,
@@ -587,18 +593,19 @@ export default function RegisterPage() {
           setError(err instanceof RegistrationActionError ? err.message : 'Code incorrect');
         } finally {
           setLoading(false);
+          verifyingRef.current = false;
         }
         return;
       }
 
       if (isNativeRef.current) {
-        if (!verificationId) { setError('Session expirée, renvoyez le code'); setLoading(false); return; }
+        if (!verificationId) { setError('Session expirée, renvoyez le code'); setLoading(false); verifyingRef.current = false; return; }
         await FirebaseAuthentication.confirmVerificationCode({ verificationId, verificationCode: code });
         // Le plugin capacitor-firebase synchronise déjà automatiquement
         // la session vers le SDK JS (skipNativeAuth n'est pas activé ici),
         // pas besoin de rejouer le credential manuellement.
       } else {
-        if (!confirmResult) { setError('Session expirée, renvoyez le code'); setLoading(false); return; }
+        if (!confirmResult) { setError('Session expirée, renvoyez le code'); setLoading(false); verifyingRef.current = false; return; }
         await confirmResult.confirm(code);
       }
 
@@ -623,6 +630,7 @@ export default function RegisterPage() {
       }
     } finally {
       setLoading(false);
+      verifyingRef.current = false;
     }
   };
 

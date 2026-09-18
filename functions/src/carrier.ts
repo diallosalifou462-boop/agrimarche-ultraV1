@@ -86,19 +86,21 @@ export async function detectCarrier(phoneE164: string): Promise<CarrierSN> {
   return 'unknown';
 }
 
-// Email synthétique des NOUVEAUX comptes : 221XXXXXXXXX@sunnumenef.sn —
+// Email synthétique des NOUVEAUX comptes : 221XXXXXXXXX@sunumenef.sn —
 // même format que la route /api/otp/verify et que phoneToEmail() de l'app.
 // ⚠️ Avant : XXXXXXXXX@gmail.com, un format qu'AUCUN écran de connexion ne
 // savait retrouver. La connexion ne fabrique plus l'email elle-même : elle
 // demande au serveur l'email réel du compte (/api/auth/check-phone), et
 // syntheticEmailCandidates() couvre tous les formats ayant existé.
 export function phoneToSyntheticEmail(phoneE164: string): string {
-  return `${phoneE164.replace(/\D/g, '')}@sunnumenef.sn`;
+  return `${phoneE164.replace(/\D/g, '')}@sunumenef.sn`;
 }
 
 export function syntheticEmailCandidates(phoneE164: string): string[] {
   const local = phoneE164.replace(/\D/g, '').replace(/^221/, '');
   return [
+    `221${local}@sunumenef.sn`,
+    `${local}@sunumenef.sn`,
     `221${local}@sunnumenef.sn`,
     `${local}@sunnumenef.sn`,
     `221${local}@agrimarche.sn`,

@@ -312,6 +312,12 @@ export function waitForFirestoreReady(timeoutMs = 5000): Promise<void> {
 // deux visites, mais on retrouve un SDK qui répond de façon fiable.
 export const storage = getStorage(app);
 
+// App Check : démarré en arrière-plan, sans bloquer l'app. Ne fait rien tant
+// que la configuration n'est pas en place (voir lib/firebase/appCheck.ts).
+import('./appCheck')
+  .then((m) => m.initAppCheck(app))
+  .catch(() => {});
+
 // ⚠️ FIX : `getAnalytics(app)` était appelé de façon synchrone et
 // inconditionnelle au chargement du module. Sur iOS (WKWebView via
 // Capacitor), Firebase Analytics peut jeter une erreur synchrone

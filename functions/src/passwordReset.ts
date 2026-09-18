@@ -64,7 +64,12 @@ async function resolvePushToken(uid: string, clientToken: string): Promise<strin
 }
 
 export const resetPasswordSendOtp = onCall(
-  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: true },
+  // enforceAppCheck: DÉSACTIVÉ (18/09) — aligné sur registrationStart.
+  // Avec App Check activé ici, l'app iOS recevait un 401 « app: MISSING »
+  // avant même d'entrer dans la function : « Une erreur est survenue » à
+  // chaque mot de passe oublié. Les protections anti-abus restent en place
+  // (limites par numéro et par IP, 5 essais max, expiration 5 min).
+  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: false },
   async (request) => {
     const phoneRaw = String(request.data?.phone ?? '');
     const phone = normalizePhoneSN(phoneRaw);
@@ -137,7 +142,12 @@ export const resetPasswordSendOtp = onCall(
 );
 
 export const resetPasswordVerifyOtp = onCall(
-  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER'], enforceAppCheck: true },
+  // enforceAppCheck: DÉSACTIVÉ (18/09) — aligné sur registrationStart.
+  // Avec App Check activé ici, l'app iOS recevait un 401 « app: MISSING »
+  // avant même d'entrer dans la function : « Une erreur est survenue » à
+  // chaque mot de passe oublié. Les protections anti-abus restent en place
+  // (limites par numéro et par IP, 5 essais max, expiration 5 min).
+  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER'], enforceAppCheck: false },
   async (request) => {
     const sessionId = String(request.data?.sessionId ?? '');
     const code = String(request.data?.code ?? '');

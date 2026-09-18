@@ -13,7 +13,7 @@
  *
  * Ce que fait le script, pour chaque numero :
  *   1. regroupe les comptes du meme numero (numero attache, ou email
- *      synthetique 221XXXXXXXXX / XXXXXXXXX @sunnumenef.sn, @agrimarche.sn
+ *      synthetique 221XXXXXXXXX / XXXXXXXXX @sunumenef.sn, @sunnumenef.sn, @agrimarche.sn
  *      ou @gmail.com) ;
  *   2. garde le compte qui a un MOT DE PASSE (le vrai compte) ;
  *   3. supprime les comptes "telephone seul" UNIQUEMENT s'ils sont vides :
@@ -22,7 +22,7 @@
  *   5. attache aussi le numero aux comptes UNIQUES email+mot de passe qui
  *      ne l'ont pas encore (evite de futurs doublons) ;
  *   6. renomme les anciens emails synthetiques @agrimarche.sn (avec ou
- *      sans 221) vers le format actuel 221XXXXXXXXX@sunnumenef.sn.
+ *      sans 221) vers le format actuel 221XXXXXXXXX@sunumenef.sn.
  *      Le mot de passe ne change pas ; la connexion retrouve l'email toute
  *      seule (/api/auth/check-phone), donc rien a faire pour l'utilisateur.
  *   Tout cas douteux (deux comptes avec mot de passe, doublon avec des
@@ -52,7 +52,7 @@ const hasPassword = (u: U) => u.providerData.some((p) => p.providerId === 'passw
 function localKey(u: U): string | null {
   const fromPhone = u.phoneNumber?.match(/^\+221(\d{9})$/)?.[1];
   if (fromPhone) return fromPhone;
-  const fromEmail = u.email?.toLowerCase().match(/^(?:221)?(\d{9})@(?:sunnumenef\.sn|agrimarche\.sn|gmail\.com)$/)?.[1];
+  const fromEmail = u.email?.toLowerCase().match(/^(?:221)?(\d{9})@(?:sunumenef\.sn|sunnumenef\.sn|agrimarche\.sn|gmail\.com)$/)?.[1];
   return fromEmail ?? null;
 }
 
@@ -78,17 +78,17 @@ async function isEmpty(u: U): Promise<{ empty: boolean; reason?: string }> {
   return { empty: true };
 }
 
-const canonicalEmail = (local: string) => `221${local}@sunnumenef.sn`;
+const canonicalEmail = (local: string) => `221${local}@sunumenef.sn`;
 let renamed = 0;
 
-/** Renomme un ancien email synthetique vers 221XXXXXXXXX@sunnumenef.sn. */
+/** Renomme un ancien email synthetique vers 221XXXXXXXXX@sunumenef.sn. */
 async function renameToCanonical(u: U, local: string): Promise<void> {
   if (!u.email || !hasPassword(u)) return;
   const target = canonicalEmail(local);
   if (u.email.toLowerCase() === target) return;
-  // Seuls les emails synthetiques @agrimarche.sn / @sunnumenef.sn sont renommes.
+  // Seuls les emails synthetiques @agrimarche.sn / @sunnumenef.sn / @sunumenef.sn sont renommes.
   // Un @gmail.com peut etre une VRAIE adresse (ex : compte livreur cree par l'admin) : on n'y touche pas.
-  if (!/^(?:221)?\d{9}@(?:sunnumenef\.sn|agrimarche\.sn)$/i.test(u.email)) return;
+  if (!/^(?:221)?\d{9}@(?:sunumenef\.sn|sunnumenef\.sn|agrimarche\.sn)$/i.test(u.email)) return;
   const taken = await admin.auth().getUserByEmail(target).then((x) => x.uid !== u.uid).catch(() => false);
   if (taken) {
     console.log(`⚠️  ${u.email} : ${target} deja utilise par un autre compte — non renomme`);
