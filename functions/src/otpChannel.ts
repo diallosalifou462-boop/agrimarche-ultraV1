@@ -71,9 +71,38 @@ export async function decideChannelAndSend(
           title: 'Sunu Mëñëf',
           body: `Votre code de ${purpose} Sunu Mëñëf est : ${code}. Ce code expire dans 5 minutes.`,
         },
-        data: { type: `${metricPrefix}_otp`, sessionId },
-        android: { priority: 'high' },
-        apns: { payload: { aps: { sound: 'default', 'interruption-level': 'time-sensitive' } } },
+        // `code` dans le data payload : l'app remplit et valide le code
+        // automatiquement dès réception (voir lib/auth/otpPushListener.ts).
+        // Aucune exposition nouvelle — le code est déjà en clair dans le
+        // corps de la notification, sur l'écran verrouillé DU MÊME appareil,
+        // et le data payload n'est lisible que par l'app elle-même.
+        data: { type: `${metricPrefix}_otp`, sessionId, code, autoSubmit: '1' },
+        android: {
+          priority: 'high',
+          // ⚠️ CRITIQUE Android 8+ : sans channelId explicite, Android place
+          // la notification sur un canal de repli d'importance BASSE — pas de
+          // bandeau, l'utilisateur ne la voit jamais, alors que FCM rapporte
+          // un envoi réussi. Canal créé au premier lancement natif
+          // (voir hooks/useFCMToken.ts).
+          notification: {
+            channelId: 'agrimarche_urgent',
+            priority: 'max',
+            defaultSound: true,
+            visibility: 'private',
+          },
+        },
+        apns: {
+          headers: { 'apns-priority': '10' },
+          // ⚠️ PAS de 'interruption-level': 'time-sensitive' ici. Ce niveau
+          // exige la capacité Apple « Time Sensitive Notifications » dans le
+          // projet Xcode ; sans elle, APNs peut REJETER la notification — et
+          // un code de vérification qui n'arrive pas est bien pire que le
+          // simple fait de ne pas percer le mode Concentration. On reste donc
+          // sur une alerte standard, acceptée sans aucune capacité
+          // particulière. À rétablir seulement après avoir activé cette
+          // capacité dans Xcode (Signing & Capabilities).
+          payload: { aps: { sound: 'default', contentAvailable: true } },
+        },
       });
       await bumpRegistrationMetric(`${metricPrefix}_sent_push`);
       return 'push';

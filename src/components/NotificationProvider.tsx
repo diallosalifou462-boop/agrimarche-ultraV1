@@ -87,6 +87,17 @@ function isNativePlatform(): boolean {
   return Boolean((window as any).Capacitor?.isNativePlatform?.());
 }
 
+// Notifications de vérification (code d'inscription, de connexion, de
+// réinitialisation). Elles ne sont ni des messages métier ni des liens : elles
+// ne doivent pas apparaître dans la cloche (un code n'a rien à faire dans un
+// historique) ni déclencher de navigation.
+const AUTH_PUSH_TYPES = new Set(['registration_otp', 'login_otp', 'reset_otp']);
+
+function isAuthPush(data: unknown): boolean {
+  const type = (data as Record<string, unknown> | null | undefined)?.type;
+  return typeof type === 'string' && AUTH_PUSH_TYPES.has(type);
+}
+
 export function NotificationProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   const { requestPermission: requestFCMToken, permission, onMessageReceived } = useFCMToken();
@@ -111,6 +122,11 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
       try {
         const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
         const listener = await FirebaseMessaging.addListener('notificationActionPerformed', (event: any) => {
+          // Les notifications d'authentification (code OTP) sont traitées par
+          // lib/auth/otpPushListener.ts, qui remplit et valide le code sur la
+          // page en cours. Naviguer ici sortirait de l'inscription en plein
+          // milieu et ferait perdre le formulaire déjà rempli.
+          if (isAuthPush(event?.notification?.data)) return;
           const target = resolveNotificationLink({ data: event?.notification?.data });
           openNotificationLink(routerRef.current, target);
         });
@@ -183,6 +199,9 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('agrimarche:push-received', { detail: payload }));
       }
+      // Code de vérification : géré par lib/auth/otpPushListener.ts, jamais
+      // ajouté à la liste in-app (voir isAuthPush ci-dessus).
+      if (isAuthPush(payload?.data)) return;
       const newNotification: Notification = {
         id: Date.now().toString(),
         title: payload.notification?.title || 'Notification',

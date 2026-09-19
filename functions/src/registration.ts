@@ -135,14 +135,28 @@ function throwLocalized(httpsCode: FunctionsErrorCode, techCode: string): never 
 // pas la possession du numéro : quelqu'un peut inscrire le numéro d'un
 // tiers et empêcher le vrai propriétaire de créer son compte. Le SMS, lui,
 // le prouve. Choix produit assumé ; le repli SMS reste toujours possible.
+// Rapport d'envoi renvoyé à l'app (panneau de diagnostic) ET écrit dans
+// l'audit : sans lui, une notification qui n'arrive pas est invisible côté
+// serveur comme côté client.
+export interface PushDiagReport {
+  tokenReceived: boolean;
+  pushAttempted: boolean;
+  pushOk: boolean;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+}
+
 async function decideChannelAndSend(
   sessionId: string,
   phone: string,
   pushToken: string | undefined,
   code: string,
   forceSms = false,
+  diag?: PushDiagReport,
 ): Promise<Channel> {
+  if (diag) diag.tokenReceived = !!pushToken;
   if (pushToken && !forceSms) {
+    if (diag) diag.pushAttempted = true;
     try {
       await admin.messaging().send({
         token: pushToken,
@@ -150,14 +164,56 @@ async function decideChannelAndSend(
           title: 'Sunu Mëñëf',
           body: `Votre code de confirmation Sunu Mëñëf est : ${code}. Ce code expire dans 5 minutes.`,
         },
-        data: { type: 'registration_otp', sessionId },
-        android: { priority: 'high' },
-        apns: { payload: { aps: { sound: 'default', 'interruption-level': 'time-sensitive' } } },
+        // `code` dans le data payload : permet à l'app de pré-remplir et de
+        // valider automatiquement dès réception (flux « tac, c'est connecté »).
+        // Aucune exposition nouvelle : le code est déjà en clair dans le
+        // corps de la notification, sur l'écran verrouillé DU MÊME appareil.
+        // Le data payload n'est lisible que par l'app elle-même.
+        data: { type: 'registration_otp', sessionId, code, autoSubmit: '1' },
+        android: {
+          priority: 'high',
+          // ⚠️ CRITIQUE Android 8+ : sans channelId explicite, la notification
+          // part sur le canal par défaut du manifeste. S'il est absent, Android
+          // la place sur un canal de repli d'importance BASSE — elle n'apparaît
+          // pas en bandeau et l'utilisateur ne la voit jamais, alors que FCM
+          // rapporte un envoi réussi. « agrimarche_urgent » est créé au premier
+          // lancement natif avec importance MAX (voir hooks/useFCMToken.ts).
+          notification: {
+            channelId: 'agrimarche_urgent',
+            priority: 'max',
+            defaultSound: true,
+            visibility: 'private',
+          },
+        },
+        apns: {
+          headers: { 'apns-priority': '10' },
+          // contentAvailable en plus de l'alerte : iOS réveille l'app pour
+          // lui livrer le data payload même si elle vient de passer en
+          // arrière-plan, donc l'auto-remplissage marche aussi au retour.
+          // contentAvailable (champ documenté du SDK Admin, traduit en
+          // « content-available » par Firebase) : iOS réveille l'app pour lui
+          // livrer le data payload, donc le remplissage automatique marche
+          // aussi quand l'app vient de passer en arrière-plan.
+          // ⚠️ PAS de 'interruption-level': 'time-sensitive' ici. Ce niveau
+          // exige la capacité Apple « Time Sensitive Notifications » dans le
+          // projet Xcode ; sans elle, APNs peut REJETER la notification — et
+          // un code de vérification qui n'arrive pas est bien pire que le
+          // simple fait de ne pas percer le mode Concentration. On reste donc
+          // sur une alerte standard, acceptée sans aucune capacité
+          // particulière. À rétablir seulement après avoir activé cette
+          // capacité dans Xcode (Signing & Capabilities).
+          payload: { aps: { sound: 'default', contentAvailable: true } },
+        },
       });
       await bumpRegistrationMetric('sent_push');
+      if (diag) diag.pushOk = true;
       return 'push';
     } catch (err: any) {
-      console.error(`❌ Échec envoi push OTP (session ${sessionId}):`, err?.code || err);
+      console.error(`❌ Échec envoi push OTP (session ${sessionId}):`, err?.code || err?.errorInfo?.code || err);
+      if (diag) {
+        diag.errorCode = err?.errorInfo?.code || err?.code || 'unknown';
+        diag.errorMessage = String(err?.message || err).slice(0, 200);
+      }
       await bumpRegistrationMetric('send_failed_push');
       // on tombe sur le SMS ci-dessous plutôt que d'échouer
     }
@@ -255,9 +311,10 @@ export const registrationStart = onCall(
       ip,
     });
 
+    const diag: PushDiagReport = { tokenReceived: !!pushToken, pushAttempted: false, pushOk: false };
     let channel: Channel;
     try {
-      channel = await decideChannelAndSend(sessionRef.id, phone, pushToken, code);
+      channel = await decideChannelAndSend(sessionRef.id, phone, pushToken, code, false, diag);
     } catch (err) {
       await sessionRef.update({ status: 'send_failed' });
       await releasePhoneReservation(phone, sessionRef.id);
@@ -266,11 +323,25 @@ export const registrationStart = onCall(
     }
 
     await sessionRef.update({ channel });
+    await logAuditEvent({
+      type: 'start',
+      sessionId: sessionRef.id,
+      phone,
+      carrier,
+      channel,
+      ip,
+      reason: diag.pushOk
+        ? 'push_ok'
+        : diag.pushAttempted
+        ? `push_failed:${diag.errorCode ?? 'unknown'}`
+        : 'no_push_token',
+    });
     await bumpRegistrationMetric('started');
     await bumpRegistrationMetric(`started_${carrier}`);
-    await logAuditEvent({ type: 'start', sessionId: sessionRef.id, phone, carrier, channel, ip });
 
-    return { sessionId: sessionRef.id, channel, maxAttempts: MAX_VERIFY_ATTEMPTS, otpTtlSeconds: OTP_TTL_MS / 1000 };
+    return { sessionId: sessionRef.id, channel, maxAttempts: MAX_VERIFY_ATTEMPTS, otpTtlSeconds: OTP_TTL_MS / 1000,
+      pushDiag: diag,
+    };
   }
 );
 
@@ -283,6 +354,7 @@ export const registrationResend = onCall(
     const newPushToken: string | undefined = request.data?.pushToken || undefined;
     // « Pas reçu la notification ? Recevoir le code par SMS »
     const forceSms = request.data?.forceSms === true;
+    const resendDiag: PushDiagReport = { tokenReceived: false, pushAttempted: false, pushOk: false };
     if (!sessionId) throwLocalized('invalid-argument', 'SESSION_NOT_FOUND');
 
     const ip = clientIp(request.rawRequest);
@@ -302,7 +374,15 @@ export const registrationResend = onCall(
     const snap = await ref.get();
     if (!snap.exists) throwLocalized('not-found', 'SESSION_NOT_FOUND');
     const data = snap.data()!;
-    if (data.status !== 'pending' && data.status !== 'send_failed' && data.status !== 'account_creation_failed') {
+    const reopenableVerifying =
+      data.status === 'verifying' &&
+      Date.now() - ((data.verifyingAt as FirebaseFirestore.Timestamp | undefined)?.toMillis() ?? 0) > 90 * 1000;
+    if (
+      data.status !== 'pending' &&
+      data.status !== 'send_failed' &&
+      data.status !== 'account_creation_failed' &&
+      !reopenableVerifying
+    ) {
       throwLocalized('failed-precondition', 'SESSION_NOT_ACTIVE');
     }
 
@@ -323,7 +403,7 @@ export const registrationResend = onCall(
 
     let channel: Channel;
     try {
-      channel = await decideChannelAndSend(sessionId, data.phone, pushToken, code, forceSms);
+      channel = await decideChannelAndSend(sessionId, data.phone, pushToken, code, forceSms, resendDiag);
     } catch (err) {
       await ref.update({ status: 'send_failed' });
       const techCode = err instanceof HttpsError ? err.message : 'PUSH_SEND_FAILED';
@@ -422,6 +502,17 @@ export const registrationVerify = onCall(
         // invitant à réessayer dans un instant plutôt qu'à tout
         // recommencer.
         if (data.status === 'verifying') {
+          // ⚠️ PANNE OBSERVÉE : si la création de compte est interrompue
+          // (plantage, timeout, permission manquante), la session restait
+          // bloquée en 'verifying' POUR TOUJOURS : /verify répondait
+          // « vérification en cours » et /resend refusait ce statut. Le
+          // numéro devenait inutilisable. Passé 90 s, on considère la
+          // tentative morte et on rouvre la session au renvoi de code.
+          const startedAt = (data.verifyingAt as FirebaseFirestore.Timestamp | undefined)?.toMillis() ?? 0;
+          if (Date.now() - startedAt > 90 * 1000) {
+            tx.update(ref, { status: 'account_creation_failed' });
+            throw new HttpsError('failed-precondition', 'SESSION_NOT_ACTIVE');
+          }
           throw new HttpsError('aborted', 'VERIFICATION_IN_PROGRESS');
         }
         if (data.status !== 'pending') {
@@ -442,7 +533,7 @@ export const registrationVerify = onCall(
           throw new HttpsError('invalid-argument', `INVALID_CODE:${data.maxAttempts - data.attempts - 1}`);
         }
 
-        tx.update(ref, { status: 'verifying', otpHash: admin.firestore.FieldValue.delete() });
+        tx.update(ref, { status: 'verifying', verifyingAt: admin.firestore.Timestamp.now(), otpHash: admin.firestore.FieldValue.delete() });
         return { alreadyDone: false, phone: data.phone as string, pushToken: data.pushToken as string | null, carrier: data.carrier as string };
       });
     } catch (err) {
@@ -470,8 +561,12 @@ export const registrationVerify = onCall(
     }
 
     if (claim.alreadyDone) {
+      // Le compte a déjà été créé par un appel précédent (double appui, ou
+      // reprise après un jeton non signé) : on ne recrée rien, on renvoie de
+      // quoi se connecter.
       if (!claim.uid) throwLocalized('failed-precondition', 'SESSION_NOT_ACTIVE');
-      return { uid: claim.uid };
+      const retryToken = await admin.auth().createCustomToken(claim.uid).catch(() => null);
+      return { uid: claim.uid, ...(retryToken ? { customToken: retryToken } : {}) };
     }
 
     const { phone, pushToken, carrier } = claim as { phone: string; pushToken: string | null; carrier: string };
@@ -531,6 +626,11 @@ export const registrationVerify = onCall(
       // proprement l'envoi d'un nouveau code sur la même session/réservation
       // de numéro, sans jamais retenter /verify sur l'ancien hash.
       await ref.update({ status: 'account_creation_failed' }).catch(() => {});
+      // Aucun compte n'a été créé : on LIBÈRE le numéro. Sinon il restait
+      // réservé dans phoneIndex et l'inscription répondait « déjà inscrit »
+      // alors qu'Authentication ne contenait rien (et le mot de passe oublié
+      // « aucun compte »). Authentication reste la source de vérité.
+      await releasePhoneReservation(phone, sessionId).catch(() => {});
 
       if (err instanceof PhoneAlreadyUsedError) {
         await bumpRegistrationMetric('rejected_phone_used');
@@ -548,7 +648,17 @@ export const registrationVerify = onCall(
     await logAuditEvent({ type: 'verify_success', sessionId, phone, carrier, accountId: uid });
     await logAuditEvent({ type: 'account_created', sessionId, phone, carrier, accountId: uid });
 
-    const customToken = await admin.auth().createCustomToken(uid);
-    return { uid, customToken };
+    // Le compte EXISTE désormais. Si la signature du jeton échoue (droit
+    // iam.serviceAccounts.signBlob manquant, panne IAM), on ne fait PAS
+    // échouer l'inscription : on renvoie l'uid sans jeton, et l'app se
+    // connecte avec le numéro et le mot de passe qu'elle vient de choisir.
+    let customToken: string | null = null;
+    try {
+      customToken = await admin.auth().createCustomToken(uid);
+    } catch (err) {
+      console.error(`⚠️ createCustomToken impossible (uid ${uid}) — compte créé quand même :`, err);
+      await logAuditEvent({ type: 'account_created', sessionId, phone, carrier, accountId: uid, reason: 'custom_token_failed' });
+    }
+    return { uid, ...(customToken ? { customToken } : {}) };
   }
 );

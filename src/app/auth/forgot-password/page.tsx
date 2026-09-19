@@ -18,6 +18,7 @@ import { detectCarrier } from '@/lib/carrier';
 import { apiUrl } from '@/lib/api-config';
 import { resetPasswordSendOtp, resetPasswordVerifyOtp, RegistrationActionError } from '@/lib/registrationActions';
 import { PENDING_FCM_TOKEN_KEY } from '@/hooks/useFCMToken';
+import { listenForOtpPush } from '@/lib/auth/otpPushListener';
 
 // ─── Attend que le pont natif Capacitor soit prêt ─────
 async function waitForNativeBridge(timeoutMs = 1500): Promise<boolean> {
@@ -72,6 +73,10 @@ export default function ForgotPasswordPage() {
   // Free/Yas et Expresso : session côté functions + canal réellement utilisé
   const [resetSessionId, setResetSessionId] = useState<string | null>(null);
   const [otpChannel, setOtpChannel] = useState<'push' | 'sms'>('sms');
+  // Un deuxième appui (ou un appui pendant la validation automatique)
+  // rejouerait le même code sur une session déjà consommée : le serveur le
+  // refuserait et « Code incorrect » s'afficherait à tort.
+  const verifyingRef = useRef(false);
 
   // ─── Bypass reCAPTCHA en local (dev only, flow web) ───
   useEffect(() => {
@@ -222,8 +227,13 @@ export default function ForgotPasswordPage() {
 
   const handleOtpChange = (i: number, val: string) => {
     if (!/^\d*$/.test(val)) return;
+    const wasComplete = otp.join('').length === 6;
     const next = [...otp]; next[i] = val.slice(-1); setOtp(next);
     if (val && i < 5) otpRefs.current[i + 1]?.focus();
+    // Valide au PASSAGE de 5 à 6 chiffres, jamais sur un champ déjà rempli :
+    // sinon corriger un seul chiffre consommerait une tentative par frappe.
+    const full = next.join('');
+    if (!wasComplete && full.length === 6) void verifyFnRef.current(full);
   };
   const handleOtpKeyDown = (i: number, e: React.KeyboardEvent) => {
     if (e.key === 'Backspace' && !otp[i] && i > 0) otpRefs.current[i - 1]?.focus();
@@ -234,9 +244,13 @@ export default function ForgotPasswordPage() {
     e.preventDefault();
   };
 
-  const verifyOTP = async () => {
-    const code = otp.join('');
-    if (code.length < 6) { setError('Code à 6 chiffres requis'); return; }
+  // `codeOverride` : code arrivé par notification push, validé sans attendre
+  // le prochain rendu React (otp.join('') renverrait encore l'ancienne valeur).
+  const verifyOTP = async (codeOverride?: string) => {
+    if (loading || verifyingRef.current) return;
+    verifyingRef.current = true;
+    const code = (codeOverride ?? otp.join('')).replace(/\D/g, '');
+    if (code.length < 6) { setError('Code à 6 chiffres requis'); verifyingRef.current = false; return; }
     setLoading(true); setError('');
     try {
       if (useCustomOtpRef.current) {
@@ -272,8 +286,42 @@ export default function ForgotPasswordPage() {
       if (err?.code === 'auth/invalid-verification-code') setError('Code incorrect');
       else if (err?.code === 'auth/code-expired') setError('Code expiré, renvoyez');
       else setError(err?.code ? 'Erreur de vérification' : (err?.message || 'Erreur de vérification'));
-    } finally { setLoading(false); }
+    } finally { setLoading(false); verifyingRef.current = false; }
   };
+
+  // ─── Validation AUTOMATIQUE du code reçu par notification ──────────
+  // Même principe que sur l'inscription : le serveur place le code dans le
+  // data payload du push (voir otpChannel.ts), l'app le remplit et le valide
+  // sans aucune saisie. verifyOTP est recréé à chaque rendu : on le garde
+  // dans un ref pour que l'écouteur, branché une seule fois, appelle
+  // toujours la version à jour (resetSessionId notamment).
+  const verifyFnRef = useRef(verifyOTP);
+  verifyFnRef.current = verifyOTP;
+  const autoTriedRef = useRef<string | null>(null);
+  const [autoCode, setAutoCode] = useState<string | null>(null);
+  const [autoVerifying, setAutoVerifying] = useState(false);
+
+  useEffect(() => {
+    // Branché dès le montage : les écouteurs FCM ne rejouent pas une
+    // notification déjà arrivée, donc un écouteur posé trop tard rate le code.
+    const stop = listenForOtpPush((event) => {
+      setOtp(event.code.split(''));
+      setError('');
+      setAutoCode(event.code);
+    }, 'reset_otp');
+    return stop;
+  }, []);
+
+  useEffect(() => {
+    if (!autoCode || !resetSessionId || !useCustomOtpRef.current) return;
+    if (autoTriedRef.current === autoCode) return;
+    autoTriedRef.current = autoCode;
+    setAutoVerifying(true);
+    void verifyFnRef.current(autoCode).finally(() => {
+      setAutoVerifying(false);
+      setAutoCode(null);
+    });
+  }, [autoCode, resetSessionId]);
 
   const handleNewPassword = async () => {
     if (newPassword.length < 6) { setError('6 caractères minimum'); return; }
@@ -363,6 +411,18 @@ export default function ForgotPasswordPage() {
           {otpChannel === 'push'
             ? <p className="text-sm text-gray-500 mt-1">Code envoyé par notification sur votre appareil Sunu Mëñëf</p>
             : <p className="text-sm text-gray-500 mt-1">Envoyé au <span className="font-semibold">{toE164(phone)}</span></p>}
+          {/* Le code reçu par notification se remplit et se valide seul : on le
+              dit, sinon l'utilisateur cherche à taper un code qui s'écrit tout
+              seul sous ses yeux. */}
+          {otpChannel === 'push' && !autoVerifying && (
+            <p className="text-green-600 text-xs mt-2">Aucune saisie nécessaire : le code se validera automatiquement.</p>
+          )}
+          {autoVerifying && (
+            <p className="flex items-center justify-center gap-2 text-green-700 text-sm font-medium mt-3">
+              <span className="w-4 h-4 border-2 border-green-600 border-t-transparent rounded-full animate-spin" />
+              Code reçu — vérification…
+            </p>
+          )}
         </div>
         {error && <div className="bg-red-50 text-red-600 p-3 rounded-xl text-sm mb-4">{error}</div>}
         <div className="flex justify-center gap-2 mb-6" onPaste={handleOtpPaste}>
@@ -375,7 +435,9 @@ export default function ForgotPasswordPage() {
             />
           ))}
         </div>
-        <button onClick={verifyOTP} disabled={loading || otp.join('').length < 6}
+        {/* () => verifyOTP() et non verifyOTP : sinon React passerait
+            l'événement souris comme `codeOverride`. */}
+        <button onClick={() => verifyOTP()} disabled={loading || otp.join('').length < 6}
           className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 rounded-xl transition disabled:opacity-50 mb-3">
           {loading ? 'Vérification...' : 'Confirmer'}
         </button>

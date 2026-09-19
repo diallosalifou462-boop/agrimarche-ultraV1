@@ -9,14 +9,17 @@ import {
   RecaptchaVerifier,
   signInWithPhoneNumber,
   signInWithCustomToken,
-  ConfirmationResult,
-} from 'firebase/auth';
+  ConfirmationResult, signInWithEmailAndPassword } from 'firebase/auth';
 import { auth } from '@/lib/firebase/firebase';
 import { Capacitor } from '@capacitor/core';
 import { detectCarrier } from '@/lib/carrier';
 import { apiUrl } from '@/lib/api-config';
+import { resolveLoginEmails } from '@/lib/auth/phoneSession';
 import { startRegistration, verifyRegistrationCode, completeOrangeRegistration, RegistrationActionError, resendRegistrationCode } from '@/lib/registrationActions';
 import { useFCMToken, PENDING_FCM_TOKEN_KEY } from '@/hooks/useFCMToken';
+import { listenForOtpPush } from '@/lib/auth/otpPushListener';
+import { saveRegistrationDraft, readRegistrationDraft, clearRegistrationDraft } from '@/lib/auth/registrationDraft';
+import { haptic } from '@/lib/feedback';
 import PushDiagnosticPanel from '@/components/PushDiagnosticPanel';
 import { pushDiag, maskToken, type ServerPushDiag } from '@/lib/pushDiagnostics';
 
@@ -34,7 +37,7 @@ async function waitForNativeBridge(timeoutMs = 1500): Promise<boolean> {
   return Capacitor.isNativePlatform();
 }
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
-import { Eye, EyeOff, Lock, User, Phone, Truck, Shield, MapPin, Map, Home, CheckCircle, ArrowLeft, MessageSquare } from 'lucide-react';
+import { Eye, EyeOff, Lock, User, Phone, Truck, Shield, MapPin, Map, Home, CheckCircle, ArrowLeft, MessageSquare, Bell } from 'lucide-react';
 
 // ─── Token FCM capté avant l'inscription (voir useFCMToken.ts) ────────
 // useFCMToken écrit ce token en localStorage dès qu'il est obtenu, sans
@@ -135,6 +138,13 @@ export default function RegisterPage() {
   // de Firebase Phone Auth — cas des numéros Free/Yas et Expresso, voir lib/carrier.ts
   const verifyingRef = useRef(false);
   const useCustomOtpRef = useRef(false);
+  // Résultat de la DERNIÈRE vérification : true = compte créé, false = refusée
+  // (code faux, expiré, session close). Lu par la validation automatique pour
+  // rouvrir la saisie manuelle en cas d'échec — sinon l'écran d'attente
+  // resterait affiché avec un message d'erreur et aucun moyen d'agir.
+  // Un ref et non un état : il est lu dans un .finally(), avant que React
+  // n'ait commité le rendu suivant.
+  const lastVerifyOkRef = useRef<boolean | null>(null);
 
   useEffect(() => { setIsClient(true); }, []);
 
@@ -298,6 +308,11 @@ export default function RegisterPage() {
       setOtpChannel(channel === 'push' ? 'push' : 'sms');
       setOtp(['', '', '', '', '', '']);
       setResendCooldown(60);
+      // Nouveau code en route : on réarme la validation automatique, sinon
+      // les garde-fous du code précédent bloqueraient celui-ci.
+      autoCodeRef.current = null;
+      autoVerifiedRef.current = null;
+      setAutoCode(null);
     } catch (err: any) {
       setError(err instanceof RegistrationActionError ? err.message : "Le code n'a pas pu être renvoyé");
     } finally {
@@ -367,6 +382,22 @@ export default function RegisterPage() {
           setSessionId(newSessionId);
           setStep('otp');
           setResendCooldown(60);
+          // Brouillon gardé sur l'appareil : si le système décharge l'app
+          // avant l'appui sur la notification, on reprendra ici au lieu de
+          // repartir d'un formulaire vide. Jamais le mot de passe.
+          saveRegistrationDraft({
+            sessionId: newSessionId,
+            phone: phoneE164,
+            name: formData.name,
+            region: formData.region,
+            departement: formData.departement,
+            commune: formData.commune.trim(),
+            quartier: formData.quartier.trim(),
+            channel: channel === 'push' ? 'push' : 'sms',
+          });
+          // Préchargement de la page d'arrivée pendant que l'utilisateur
+          // attend le code : à la fin, l'affichage est immédiat.
+          try { router.prefetch(getSafeRedirect()); } catch { /* best-effort */ }
         } catch (err: any) {
           const msg = err instanceof RegistrationActionError ? err.message : "Erreur lors de l'envoi du code";
           pushDiag('server', 'error', 'registrationStart a échoué', err?.techCode || err?.code || msg);
@@ -495,6 +526,17 @@ export default function RegisterPage() {
     newOtp[index] = value.slice(-1);
     setOtp(newOtp);
     if (value && index < 5) otpRefs.current[index + 1]?.focus();
+    // Saisie manuelle terminée : on valide sans attendre l'appui sur
+    // « Confirmer ». Le code est passé explicitement, donc pas de
+    // dépendance au prochain rendu React.
+    //
+    // ⚠️ Uniquement au PASSAGE de 5 à 6 chiffres. Déclencher dès que les six
+    // cases sont pleines ferait partir une tentative à CHAQUE frappe sur un
+    // champ déjà rempli — les 5 tentatives autorisées seraient brûlées en
+    // corrigeant un seul chiffre.
+    const wasComplete = otp.join('').length === 6;
+    const full = newOtp.join('');
+    if (!wasComplete && full.length === 6) void verifyFnRef.current(full);
   };
 
   const handleOtpKeyDown = (index: number, e: React.KeyboardEvent) => {
@@ -508,6 +550,7 @@ export default function RegisterPage() {
     if (paste.length === 6) {
       setOtp(paste.split(''));
       otpRefs.current[5]?.focus();
+      void verifyFnRef.current(paste);
     }
     e.preventDefault();
   };
@@ -545,23 +588,30 @@ export default function RegisterPage() {
     // du user local pour que le reste de l'app (ex: affichage de l'email)
     // ne reste pas sur l'ancien état "téléphone seul".
     await auth.currentUser?.reload();
+    clearRegistrationDraft();
+    void haptic('success');
     setStep('success');
     // On ne relâche le garde-fou qu'ICI, une fois le profil réellement
     // écrit côté serveur — pas avant. La redirection est désormais
     // explicite (/auth/login), plus besoin que le useEffect générique
     // s'en charge.
     registrationInProgressRef.current = false;
-    setTimeout(() => router.push(getSafeRedirect()), 2500);
+    setTimeout(() => router.replace(getSafeRedirect()), 2500);
   };
 
   // ─── Vérification OTP + création compte ───────────────
-  const handleVerifyOTP = async () => {
+  // `codeOverride` : code arrivé par notification push, validé sans attendre
+  // le prochain rendu React. Lire otp.join('') juste après setOtp() aurait
+  // renvoyé l'ancienne valeur (état figé dans la closure) et fait échouer la
+  // validation automatique une fois sur deux.
+  const handleVerifyOTP = async (codeOverride?: string) => {
     // Un deuxième appui pendant la vérification renvoie le même code sur une
     // session DÉJÀ consommée : le serveur le refuse et « Code incorrect »
     // s'affiche alors que le compte vient d'être créé.
     if (loading || verifyingRef.current) return;
     verifyingRef.current = true;
-    const code = otp.join('');
+    lastVerifyOkRef.current = null;
+    const code = (codeOverride ?? otp.join('')).replace(/\D/g, '');
     if (code.length < 6) { setError('Entrez le code à 6 chiffres'); verifyingRef.current = false; return; }
 
     setLoading(true);
@@ -585,11 +635,47 @@ export default function RegisterPage() {
             quartier: formData.quartier.trim(),
             role: 'client',
           });
-          await signInWithCustomToken(auth, customToken);
+          // Le compte est créé. Si le serveur n'a pas pu signer le jeton de
+          // connexion (droit IAM manquant côté Google), on se connecte avec le
+          // numéro et le mot de passe qui viennent d'être choisis : l'inscription
+          // ne doit JAMAIS échouer alors que le compte existe.
+          if (customToken) {
+            await signInWithCustomToken(auth, customToken);
+          } else {
+            let connected = false;
+            // ⚠️ FIX (19/09) : `phone` n'existait pas dans cette portée
+            // (seul `phoneE164`, local à sendOTP). Ce repli — le seul chemin
+            // de connexion quand le serveur n'a pas pu signer de customToken
+            // (droit IAM signBlob manquant) — levait donc un ReferenceError
+            // attrapé plus bas, et affichait « Code incorrect » alors que le
+            // compte venait d'être créé correctement.
+            for (const email of await resolveLoginEmails(toE164(formData.phone))) {
+              try {
+                await signInWithEmailAndPassword(auth, email, formData.password);
+                connected = true;
+                break;
+              } catch { /* format suivant */ }
+            }
+            if (!connected) {
+              lastVerifyOkRef.current = true;
+              setError('Compte créé. Connectez-vous avec votre numéro et votre mot de passe.');
+              setLoading(false);
+              verifyingRef.current = false;
+              setTimeout(() => router.replace('/auth/login'), 2500);
+              return;
+            }
+          }
+          lastVerifyOkRef.current = true;
           suppressAutoProfileRef.current = false;
+          clearRegistrationDraft();
+          void haptic('success');
           setStep('success');
-          setTimeout(() => router.push(getSafeRedirect()), 2500);
+          // 1,1 s : juste assez pour voir « Compte créé ! » et comprendre ce
+          // qui vient de se passer, assez court pour que l'enchaînement
+          // notification → compte → catalogue reste d'un seul geste.
+          setTimeout(() => router.replace(getSafeRedirect()), 1100);
         } catch (err: any) {
+          lastVerifyOkRef.current = false;
           setError(err instanceof RegistrationActionError ? err.message : 'Code incorrect');
         } finally {
           setLoading(false);
@@ -634,6 +720,165 @@ export default function RegisterPage() {
     }
   };
 
+  // ─── Validation AUTOMATIQUE du code reçu par notification ──────────
+  // « J'appuie sur Envoyer → la notification arrive → je suis dans l'app. »
+  // Le serveur place le code dans le data payload du push (voir
+  // decideChannelAndSend dans functions/src/registration.ts). Dès qu'il
+  // arrive — app ouverte, ou appui sur la notification quand elle est en
+  // fond — on remplit les 6 cases et on valide, sans aucune saisie.
+  //
+  // handleVerifyOTP est recréé à chaque rendu : on le garde dans un ref pour
+  // que l'écouteur, branché une seule fois, appelle toujours la version à
+  // jour (sinon il capturerait des états périmés : sessionId, formData…).
+  const verifyFnRef = useRef(handleVerifyOTP);
+  verifyFnRef.current = handleVerifyOTP;
+  const autoVerifiedRef = useRef<string | null>(null);
+  const [autoVerifying, setAutoVerifying] = useState(false);
+  // Code reçu mais pas encore validable : le push peut arriver AVANT que
+  // setSessionId() ait été appliqué (le serveur envoie la notification
+  // pendant registrationStart, donc avant même que l'appel ne réponde).
+  // On le met en attente ici plutôt que de le perdre.
+  const [autoCode, setAutoCode] = useState<string | null>(null);
+  const autoCodeRef = useRef<string | null>(null);
+  // Passe à true quand on renonce à la validation automatique : les 6 cases
+  // apparaissent alors. Soit l'utilisateur l'a demandé (« saisir le code
+  // moi-même »), soit la notification n'est pas arrivée à temps.
+  const [manualEntry, setManualEntry] = useState(false);
+  // Repli SMS déclenché tout seul : on le dit une fois, sans en faire un échec.
+  const [autoSmsFallback, setAutoSmsFallback] = useState(false);
+  const smsFallbackDoneRef = useRef(false);
+
+  // ─── Reprise après déchargement de l'app ───────────────────────────
+  // L'utilisateur a demandé son code, quitté l'app, et le système l'a
+  // déchargée. Il appuie sur la notification : la WebView redémarre à zéro.
+  // Sans ceci il retombait sur un formulaire vide alors que son numéro était
+  // déjà réservé côté serveur — l'impasse la plus déroutante du parcours.
+  //
+  // ⚠️ On ne restaure QUE dans ce cas précis : un code arrive alors qu'aucune
+  // session n'est en mémoire. Restaurer dès le montage aurait renvoyé sur
+  // l'écran de code un utilisateur qui revenait simplement sur la page pour
+  // recommencer — un effet de bord bien pire que le problème résolu.
+  const sessionIdRef = useRef<string | null>(null);
+  sessionIdRef.current = sessionId;
+  const [resumedDraft, setResumedDraft] = useState(false);
+
+  const restoreDraftIfNeeded = (): boolean => {
+    if (sessionIdRef.current) return true; // session vivante, rien à restaurer
+    const draft = readRegistrationDraft();
+    if (!draft) return false;
+    useCustomOtpRef.current = true;
+    setFormData((prev) => ({
+      ...prev,
+      name: draft.name,
+      phone: draft.phone.replace(/^\+221/, ''),
+      region: (draft.region as SenegalRegion) || '',
+      departement: draft.departement,
+      commune: draft.commune,
+      quartier: draft.quartier,
+    }));
+    setSessionId(draft.sessionId);
+    sessionIdRef.current = draft.sessionId;
+    setOtpChannel(draft.channel);
+    setResumedDraft(true);
+    setStep('otp');
+    return true;
+  };
+
+  useEffect(() => {
+    // Branché dès le montage, pas seulement à l'étape OTP : les écouteurs FCM
+    // ne rejouent pas les notifications déjà arrivées, donc un écouteur posé
+    // trop tard rate le code définitivement.
+    const stop = listenForOtpPush((event) => {
+      // App relancée par l'appui sur la notification : restaure la session.
+      if (!restoreDraftIfNeeded()) return;
+      // Ref posé AVANT le setState : le minuteur de repli SMS le lit pour
+      // annuler son envoi même si React n'a pas encore appliqué le rendu.
+      autoCodeRef.current = event.code;
+      setOtp(event.code.split(''));
+      setError('');
+      setAutoCode(event.code);
+      // Petite vibration : l'utilisateur sait que c'est parti sans rien lire.
+      void haptic('light');
+    }, 'registration_otp');
+    return stop;
+  }, []);
+
+  // Dès que le code ET la session sont là, on valide sans saisie.
+  useEffect(() => {
+    if (!autoCode || !sessionId || !useCustomOtpRef.current) return;
+    // Reprise après déchargement : le serveur exige le mot de passe pour
+    // créer le compte. On attend que l'utilisateur le retape plutôt que
+    // d'envoyer une requête qui sera refusée (PASSWORD_REQUIRED) et de lui
+    // afficher une erreur incompréhensible.
+    if (formData.password.length < 6) return;
+    if (autoVerifiedRef.current === autoCode) return; // déjà tenté
+    autoVerifiedRef.current = autoCode;
+    setAutoVerifying(true);
+    // Le code est passé explicitement : aucune dépendance au prochain rendu
+    // (otp.join('') renverrait encore l'ancienne valeur ici).
+    void verifyFnRef.current(autoCode).finally(() => {
+      setAutoVerifying(false);
+      setAutoCode(null);
+      // Code refusé : on affiche les cases et les boutons de renvoi. Sans
+      // ceci l'écran d'attente restait affiché avec un message d'erreur et
+      // aucun moyen d'agir — exactement l'impasse qu'on veut supprimer.
+      if (lastVerifyOkRef.current === false) {
+        setManualEntry(true);
+        void haptic('warning');
+      }
+    });
+    // formData.password est dans les dépendances pour le cas « reprise » :
+    // le code est déjà là, on n'attend plus que le mot de passe retapé.
+  }, [autoCode, sessionId, formData.password]);
+
+  // ─── Repli SMS AUTOMATIQUE ─────────────────────────────────────────
+  // Une notification peut ne jamais arriver pour des raisons hors de portée
+  // de l'app : notifications coupées au niveau du système, mode économie
+  // d'énergie, token périmé côté FCM. Avant, l'écran restait planté avec un
+  // petit lien « Pas reçu la notification ? » — c'est-à-dire une impasse
+  // pour qui ne le remarque pas. Passé ce délai, on demande nous-mêmes un
+  // SMS et on affiche les cases : l'utilisateur n'a rien à comprendre ni à
+  // appuyer, il reçoit simplement son code par un autre chemin.
+  const PUSH_GRACE_MS = 12000;
+  useEffect(() => {
+    if (step !== 'otp' || otpChannel !== 'push') return;
+    if (!sessionId || !useCustomOtpRef.current) return;
+    if (autoCode || autoVerifying || manualEntry) return;
+    if (smsFallbackDoneRef.current) return;
+
+    const timer = setTimeout(async () => {
+      // Un code vient peut-être d'arriver à la dernière seconde : on lit les
+      // refs, pas l'état React, qui peut ne pas être encore appliqué. Sans
+      // ça, on enverrait un SMS payant pour rien.
+      if (smsFallbackDoneRef.current || autoVerifiedRef.current || autoCodeRef.current) return;
+      smsFallbackDoneRef.current = true;
+      pushDiag('received', 'warn', `Aucune notification reçue en ${PUSH_GRACE_MS / 1000} s — bascule automatique sur SMS`);
+      setAutoSmsFallback(true);
+      setManualEntry(true);
+      await resendOTP(true);
+    }, PUSH_GRACE_MS);
+    return () => clearTimeout(timer);
+  }, [step, otpChannel, sessionId, autoCode, autoVerifying, manualEntry]);
+
+  // Reprise sans mot de passe : c'est la seule chose que le brouillon ne
+  // stocke jamais (un mot de passe en clair dans localStorage serait lisible
+  // par n'importe quel script de la WebView). Un champ à retaper, au lieu de
+  // tout le formulaire.
+  const needsPasswordAgain = resumedDraft && formData.password.length < 6;
+
+  // ─── Les deux états de l'écran de vérification ─────────────────────
+  // waitingForPush : le code doit arriver par notification et va se valider
+  // tout seul. On ne montre alors NI cases de saisie NI bouton — il n'y a
+  // rien à faire, et proposer un champ vide pousse l'utilisateur à chercher
+  // un code qu'il n'a pas à taper. C'est là tout l'effet recherché : il
+  // appuie une fois, et il se retrouve dans l'application.
+  // showOtpBoxes : dès qu'on retombe sur le SMS, qu'il demande à saisir
+  // lui-même, ou pendant la validation automatique — où les chiffres qui
+  // se remplissent sous ses yeux rendent le geste lisible.
+  const waitingForPush =
+    otpChannel === 'push' && !manualEntry && !autoVerifying && !autoSmsFallback && !needsPasswordAgain;
+  const showOtpBoxes = !waitingForPush;
+
   if (!isClient) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-green-50 via-white to-emerald-50 flex items-center justify-center">
@@ -646,6 +891,15 @@ export default function RegisterPage() {
   }
 
   const availableDepartments = formData.region ? DEPARTMENTS_BY_REGION[formData.region] : [];
+
+  // Free/Yas et Expresso passent par notre backend OTP, qui tente la
+  // notification avant le SMS (voir lib/carrier.ts et decideChannelAndSend).
+  // Orange reste sur Firebase Phone Auth, donc SMS Google.
+  // Champ vide ou préfixe inconnu → 'unknown', donc on annonce le SMS :
+  // c'est le défaut prudent, on ne promet jamais une notification sans
+  // savoir qu'elle est possible.
+  const detectedCarrier = detectCarrier(formData.phone);
+  const expectPushChannel = detectedCarrier === 'free' || detectedCarrier === 'expresso';
 
   // ═══════════════════════════════════════════════════════
   // ÉCRAN OTP
@@ -662,28 +916,97 @@ export default function RegisterPage() {
         <div className="w-full max-w-md">
           <div className="bg-white rounded-2xl shadow-xl p-8">
             <button
-              onClick={() => { suppressAutoProfileRef.current = false; setStep('form'); setOtp(['','','','','','']); setError(''); }}
+              onClick={() => {
+                suppressAutoProfileRef.current = false;
+                clearRegistrationDraft();
+                setResumedDraft(false);
+                setStep('form');
+                setOtp(['','','','','','']);
+                setError('');
+              }}
               className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 mb-6"
             >
               <ArrowLeft size={16} /> Retour
             </button>
 
             <div className="text-center mb-8">
-              <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-green-600 to-emerald-600 rounded-2xl mb-4 shadow-lg">
-                <MessageSquare size={28} className="text-white" />
+              {/* Icône : la cloche qui pulse tant qu'on attend la
+                  notification, l'enveloppe dès qu'on est passé au SMS. */}
+              <div className={`inline-flex items-center justify-center w-16 h-16 rounded-2xl mb-4 shadow-lg bg-gradient-to-br from-green-600 to-emerald-600 ${waitingForPush ? 'animate-pulse' : ''}`}>
+                {waitingForPush
+                  ? <Bell size={28} className="text-white" />
+                  : <MessageSquare size={28} className="text-white" />}
               </div>
-              <h2 className="text-2xl font-bold text-gray-800">{otpChannel === 'push' ? 'Vérification par notification' : 'Vérification SMS'}</h2>
+              <h2 className="text-2xl font-bold text-gray-800">
+                {autoVerifying
+                  ? 'Code reçu'
+                  : waitingForPush
+                  ? 'Vérification automatique'
+                  : 'Vérification SMS'}
+              </h2>
               <p className="text-gray-500 text-sm mt-2">
-                Code envoyé au <span className="font-semibold text-gray-700">{toE164(formData.phone)}</span>
+                {waitingForPush
+                  ? 'La notification arrive sur cet appareil. Restez ici, il n’y a rien à faire.'
+                  : <>Code envoyé au <span className="font-semibold text-gray-700">{toE164(formData.phone)}</span></>}
               </p>
+              {autoVerifying && (
+                <p className="flex items-center justify-center gap-2 text-green-700 text-sm font-medium mt-3">
+                  <span className="w-4 h-4 border-2 border-green-600 border-t-transparent rounded-full animate-spin" />
+                  Création de votre compte…
+                </p>
+              )}
+              {/* Bascule automatique vers le SMS : présentée comme une suite
+                  normale du parcours, pas comme un échec. */}
+              {autoSmsFallback && !autoVerifying && (
+                <p className="text-amber-700 bg-amber-50 rounded-xl px-3 py-2 text-xs mt-3">
+                  La notification n’est pas arrivée. Nous vous envoyons le code par SMS au {toE164(formData.phone)}.
+                </p>
+              )}
+              {/* Reprise après déchargement de l'app : il ne manque que le
+                  mot de passe, le reste du formulaire est déjà rétabli. */}
+              {needsPasswordAgain && (
+                <p className="text-blue-700 bg-blue-50 rounded-xl px-3 py-2 text-xs mt-3">
+                  Nous avons retrouvé votre inscription. Retapez le mot de passe que vous venez de choisir pour terminer.
+                </p>
+              )}
             </div>
+
+            {/* Reprise : un seul champ à remplir, pas tout le formulaire. */}
+            {needsPasswordAgain && (
+              <div className="mb-6">
+                <label className="block text-sm font-medium text-gray-700 mb-2">Votre mot de passe</label>
+                <div className="relative">
+                  <Lock size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    autoFocus
+                    value={formData.password}
+                    onChange={e => setFormData({ ...formData, password: e.target.value, confirmPassword: e.target.value })}
+                    placeholder="Au moins 6 caractères"
+                    className="w-full pl-10 pr-10 py-3 border-2 border-gray-200 rounded-xl outline-none focus:border-green-400"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(v => !v)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400"
+                  >
+                    {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                  </button>
+                </div>
+              </div>
+            )}
 
             {error && (
               <div className="bg-red-50 text-red-600 p-3 rounded-xl text-sm mb-4">{error}</div>
             )}
 
-            {/* 6 cases OTP */}
-            <div className="flex justify-center gap-3 mb-8" onPaste={handleOtpPaste}>
+            {/* 6 cases OTP — masquées tant que le code doit arriver par
+                notification : l'utilisateur n'a rien à saisir, et un champ
+                vide devant lui l'inciterait à chercher un code qu'il ne
+                doit pas taper. Elles apparaissent dès qu'on passe au SMS,
+                sur demande, ou pendant la validation automatique (on y voit
+                alors le code se remplir, ce qui rend le geste lisible). */}
+            <div className={`${showOtpBoxes ? 'flex' : 'hidden'} justify-center gap-3 mb-8`} onPaste={handleOtpPaste}>
               {otp.map((digit, i) => (
                 <input
                   key={i}
@@ -703,16 +1026,51 @@ export default function RegisterPage() {
               ))}
             </div>
 
-            <button
-              onClick={handleVerifyOTP}
-              disabled={loading || otp.join('').length < 6}
-              className="w-full bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 text-white py-3 rounded-xl font-semibold transition-all disabled:opacity-50 mb-4"
-            >
-              {loading ? 'Vérification...' : 'Confirmer le code'}
-            </button>
+            {/* Pendant l'attente de la notification : une barre de
+                progression plutôt qu'un bouton désactivé. Rien à appuyer. */}
+            {/* Trois points qui rebondissent : animations Tailwind d'origine
+                uniquement (animate-bounce), pas de keyframe maison — une
+                keyframe déclarée dans un <style jsx> est renommée par le
+                scoping et ne serait jamais trouvée par la classe. */}
+            {waitingForPush && (
+              <div className="flex items-center justify-center gap-2 mb-6" aria-label="En attente de la notification">
+                {[0, 150, 300].map((delay) => (
+                  <span
+                    key={delay}
+                    className="w-2.5 h-2.5 rounded-full bg-green-500 animate-bounce"
+                    style={{ animationDelay: `${delay}ms` }}
+                  />
+                ))}
+              </div>
+            )}
+
+            {/* () => handleVerifyOTP() et non handleVerifyOTP : sinon React
+                passerait l'événement souris en premier argument, donc comme
+                `codeOverride`. */}
+            {showOtpBoxes && (
+              <button
+                onClick={() => handleVerifyOTP()}
+                disabled={loading || otp.join('').length < 6 || needsPasswordAgain}
+                className="w-full bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 text-white py-3 rounded-xl font-semibold transition-all disabled:opacity-50 mb-4"
+              >
+                {autoVerifying ? 'Connexion…' : loading ? 'Vérification...' : 'Confirmer le code'}
+              </button>
+            )}
 
             <div className="text-center">
-              {resendCooldown > 0 ? (
+              {/* Pendant l'attente du push, on n'affiche ni compte à rebours
+                  ni bouton de renvoi : le repli SMS est automatique. Juste
+                  une issue pour qui veut saisir le code à la main tout de
+                  suite (notification lue sur un autre écran, par exemple). */}
+              {waitingForPush ? (
+                <button
+                  type="button"
+                  onClick={() => setManualEntry(true)}
+                  className="text-xs text-gray-500 hover:text-gray-700 underline"
+                >
+                  Saisir le code moi-même
+                </button>
+              ) : resendCooldown > 0 ? (
                 <p className="text-sm text-gray-400">
                   Renvoyer dans <span className="font-semibold text-gray-600">{resendCooldown}s</span>
                 </p>
@@ -725,7 +1083,7 @@ export default function RegisterPage() {
                   Renvoyer le code SMS
                 </button>
               )}
-              {useCustomOtpRef.current && otpChannel === 'push' && (
+              {useCustomOtpRef.current && otpChannel === 'push' && !waitingForPush && !autoSmsFallback && (
                 <button
                   type="button"
                   onClick={() => resendOTP(true)}
@@ -750,11 +1108,18 @@ export default function RegisterPage() {
       <div className="min-h-screen bg-gradient-to-br from-green-50 via-white to-emerald-50 flex items-center justify-center p-4">
         {pushPanel}
         <div className="bg-white rounded-2xl shadow-xl p-8 w-full max-w-md text-center">
-          <div className="inline-flex items-center justify-center w-20 h-20 bg-green-100 rounded-full mb-4">
-            <CheckCircle size={40} className="text-green-600" />
+          {/* Halo qui s'étend (animate-ping, d'origine dans Tailwind) : la
+              réussite se voit du coin de l'œil, même téléphone à la main. */}
+          <div className="relative inline-flex items-center justify-center w-20 h-20 mb-4">
+            <span className="absolute inset-0 rounded-full bg-green-200 animate-ping opacity-75" />
+            <span className="absolute inset-0 rounded-full bg-green-100" />
+            <CheckCircle size={40} className="relative text-green-600" />
           </div>
-          <h2 className="text-2xl font-bold text-gray-800 mb-2">Compte créé !</h2>
-          <p className="text-gray-500 text-sm">Numéro vérifié avec succès. Redirection vers la connexion…</p>
+          <h2 className="text-2xl font-bold text-gray-800 mb-2">Bienvenue, {formData.name.split(' ')[0] || 'bienvenue'} !</h2>
+          {/* L'utilisateur est DÉJÀ connecté à ce stade (customToken ou
+              mot de passe) : on ne le renvoie plus « vers la connexion »,
+              on l'emmène directement dans l'application. */}
+          <p className="text-gray-500 text-sm">Votre compte est prêt. Ouverture de Sunu Mëñëf…</p>
         </div>
       </div>
     );
@@ -930,15 +1295,27 @@ export default function RegisterPage() {
               </span>
             </label>
 
-            {/* BOUTON → ENVOYER OTP */}
+            {/* BOUTON → ENVOYER OTP
+                Le libellé ne promet plus « par SMS » : sur Free/Yas et
+                Expresso le code arrive par notification et se valide tout
+                seul. Annoncer un SMS qui n'arrive pas était la première
+                raison de croire que quelque chose avait échoué. */}
             <button
               type="submit"
               disabled={loading}
               className="w-full bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 text-white py-3 rounded-xl font-semibold transition-all disabled:opacity-50 flex items-center justify-center gap-2"
             >
-              <MessageSquare size={16} />
-              {loading ? 'Envoi du SMS...' : 'Recevoir le code par SMS'}
+              {expectPushChannel ? <Bell size={16} /> : <MessageSquare size={16} />}
+              {loading ? 'Un instant…' : 'Créer mon compte'}
             </button>
+
+            {/* On dit à l'avance ce qui va se passer : l'enchaînement
+                automatique se lit alors comme voulu, et non comme un bug. */}
+            <p className="text-center text-xs text-gray-500 mt-3">
+              {expectPushChannel
+                ? 'Vous recevrez une notification avec votre code. La vérification se fait automatiquement, vous n’avez rien à saisir.'
+                : 'Vous recevrez un SMS avec votre code de vérification.'}
+            </p>
           </form>
 
           <p className="text-center text-sm text-gray-600 mt-6">

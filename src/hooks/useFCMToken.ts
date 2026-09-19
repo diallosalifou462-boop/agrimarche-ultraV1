@@ -146,8 +146,16 @@ export function useFCMToken() {
   );
 
   // Brancher les listeners Firebase Messaging natifs (natif uniquement)
+  //
+  // ⚠️ FIX (19/09) : la condition était `if (!isNative || !user) return`.
+  // Or un token FCM et une notification sont liés à l'APPAREIL, pas à un
+  // compte : pendant l'inscription il n'y a aucun utilisateur, donc aucun
+  // écouteur n'était branché et un push reçu à ce moment-là était
+  // totalement invisible pour l'app (c'est le cas du code OTP envoyé par
+  // notification). On branche désormais dès que la plateforme est native.
+  // saveTokenToFirestore gère déjà l'absence d'utilisateur (deviceTokens/).
   useEffect(() => {
-    if (!isNative || !user) return;
+    if (!isNative) return;
 
     let tokenListener: any;
     let notificationListener: any;
@@ -192,7 +200,7 @@ export function useFCMToken() {
       tokenListener?.remove?.();
       notificationListener?.remove?.();
     };
-  }, [isNative, user, saveTokenToFirestore]);
+  }, [isNative, saveTokenToFirestore]);
 
   // Demander la permission et obtenir le token.
   // ⚠️ Fonctionne désormais SANS utilisateur connecté (token pré-inscription,
@@ -334,27 +342,44 @@ export function useFCMToken() {
   }, [token, user, isNative]);
 
   // Écouter les messages reçus (web et natif, même interface)
+  //
+  // ⚠️ FIX (19/09) : la branche web sortait sur `if (!isSupportedBrowser)
+  // return () => {}`. `isSupportedBrowser` étant rempli de façon
+  // ASYNCHRONE par checkSupport(), tout abonnement posé au montage
+  // tombait sur `false` et renvoyait un no-op silencieux : aucune
+  // notification web n'était jamais reçue. On résout désormais le
+  // support au moment de l'abonnement, sans dépendre de l'état React
+  // (même correction que pour requestPermission plus haut).
   const onMessageReceived = useCallback(
     (callback: (payload: any) => void) => {
       messageCallbackRef.current = callback;
 
-      if (isNative) {
+      if (isNative || isNativePlatform()) {
         // Le listener natif est déjà branché dans le useEffect ci-dessus
         return () => {
           messageCallbackRef.current = null;
         };
       }
 
-      if (!isSupportedBrowser) return () => {};
+      let cancelled = false;
+      let unsubscribe: (() => void) | null = null;
 
-      const messaging = getMessaging();
-      const unsubscribe = onMessage(messaging, (payload) => {
-        console.log('Message reçu en premier plan:', payload);
-        callback(payload);
-      });
+      (async () => {
+        const supportedNow = isSupportedBrowser || (await isSupported().catch(() => false));
+        if (!supportedNow || cancelled) return;
+        try {
+          unsubscribe = onMessage(getMessaging(), (payload) => {
+            console.log('Message reçu en premier plan:', payload);
+            callback(payload);
+          });
+        } catch (err) {
+          console.warn('[FCM] Écoute des messages web impossible :', err);
+        }
+      })();
 
       return () => {
-        unsubscribe();
+        cancelled = true;
+        unsubscribe?.();
         messageCallbackRef.current = null;
       };
     },

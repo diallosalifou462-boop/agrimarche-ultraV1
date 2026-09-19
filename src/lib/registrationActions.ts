@@ -95,20 +95,54 @@ export async function verifyRegistrationCode(
   sessionId: string,
   code: string,
   profile: RegistrationProfile,
-): Promise<{ uid: string; customToken: string }> {
-  const fn = httpsCallable<{ sessionId: string; code: string; profile: RegistrationProfile }, { uid: string; customToken: string }>(
+  // customToken peut manquer : le compte est alors créé, mais le serveur n'a
+  // pas pu signer le jeton (droit IAM). L'app se rabat sur mot de passe.
+): Promise<{ uid: string; customToken?: string }> {
+  const fn = httpsCallable<{ sessionId: string; code: string; profile: RegistrationProfile }, { uid: string; customToken?: string }>(
     functions,
     'registrationVerify',
   );
-  try {
-    // Pas de retry ici : un retry sur une vérification déjà partiellement
-    // traitée pourrait consommer une 2ᵉ tentative pour rien (voir le
-    // statut 'verifying' documenté dans registration.ts).
-    const res = await fn({ sessionId, code, profile });
-    return res.data;
-  } catch (e) {
-    throw toActionError(e);
+  // ⚠️ Retry ajouté le 19/09 — et c'est SÛR, contrairement au commentaire
+  // qui figurait ici avant. registrationVerify est idempotent côté serveur
+  // depuis le correctif des sessions bloquées :
+  //   - session déjà 'verified'  → renvoie { alreadyDone: true, uid } et
+  //     resigne un customToken, sans consommer de tentative ;
+  //   - session en 'verifying'   → renvoie VERIFICATION_IN_PROGRESS
+  //     ('aborted'), sans consommer de tentative non plus ;
+  //   - un code FAUX renvoie 'invalid-argument' (INVALID_CODE) — jamais
+  //     retenté, justement pour ne pas brûler les tentatives.
+  // Sans ce retry, une coupure réseau d'une seconde APRÈS la création du
+  // compte affichait « Erreur lors de la vérification » alors que le compte
+  // existait : l'utilisateur recommençait, et son numéro était « déjà
+  // utilisé ». C'était l'une des impasses les plus dures du parcours.
+  const RETRY_TECH_CODES = new Set(['VERIFICATION_IN_PROGRESS']);
+  const RETRY_FIREBASE_CODES = new Set([
+    'functions/unavailable',
+    'functions/deadline-exceeded',
+    'functions/internal',
+    'functions/aborted',
+  ]);
+
+  let lastError: any;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      const res = await fn({ sessionId, code, profile });
+      return res.data;
+    } catch (e: any) {
+      lastError = e;
+      const techCode = String(e?.message ?? '');
+      const retryable =
+        RETRY_TECH_CODES.has(techCode) ||
+        RETRY_FIREBASE_CODES.has(e?.code ?? '') ||
+        (typeof navigator !== 'undefined' && !navigator.onLine);
+      if (!retryable || attempt === 4) break;
+      // La création du compte côté serveur prend typiquement moins d'une
+      // seconde : on attend un peu plus à chaque tour (1 s, 2 s, 3,5 s)
+      // pour la laisser finir plutôt que de marteler la fonction.
+      await new Promise((r) => setTimeout(r, [1000, 2000, 3500][attempt - 1] ?? 3500));
+    }
   }
+  throw toActionError(lastError);
 }
 
 // Orange : appelé après signInWithPhoneNumber / FirebaseAuthentication
