@@ -10,16 +10,33 @@
 //   refusé les notifications, ou token indisponible au moment de
 //   l'inscription).
 // ============================================================
-const INFOBIP_BASE_URL = process.env.INFOBIP_BASE_URL; // ex: https://xxxxx.api.infobip.com
 const INFOBIP_API_KEY = process.env.INFOBIP_API_KEY;
 const INFOBIP_SENDER = process.env.INFOBIP_SENDER ?? 'SunuMenef';
+
+// ⚠️ PANNE OBSERVÉE (19/09) : le secret INFOBIP_BASE_URL était enregistré
+// sans le schéma (« jr9env.api.infobip.com » au lieu de « https://... »).
+// fetch() échoue alors immédiatement avec « Failed to parse URL », AVANT
+// tout appel réseau réel — invisible depuis la console Infobip, qui ne voit
+// jamais la requête. Conséquence concrète : le repli SMS (censé rattraper
+// un push qui n'arrive pas) échouait lui aussi, sans qu'aucun code ne
+// parte par aucun canal. On normalise donc ici une fois pour toutes,
+// plutôt que de dépendre d'une valeur de secret bien formée : le SMS est
+// le dernier filet, coûte de l'argent réel, et ne doit plus jamais casser
+// pour un simple préfixe manquant.
+function normalizedInfobipBaseUrl(): string | undefined {
+  const raw = process.env.INFOBIP_BASE_URL?.trim();
+  if (!raw) return undefined;
+  const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  return withScheme.replace(/\/+$/, ''); // pas de "/" final, sinon URL doublée avec le chemin ci-dessous
+}
 
 export async function sendOtpSmsInfobip(
   phoneE164: string,
   code: string,
   purpose: 'confirmation' | 'connexion' | 'réinitialisation' = 'confirmation',
 ): Promise<void> {
-  if (!INFOBIP_BASE_URL || !INFOBIP_API_KEY) {
+  const baseUrl = normalizedInfobipBaseUrl();
+  if (!baseUrl || !INFOBIP_API_KEY) {
     throw new Error('Configuration InfoBip manquante (INFOBIP_BASE_URL / INFOBIP_API_KEY).');
   }
 
@@ -42,7 +59,7 @@ export async function sendOtpSmsInfobip(
   // retries.
   let res: Response;
   try {
-    res = await fetch(`${INFOBIP_BASE_URL}/sms/2/text/advanced`, {
+    res = await fetch(`${baseUrl}/sms/2/text/advanced`, {
       method: 'POST',
       headers: {
         Authorization: `App ${INFOBIP_API_KEY}`,

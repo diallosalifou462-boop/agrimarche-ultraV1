@@ -31,7 +31,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Paramètre 'purpose' invalide" }, { status: 400, headers: CORS_HEADERS });
     }
 
-    const { main } = await findAccountsForPhone(phoneE164);
+    const { main, hasPassword } = await findAccountsForPhone(phoneE164);
     const accountExists = !!main;
 
     if (purpose === 'register' && accountExists) {
@@ -48,7 +48,11 @@ export async function POST(req: NextRequest) {
     }
     if (purpose === 'login') {
       // L'email synthétique réel du compte (le format a varié dans le temps).
-      return NextResponse.json({ ok: true, email: main?.email ?? null }, { headers: CORS_HEADERS });
+      // hasPassword=false : compte « téléphone seul » (orphelin, voir
+      // phoneAccounts.ts) — la connexion échouera TOUJOURS quel que soit le
+      // mot de passe tapé, ce n'est pas au client de le deviner via le code
+      // d'erreur Firebase (auth/invalid-credential couvre les deux cas).
+      return NextResponse.json({ ok: true, email: main?.email ?? null, hasPassword }, { headers: CORS_HEADERS });
     }
     return NextResponse.json({ ok: true }, { headers: CORS_HEADERS });
   } catch (error: any) {

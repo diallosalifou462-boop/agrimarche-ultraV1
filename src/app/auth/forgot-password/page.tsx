@@ -148,15 +148,18 @@ export default function ForgotPasswordPage() {
   };
 
   // ─── Free/Yas et Expresso : functions resetPasswordSendOtp ─────────
-  // Même logique que l'inscription : notification push d'abord, SMS
-  // Infobip en secours. `forceSms` = « Recevoir le code par SMS ».
-  const sendResetCode = async (forceSms: boolean) => {
+  // ⚠️ CHANGEMENT (20/09) : notification push abandonnée ici aussi (voir
+  // le même changement dans auth/register/page.tsx) — toujours SMS
+  // Infobip direct, aucun pushToken transmis. Un seul chemin fiable.
+  const sendResetCode = async () => {
     setError(''); setLoading(true);
     try {
-      const { sessionId, channel } = await resetPasswordSendOtp(toE164(phone), {
-        pushToken: forceSms ? undefined : readPendingPushToken(),
-        forceSms,
-      });
+      // forceSms: true est INDISPENSABLE ici — contrairement à l'inscription,
+      // le serveur de réinitialisation retrouve tout seul un token push
+      // connu du compte (resolvePushToken côté functions/src/passwordReset.ts)
+      // même si le client n'en envoie pas ; sans ce flag il retenterait le
+      // push quand même.
+      const { sessionId, channel } = await resetPasswordSendOtp(toE164(phone), { forceSms: true });
       setResetSessionId(sessionId);
       setOtpChannel(channel === 'push' ? 'push' : 'sms');
       setOtp(['', '', '', '', '', '']);
@@ -181,7 +184,7 @@ export default function ForgotPasswordPage() {
       const carrier = detectCarrier(phone);
       if (carrier === 'free' || carrier === 'expresso') {
         useCustomOtpRef.current = true;
-        await sendResetCode(false);
+        await sendResetCode();
         return;
       }
       useCustomOtpRef.current = false;
@@ -330,10 +333,30 @@ export default function ForgotPasswordPage() {
     try {
       const user = auth.currentUser;
       if (!user) throw new Error('Session invalide');
+      // ⚠️ Rafraîchit le jeton avant l'opération sensible : updatePassword()
+      // exige une connexion « récente » côté Firebase, et le temps passé à
+      // taper le nouveau mot de passe peut suffire à faire expirer cette
+      // fraîcheur, même juste après une vérification par code réussie.
+      await user.getIdToken(true);
       await updatePassword(user, newPassword);
       setStep('success');
     } catch (err: any) {
-      setError("Impossible de mettre à jour le mot de passe");
+      // ⚠️ Le message générique masquait la vraie cause à l'écran ET dans
+      // les rapports du terrain — impossible de diagnostiquer un « Impossible
+      // de mettre à jour le mot de passe » qui pouvait être n'importe quoi.
+      // On affiche maintenant le code technique, et un message clair pour
+      // le seul cas qui a une action concrète (recommencer la vérification).
+      console.error('[ForgotPassword] updatePassword a échoué:', err?.code, err?.message);
+      if (err?.code === 'auth/requires-recent-login') {
+        setError('Votre session a expiré pendant la saisie. Revérifiez votre code pour continuer.');
+        setStep('otp');
+      } else if (err?.code === 'auth/weak-password') {
+        setError('Mot de passe trop faible : utilisez au moins 6 caractères.');
+      } else if (err?.code === 'auth/network-request-failed') {
+        setError('Connexion internet interrompue. Réessayez.');
+      } else {
+        setError(`Impossible de mettre à jour le mot de passe${err?.code ? ` (${err.code})` : ''}. Réessayez.`);
+      }
     } finally { setLoading(false); }
   };
 
@@ -447,7 +470,7 @@ export default function ForgotPasswordPage() {
             : <button onClick={sendOTP} disabled={loading} className="text-sm text-green-600 hover:text-green-700 font-medium">Renvoyer</button>
           }
           {useCustomOtpRef.current && otpChannel === 'push' && (
-            <button onClick={() => sendResetCode(true)} disabled={loading}
+            <button onClick={() => sendResetCode()} disabled={loading}
               className="block mx-auto mt-3 text-sm text-gray-500 hover:text-gray-700 underline">
               Pas reçu la notification ? Recevoir le code par SMS
             </button>

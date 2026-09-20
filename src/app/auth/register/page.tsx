@@ -21,7 +21,7 @@ import { listenForOtpPush } from '@/lib/auth/otpPushListener';
 import { saveRegistrationDraft, readRegistrationDraft, clearRegistrationDraft } from '@/lib/auth/registrationDraft';
 import { haptic } from '@/lib/feedback';
 import PushDiagnosticPanel from '@/components/PushDiagnosticPanel';
-import { pushDiag, maskToken, type ServerPushDiag } from '@/lib/pushDiagnostics';
+import { pushDiag, type ServerPushDiag } from '@/lib/pushDiagnostics';
 
 // ─── Attend que le pont natif Capacitor soit prêt ─────
 // Sur certains démarrages, window.Capacitor s'injecte avec
@@ -299,12 +299,13 @@ export default function RegisterPage() {
   // au lieu d'en ouvrir une nouvelle. Une nouvelle session sur le même numéro
   // était refusée par le serveur (« inscription déjà en cours »), donc le
   // bouton échouait toujours.
-  const resendOTP = async (forceSms = false) => {
+  const resendOTP = async () => {
     if (!sessionId) { await sendOTP(); return; }
     setError('');
     setLoading(true);
     try {
-      const { channel } = await resendRegistrationCode(sessionId, readPendingPushToken(), { forceSms });
+      // Voir sendOTP : toujours SMS Infobip, jamais de pushToken.
+      const { channel } = await resendRegistrationCode(sessionId);
       setOtpChannel(channel === 'push' ? 'push' : 'sms');
       setOtp(['', '', '', '', '', '']);
       setResendCooldown(60);
@@ -341,44 +342,19 @@ export default function RegisterPage() {
         // ATS, DNS...). Il ne s'applique plus : httpsCallable passe par le
         // SDK Firebase Functions, avec sa propre gestion de transport/retry.
         try {
-          // ⚠️ FIX (16/09) : si le token n'est pas encore en localStorage
-          // (formulaire rempli très vite, APNs lent sur iOS...), dernière
-          // tentative bornée à 5 s avant de se résigner au SMS.
-          let pushToken = readPendingPushToken();
-          if (pushToken) {
-            pushDiag('token', 'ok', 'Token trouvé sur l’appareil au moment de l’envoi', maskToken(pushToken));
-          } else {
-            pushDiag('send_token', 'warn', 'Pas de token au moment de l’envoi — dernière tentative (5 s max)…');
-            const fresh = await Promise.race([
-              requestPushRef.current().catch(() => null),
-              new Promise<null>((r) => setTimeout(() => r(null), 5000)),
-            ]);
-            pushToken = fresh || readPendingPushToken();
-          }
-          pushDiag(
-            'send_token',
-            pushToken ? 'ok' : 'error',
-            pushToken ? 'Token envoyé au serveur (registrationStart)' : 'AUCUN token envoyé au serveur → le code partira par SMS',
-            pushToken ? maskToken(pushToken) : undefined,
-          );
-          console.log('[Push] Token envoyé à registrationStart :', pushToken ? `${pushToken.slice(0, 12)}…` : 'AUCUN → SMS');
-          const { sessionId: newSessionId, channel, pushDiag: srv } = await startRegistration(phoneE164, pushToken);
+          // ⚠️ CHANGEMENT (20/09) — sur demande explicite : la notification
+          // push comme canal d'envoi du code a été abandonnée pour
+          // Free/Yas et Expresso. Elle ajoutait jusqu'à 5 s d'attente avant
+          // de se rabattre sur le SMS, un aller-retour serveur FCM qui
+          // pouvait échouer silencieusement, et une UI entière (validation
+          // automatique, bascule SMS) rien que pour ce cas — trop de points
+          // de défaillance pour un gain marginal. On envoie maintenant
+          // TOUJOURS par SMS Infobip, directement : aucun pushToken n'est
+          // transmis, donc le serveur (decideChannelAndSend dans
+          // functions/src/registration.ts) part sur SMS sans même tenter
+          // le push. Plus fiable, plus rapide, un seul chemin à maintenir.
+          const { sessionId: newSessionId, channel } = await startRegistration(phoneE164);
           setOtpChannel(channel === 'push' ? 'push' : 'sms');
-          if (srv) {
-            setServerPushDiag(srv);
-            pushDiag(
-              'server',
-              srv.pushOk ? 'ok' : srv.pushAttempted ? 'error' : 'warn',
-              srv.pushOk
-                ? 'Serveur : push accepté par Firebase (FCM)'
-                : srv.pushAttempted
-                ? 'Serveur : FCM a REFUSÉ le push → SMS envoyé à la place'
-                : 'Serveur : aucun token reçu → SMS envoyé',
-              srv.errorCode ? `${srv.errorCode}${srv.errorMessage ? ` — ${srv.errorMessage}` : ''}` : undefined,
-            );
-          } else {
-            pushDiag('server', 'warn', `Serveur : canal ${channel} (functions pas encore redéployées, pas de détail)`);
-          }
           setSessionId(newSessionId);
           setStep('otp');
           setResendCooldown(60);
@@ -568,6 +544,19 @@ export default function RegisterPage() {
 
   const finalizeRegistration = async () => {
     if (isNativeRef.current) await waitForJsAuthSync();
+    // ⚠️ PANNE OBSERVÉE (19/09, logs Cloud Run : "auth": "MISSING", 401) —
+    // waitForJsAuthSync() attend que auth.currentUser existe, mais pas que
+    // le SDK JS ait fini de récupérer/propager son ID token en interne.
+    // Sur Android/iOS natif, confirmVerificationCode() peut se résoudre et
+    // remplir auth.currentUser AVANT que ce jeton soit prêt : l'appel
+    // callable suivant partait alors sans Authorization, le serveur voyait
+    // request.auth === undefined et rejetait avec AUTH_REQUIRED — le compte
+    // téléphone existait déjà (créé par Firebase Phone Auth lui-même) mais
+    // restait orphelin, jamais complété avec email/mot de passe/profil.
+    // On force donc explicitement un jeton frais ici : getIdToken() attend
+    // la fin de toute récupération en cours et met à jour l'état interne
+    // que httpsCallable lit pour construire l'en-tête Authorization.
+    await auth.currentUser?.getIdToken(true);
     // Orange : écrit désormais le profil (+ email/mot de passe pour
     // pouvoir se reconnecter ensuite) côté serveur via l'Admin SDK — voir
     // completeOrangeRegistration dans functions/src/orangeRegistration.ts
@@ -855,7 +844,7 @@ export default function RegisterPage() {
       pushDiag('received', 'warn', `Aucune notification reçue en ${PUSH_GRACE_MS / 1000} s — bascule automatique sur SMS`);
       setAutoSmsFallback(true);
       setManualEntry(true);
-      await resendOTP(true);
+      await resendOTP();
     }, PUSH_GRACE_MS);
     return () => clearTimeout(timer);
   }, [step, otpChannel, sessionId, autoCode, autoVerifying, manualEntry]);
@@ -891,15 +880,6 @@ export default function RegisterPage() {
   }
 
   const availableDepartments = formData.region ? DEPARTMENTS_BY_REGION[formData.region] : [];
-
-  // Free/Yas et Expresso passent par notre backend OTP, qui tente la
-  // notification avant le SMS (voir lib/carrier.ts et decideChannelAndSend).
-  // Orange reste sur Firebase Phone Auth, donc SMS Google.
-  // Champ vide ou préfixe inconnu → 'unknown', donc on annonce le SMS :
-  // c'est le défaut prudent, on ne promet jamais une notification sans
-  // savoir qu'elle est possible.
-  const detectedCarrier = detectCarrier(formData.phone);
-  const expectPushChannel = detectedCarrier === 'free' || detectedCarrier === 'expresso';
 
   // ═══════════════════════════════════════════════════════
   // ÉCRAN OTP
@@ -1076,7 +1056,7 @@ export default function RegisterPage() {
                 </p>
               ) : (
                 <button
-                  onClick={() => (useCustomOtpRef.current ? resendOTP(false) : sendOTP())}
+                  onClick={() => (useCustomOtpRef.current ? resendOTP() : sendOTP())}
                   disabled={loading}
                   className="text-sm text-green-600 hover:text-green-700 font-medium"
                 >
@@ -1086,7 +1066,7 @@ export default function RegisterPage() {
               {useCustomOtpRef.current && otpChannel === 'push' && !waitingForPush && !autoSmsFallback && (
                 <button
                   type="button"
-                  onClick={() => resendOTP(true)}
+                  onClick={() => resendOTP()}
                   disabled={loading}
                   className="block mx-auto mt-2 text-xs text-gray-500 hover:text-gray-700 underline"
                 >
@@ -1305,16 +1285,15 @@ export default function RegisterPage() {
               disabled={loading}
               className="w-full bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 text-white py-3 rounded-xl font-semibold transition-all disabled:opacity-50 flex items-center justify-center gap-2"
             >
-              {expectPushChannel ? <Bell size={16} /> : <MessageSquare size={16} />}
+              <MessageSquare size={16} />
               {loading ? 'Un instant…' : 'Créer mon compte'}
             </button>
 
-            {/* On dit à l'avance ce qui va se passer : l'enchaînement
-                automatique se lit alors comme voulu, et non comme un bug. */}
+            {/* Toujours par SMS désormais (voir sendOTP) : un seul message,
+                vrai pour tout le monde, plutôt qu'une promesse de
+                notification qui ne se réalise plus. */}
             <p className="text-center text-xs text-gray-500 mt-3">
-              {expectPushChannel
-                ? 'Vous recevrez une notification avec votre code. La vérification se fait automatiquement, vous n’avez rien à saisir.'
-                : 'Vous recevrez un SMS avec votre code de vérification.'}
+              Vous recevrez un SMS avec votre code de vérification.
             </p>
           </form>
 

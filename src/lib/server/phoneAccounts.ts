@@ -5,7 +5,7 @@
 // Pourquoi : selon l'époque et l'opérateur, un même numéro peut avoir un
 // compte Firebase Auth sous l'une de ces formes :
 //   - téléphone attaché (+221XXXXXXXXX) ET email ;
-//   - email seul : 221XXXXXXXXX@sunnumenef.sn (format actuel), ou anciens
+//   - email seul : 221XXXXXXXXX@sunumenef.sn (format actuel), ou anciens
 //     formats @agrimarche.sn avec/sans 221, voire @gmail.com ;
 //   - téléphone seul : compte VIDE créé par Firebase Phone Auth (Orange)
 //     quand l'email du vrai compte n'avait pas le numéro attaché.
@@ -46,13 +46,15 @@ export function toE164Senegal(raw: string): string | null {
 
 /** Format officiel des nouveaux comptes (identique aux functions : carrier.ts). */
 export function canonicalSyntheticEmail(e164: string): string {
-  return `${e164.replace(/\D/g, '')}@sunnumenef.sn`;
+  return `${e164.replace(/\D/g, '')}@sunumenef.sn`;
 }
 
 /** Toutes les formes d'email synthétique ayant existé pour ce numéro. */
 export function syntheticEmailCandidates(e164: string): string[] {
   const local = e164.replace(/\D/g, '').replace(/^221/, '');
   return [
+    `221${local}@sunumenef.sn`,
+    `${local}@sunumenef.sn`,
     `221${local}@sunnumenef.sn`,
     `${local}@sunnumenef.sn`,
     `221${local}@agrimarche.sn`,
@@ -70,12 +72,21 @@ export interface PhoneAccounts {
   phoneUser: UserRecord | null;
   /** Compte à utiliser : celui qui a un mot de passe, sinon celui du téléphone. */
   main: UserRecord | null;
+  /**
+   * Le compte `main` a-t-il un mot de passe utilisable pour se connecter ?
+   * false = compte « téléphone seul » (orphelin) : signInWithEmailAndPassword
+   * échouera TOUJOURS avec auth/invalid-credential, quel que soit le mot de
+   * passe tapé — ce n'est pas « mot de passe incorrect », c'est qu'il n'y en
+   * a jamais eu. Sert à afficher le bon message côté client (voir
+   * /api/auth/check-phone, purpose=login) plutôt que le générique trompeur.
+   */
+  hasPassword: boolean;
 }
 
 export async function findAccountsForPhone(e164: string): Promise<PhoneAccounts> {
   const auth = getAuth(getAdminApp());
   const phoneUser = await auth.getUserByPhoneNumber(e164).catch(() => null);
-  if (phoneUser && hasPassword(phoneUser)) return { e164, phoneUser, main: phoneUser };
+  if (phoneUser && hasPassword(phoneUser)) return { e164, phoneUser, main: phoneUser, hasPassword: true };
 
   const { users } = await auth.getUsers(syntheticEmailCandidates(e164).map((email) => ({ email })));
   const byEmail = syntheticEmailCandidates(e164)
@@ -83,7 +94,8 @@ export async function findAccountsForPhone(e164: string): Promise<PhoneAccounts>
     .filter((u): u is UserRecord => !!u);
   const emailMain = byEmail.find(hasPassword) ?? null;
 
-  return { e164, phoneUser, main: emailMain ?? phoneUser };
+  const main = emailMain ?? phoneUser;
+  return { e164, phoneUser, main, hasPassword: !!main && hasPassword(main) };
 }
 
 /**
@@ -140,6 +152,22 @@ export async function resolveVerifiedPhoneAccount(e164: string): Promise<string 
   if (main.phoneNumber !== e164) {
     await auth.updateUser(main.uid, { phoneNumber: e164 });
   }
+
+  // ⚠️ PANNE OBSERVÉE (19/09) : un compte purement « téléphone » (créé par
+  // Firebase Phone Auth, jamais complété par completeOrangeRegistration —
+  // inscription interrompue, ancien compte de test, etc.) n'a AUCUN email.
+  // Sans email, updatePassword() côté client n'a rien à quoi attacher le
+  // mot de passe et échoue silencieusement (le client ne voyait qu'un
+  // message générique). On complète donc l'email manquant ICI, une bonne
+  // fois pour toutes, dès qu'on a vérifié la possession du numéro (code SMS
+  // valide) — avant, ce cas n'était traité que pour les DOUBLONS, jamais
+  // pour le compte de base.
+  if (!main.email) {
+    const email = canonicalSyntheticEmail(e164);
+    await auth.updateUser(main.uid, { email, emailVerified: true });
+    console.log(`[phoneAccounts] email manquant complété pour ${main.uid} (${e164}) → ${email}`);
+  }
+
   await db.collection('users').doc(main.uid).set({ phone: e164, phoneVerified: true }, { merge: true });
   await db.collection('phoneIndex').doc(e164).set({ accountId: main.uid }, { merge: true });
   return main.uid;

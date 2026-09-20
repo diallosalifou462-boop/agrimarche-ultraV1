@@ -40,7 +40,7 @@ function toE164(phone: string): string {
 }
 
 function toSyntheticEmail(phone: string): string {
-  return `${phone.replace(/\D/g, '')}@sunnumenef.sn`;
+  return `${phone.replace(/\D/g, '')}@sunumenef.sn`;
 }
 
 const FORCED_ADMIN_EMAIL = 'support@agrimarche.com';
@@ -194,6 +194,28 @@ function LoginContent() {
       if (err instanceof NoAccountForPhoneError) {
         setError("Aucun compte n'est associé à ce numéro. Créez votre compte.");
       } else if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
+        // ⚠️ Ce code Firebase ne distingue PAS « mauvais mot de passe » de
+        // « ce compte n'a jamais eu de mot de passe » (compte « téléphone
+        // seul » orphelin — voir phoneAccounts.ts). Sans cette vérif, un
+        // utilisateur dont le compte est orphelin voit indéfiniment
+        // « mot de passe incorrect » et retape le même mot de passe en
+        // boucle, alors qu'aucun mot de passe ne marchera jamais : seul
+        // « mot de passe oublié » peut le débloquer.
+        try {
+          const checkRes = await fetch(apiUrl('/api/auth/check-phone'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phone: toE164(phone), purpose: 'login' }),
+          });
+          const checkJson = await checkRes.json().catch(() => null);
+          if (checkRes.ok && checkJson?.hasPassword === false) {
+            setError('Ce compte n\'a pas encore de mot de passe défini. Utilisez « Mot de passe oublié » pour en créer un.');
+            setLoading(false);
+            return;
+          }
+        } catch {
+          // Vérif indisponible (réseau) : on retombe sur le message générique.
+        }
         setError('Numéro ou mot de passe incorrect');
       } else if (code === 'auth/invalid-phone-number') {
         setError('Numéro de téléphone invalide');
