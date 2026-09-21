@@ -37,6 +37,13 @@ export async function sendOtpSmsInfobip(
 ): Promise<void> {
   const baseUrl = normalizedInfobipBaseUrl();
   if (!baseUrl || !INFOBIP_API_KEY) {
+    // ⚠️ AJOUT (21/09) : cette branche ne journalisait rien avant de lancer
+    // l'erreur — impossible de savoir, depuis les logs, si le problème
+    // venait d'ici ou d'un vrai échec réseau/InfoBip plus bas. On journalise
+    // sans jamais exposer la valeur du secret lui-même (juste sa présence).
+    console.error(
+      `❌ Configuration InfoBip manquante pour cette fonction — INFOBIP_BASE_URL: ${baseUrl ? 'présent' : 'MANQUANT'}, INFOBIP_API_KEY: ${INFOBIP_API_KEY ? 'présent' : 'MANQUANT'}.`,
+    );
     throw new Error('Configuration InfoBip manquante (INFOBIP_BASE_URL / INFOBIP_API_KEY).');
   }
 

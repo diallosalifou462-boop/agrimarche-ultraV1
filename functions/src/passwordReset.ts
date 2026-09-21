@@ -51,7 +51,7 @@ export const resetPasswordSendOtp = onCall(
   // avant même d'entrer dans la function : « Une erreur est survenue » à
   // chaque mot de passe oublié. Les protections anti-abus restent en place
   // (limites par numéro et par IP, 5 essais max, expiration 5 min).
-  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: false },
+  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY', 'INFOBIP_BASE_URL'], enforceAppCheck: false },
   async (request) => {
     const phoneRaw = String(request.data?.phone ?? '');
     const phone = normalizePhoneSN(phoneRaw);

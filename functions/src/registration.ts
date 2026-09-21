@@ -147,7 +147,7 @@ export const registrationStart = onCall(
   // enforceAppCheck: DÉSACTIVÉ (12/09, ré-confirmé 14/09) — App Check
   // n'est toujours pas initialisé côté app mobile. À réactiver
   // seulement une fois App Check déployé et testé côté client.
-  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: false },
+  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY', 'INFOBIP_BASE_URL'], enforceAppCheck: false },
   async (request) => {
     const phoneRaw = String(request.data?.phone ?? '');
     const pushToken: string | undefined = request.data?.pushToken || undefined;
@@ -245,7 +245,7 @@ export const registrationStart = onCall(
 // ── POST /registration/resend ───────────────────────────────────────────
 export const registrationResend = onCall(
   // enforceAppCheck désactivé — voir commentaire sur registrationStart.
-  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: false },
+  { region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY', 'INFOBIP_BASE_URL'], enforceAppCheck: false },
   async (request) => {
     const sessionId = String(request.data?.sessionId ?? '');
     // `pushToken`/`forceSms` : ignorés désormais, conservés dans le type de
