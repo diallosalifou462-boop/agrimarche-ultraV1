@@ -82,7 +82,7 @@ const PHONE_RESERVATION_TTL_MS = OTP_TTL_MS + 10 * 60 * 1000;
 //   verified                → compte créé, accountId renseigné, terminal
 //   expired / locked        → terminal, recommencer une nouvelle inscription
 
-type Channel = 'push' | 'sms_infobip';
+type Channel = 'sms_infobip';
 
 function sessionsCol() {
   return admin.firestore().collection('registrationSessions');
@@ -117,108 +117,20 @@ function throwLocalized(httpsCode: FunctionsErrorCode, techCode: string): never 
   throw new HttpsError(httpsCode, techCode, { message: localizeError(techCode) });
 }
 
-// ⚠️ FIX (13/09) : avant, un échec du push (token périmé, appareil
-// changé entre la capture du token et l'envoi...) faisait échouer
-// l'inscription ENTIÈRE au lieu de retomber sur SMS Infobip — seul
-// otpChannel.ts (utilisé par login/reset) avait ce filet. Sans
-// conséquence tant qu'aucun pushToken n'était jamais transmis, mais
-// désormais réellement atteignable puisque l'inscription en capte un.
-// On garde les noms de métriques historiques (sent_push, sent_sms...)
-// plutôt que de migrer vers otpChannel.ts, pour ne pas casser le
-// dashboard admin qui les lit sous ces noms précis pour l'inscription.
-// Envoi du code d'inscription : notification push d'abord (instantané et
-// gratuit), SMS Infobip si le push échoue ou si l'utilisateur le demande
-// (« Recevoir le code par SMS », forceSms).
-//
-// ⚠️ À SAVOIR : à l'inscription, le push part vers l'appareil QUI FAIT la
-// demande, pas vers le téléphone qui porte la carte SIM. Il ne prouve donc
-// pas la possession du numéro : quelqu'un peut inscrire le numéro d'un
-// tiers et empêcher le vrai propriétaire de créer son compte. Le SMS, lui,
-// le prouve. Choix produit assumé ; le repli SMS reste toujours possible.
-// Rapport d'envoi renvoyé à l'app (panneau de diagnostic) ET écrit dans
-// l'audit : sans lui, une notification qui n'arrive pas est invisible côté
-// serveur comme côté client.
-export interface PushDiagReport {
-  tokenReceived: boolean;
-  pushAttempted: boolean;
-  pushOk: boolean;
-  errorCode?: string | null;
-  errorMessage?: string | null;
-}
-
-async function decideChannelAndSend(
-  sessionId: string,
-  phone: string,
-  pushToken: string | undefined,
-  code: string,
-  forceSms = false,
-  diag?: PushDiagReport,
-): Promise<Channel> {
-  if (diag) diag.tokenReceived = !!pushToken;
-  if (pushToken && !forceSms) {
-    if (diag) diag.pushAttempted = true;
-    try {
-      await admin.messaging().send({
-        token: pushToken,
-        notification: {
-          title: 'Sunu Mëñëf',
-          body: `Votre code de confirmation Sunu Mëñëf est : ${code}. Ce code expire dans 5 minutes.`,
-        },
-        // `code` dans le data payload : permet à l'app de pré-remplir et de
-        // valider automatiquement dès réception (flux « tac, c'est connecté »).
-        // Aucune exposition nouvelle : le code est déjà en clair dans le
-        // corps de la notification, sur l'écran verrouillé DU MÊME appareil.
-        // Le data payload n'est lisible que par l'app elle-même.
-        data: { type: 'registration_otp', sessionId, code, autoSubmit: '1' },
-        android: {
-          priority: 'high',
-          // ⚠️ CRITIQUE Android 8+ : sans channelId explicite, la notification
-          // part sur le canal par défaut du manifeste. S'il est absent, Android
-          // la place sur un canal de repli d'importance BASSE — elle n'apparaît
-          // pas en bandeau et l'utilisateur ne la voit jamais, alors que FCM
-          // rapporte un envoi réussi. « agrimarche_urgent » est créé au premier
-          // lancement natif avec importance MAX (voir hooks/useFCMToken.ts).
-          notification: {
-            channelId: 'agrimarche_urgent',
-            priority: 'max',
-            defaultSound: true,
-            visibility: 'private',
-          },
-        },
-        apns: {
-          headers: { 'apns-priority': '10' },
-          // contentAvailable en plus de l'alerte : iOS réveille l'app pour
-          // lui livrer le data payload même si elle vient de passer en
-          // arrière-plan, donc l'auto-remplissage marche aussi au retour.
-          // contentAvailable (champ documenté du SDK Admin, traduit en
-          // « content-available » par Firebase) : iOS réveille l'app pour lui
-          // livrer le data payload, donc le remplissage automatique marche
-          // aussi quand l'app vient de passer en arrière-plan.
-          // ⚠️ PAS de 'interruption-level': 'time-sensitive' ici. Ce niveau
-          // exige la capacité Apple « Time Sensitive Notifications » dans le
-          // projet Xcode ; sans elle, APNs peut REJETER la notification — et
-          // un code de vérification qui n'arrive pas est bien pire que le
-          // simple fait de ne pas percer le mode Concentration. On reste donc
-          // sur une alerte standard, acceptée sans aucune capacité
-          // particulière. À rétablir seulement après avoir activé cette
-          // capacité dans Xcode (Signing & Capabilities).
-          payload: { aps: { sound: 'default', contentAvailable: true } },
-        },
-      });
-      await bumpRegistrationMetric('sent_push');
-      if (diag) diag.pushOk = true;
-      return 'push';
-    } catch (err: any) {
-      console.error(`❌ Échec envoi push OTP (session ${sessionId}):`, err?.code || err?.errorInfo?.code || err);
-      if (diag) {
-        diag.errorCode = err?.errorInfo?.code || err?.code || 'unknown';
-        diag.errorMessage = String(err?.message || err).slice(0, 200);
-      }
-      await bumpRegistrationMetric('send_failed_push');
-      // on tombe sur le SMS ci-dessous plutôt que d'échouer
-    }
-  }
-
+// ⚠️ DÉCISION PRODUIT (20/09) : le push (FCM) est entièrement abandonné
+// pour l'inscription Free/Yas et Expresso — comme pour login et le mot
+// de passe oublié (voir otpChannel.ts). Il ajoutait un aller-retour FCM,
+// avec ses propres échecs silencieux (token périmé, canal Android mal
+// configuré, capacité iOS manquante...), avant même d'arriver au SMS —
+// qui est le seul canal fiable et vérifiable. Le code est donc TOUJOURS
+// envoyé par SMS Infobip, directement, sans jamais tenter de push
+// d'abord — exactement le même chemin que login et le mot de passe
+// oublié.
+// On garde les noms de métriques historiques (sent_sms, send_failed_sms)
+// plutôt que de migrer vers le decideChannelAndSend partagé
+// d'otpChannel.ts, pour ne pas casser le dashboard admin qui les lit
+// sous ces noms précis pour l'inscription.
+async function decideChannelAndSend(sessionId: string, phone: string, code: string): Promise<Channel> {
   try {
     await sendOtpSmsInfobip(phone, code);
   } catch (err: any) {
@@ -311,37 +223,22 @@ export const registrationStart = onCall(
       ip,
     });
 
-    const diag: PushDiagReport = { tokenReceived: !!pushToken, pushAttempted: false, pushOk: false };
     let channel: Channel;
     try {
-      channel = await decideChannelAndSend(sessionRef.id, phone, pushToken, code, false, diag);
+      channel = await decideChannelAndSend(sessionRef.id, phone, code);
     } catch (err) {
       await sessionRef.update({ status: 'send_failed' });
       await releasePhoneReservation(phone, sessionRef.id);
-      const techCode = err instanceof HttpsError ? err.message : 'PUSH_SEND_FAILED';
+      const techCode = err instanceof HttpsError ? err.message : 'SMS_SEND_FAILED';
       throwLocalized('unavailable', techCode);
     }
 
     await sessionRef.update({ channel });
-    await logAuditEvent({
-      type: 'start',
-      sessionId: sessionRef.id,
-      phone,
-      carrier,
-      channel,
-      ip,
-      reason: diag.pushOk
-        ? 'push_ok'
-        : diag.pushAttempted
-        ? `push_failed:${diag.errorCode ?? 'unknown'}`
-        : 'no_push_token',
-    });
+    await logAuditEvent({ type: 'start', sessionId: sessionRef.id, phone, carrier, channel, ip });
     await bumpRegistrationMetric('started');
     await bumpRegistrationMetric(`started_${carrier}`);
 
-    return { sessionId: sessionRef.id, channel, maxAttempts: MAX_VERIFY_ATTEMPTS, otpTtlSeconds: OTP_TTL_MS / 1000,
-      pushDiag: diag,
-    };
+    return { sessionId: sessionRef.id, channel, maxAttempts: MAX_VERIFY_ATTEMPTS, otpTtlSeconds: OTP_TTL_MS / 1000 };
   }
 );
 
@@ -351,10 +248,9 @@ export const registrationResend = onCall(
   { region: 'us-central1', secrets: ['OTP_HASH_PEPPER', 'INFOBIP_API_KEY'], enforceAppCheck: false },
   async (request) => {
     const sessionId = String(request.data?.sessionId ?? '');
-    const newPushToken: string | undefined = request.data?.pushToken || undefined;
-    // « Pas reçu la notification ? Recevoir le code par SMS »
-    const forceSms = request.data?.forceSms === true;
-    const resendDiag: PushDiagReport = { tokenReceived: false, pushAttempted: false, pushOk: false };
+    // `pushToken`/`forceSms` : ignorés désormais, conservés dans le type de
+    // la requête pour ne pas casser un client pas encore mis à jour — voir
+    // la note en tête de decideChannelAndSend (TOUJOURS SMS Infobip).
     if (!sessionId) throwLocalized('invalid-argument', 'SESSION_NOT_FOUND');
 
     const ip = clientIp(request.rawRequest);
@@ -386,13 +282,11 @@ export const registrationResend = onCall(
       throwLocalized('failed-precondition', 'SESSION_NOT_ACTIVE');
     }
 
-    const pushToken = newPushToken ?? data.pushToken ?? undefined;
     const code = generateOtp();
     const otpHash = hashOtp(code, sessionId);
     const now = admin.firestore.Timestamp.now();
 
     await ref.update({
-      pushToken: pushToken ?? null,
       otpHash,
       otpExpiresAt: admin.firestore.Timestamp.fromMillis(now.toMillis() + OTP_TTL_MS),
       attempts: 0,
@@ -403,10 +297,10 @@ export const registrationResend = onCall(
 
     let channel: Channel;
     try {
-      channel = await decideChannelAndSend(sessionId, data.phone, pushToken, code, forceSms, resendDiag);
+      channel = await decideChannelAndSend(sessionId, data.phone, code);
     } catch (err) {
       await ref.update({ status: 'send_failed' });
-      const techCode = err instanceof HttpsError ? err.message : 'PUSH_SEND_FAILED';
+      const techCode = err instanceof HttpsError ? err.message : 'SMS_SEND_FAILED';
       throwLocalized('unavailable', techCode);
     }
 

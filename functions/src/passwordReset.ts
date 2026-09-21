@@ -21,7 +21,7 @@ import { normalizePhoneSN, detectCarrier } from './carrier';
 import { getAccountIdForPhone } from './phoneUniqueness';
 import { generateOtp, hashOtp, verifyOtpHash } from './otp';
 import { checkAndConsumeRateLimit, RateLimitedError } from './rateLimit';
-import { decideChannelAndSend, getMostRecentPushToken } from './otpChannel';
+import { decideChannelAndSend } from './otpChannel';
 import { logAuditEvent } from './audit';
 import { bumpRegistrationMetric } from './metrics';
 import { localizeError } from './errorMessages';
@@ -45,24 +45,6 @@ function clientIp(rawRequest: any): string {
   );
 }
 
-// Choix du token push pour la réinitialisation :
-// 1. le token de l'appareil qui fait la demande, SEULEMENT s'il est déjà
-//    enregistré sur ce compte (users/{uid}/tokens/{token}) — sinon un
-//    tiers pourrait fournir son propre token et recevoir le code ;
-// 2. sinon le token le plus récent du compte ;
-// 3. sinon aucun → SMS Infobip.
-async function resolvePushToken(uid: string, clientToken: string): Promise<string | undefined> {
-  if (clientToken) {
-    try {
-      const doc = await admin.firestore().collection('users').doc(uid).collection('tokens').doc(clientToken).get();
-      if (doc.exists) return clientToken;
-    } catch (err) {
-      console.warn(`⚠️ Vérification du token client impossible pour ${uid}:`, err);
-    }
-  }
-  return getMostRecentPushToken(uid);
-}
-
 export const resetPasswordSendOtp = onCall(
   // enforceAppCheck: DÉSACTIVÉ (18/09) — aligné sur registrationStart.
   // Avec App Check activé ici, l'app iOS recevait un 401 « app: MISSING »
@@ -73,10 +55,9 @@ export const resetPasswordSendOtp = onCall(
   async (request) => {
     const phoneRaw = String(request.data?.phone ?? '');
     const phone = normalizePhoneSN(phoneRaw);
-    // Optionnels : token push de l'appareil qui fait la demande, et
-    // `forceSms` quand l'utilisateur n'a pas reçu la notification.
-    const clientPushToken = typeof request.data?.pushToken === 'string' ? request.data.pushToken.trim() : '';
-    const forceSms = request.data?.forceSms === true;
+    // `pushToken`/`forceSms` : conservés dans le type de la requête pour ne
+    // pas casser un client pas encore mis à jour, mais ignorés — voir
+    // otpChannel.ts (TOUJOURS SMS Infobip, plus aucun essai push).
     if (!phone) throwLocalized('invalid-argument', 'INVALID_PHONE');
 
     const ip = clientIp(request.rawRequest);
@@ -122,14 +103,10 @@ export const resetPasswordSendOtp = onCall(
       ip,
     });
 
-    // Le compte existe déjà (vérifié juste au-dessus via uid) : on va
-    // chercher un token push déjà enregistré pour lui, même si
-    // l'utilisateur n'est plus authentifié sur CETTE session (mot de
-    // passe oublié) — voir otpChannel.ts.
-    const pushToken = forceSms ? undefined : await resolvePushToken(uid!, clientPushToken);
-    let channel: 'push' | 'sms_infobip';
+    // Toujours par SMS Infobip, directement — voir otpChannel.ts.
+    let channel: 'sms_infobip';
     try {
-      channel = await decideChannelAndSend(sessionRef.id, phone, pushToken, code, 'réinitialisation', 'reset');
+      channel = await decideChannelAndSend(sessionRef.id, phone, code, 'réinitialisation', 'reset');
     } catch (err) {
       await sessionRef.update({ status: 'send_failed' });
       throw err; // déjà un HttpsError('unavailable', 'SMS_SEND_FAILED') localisé côté client

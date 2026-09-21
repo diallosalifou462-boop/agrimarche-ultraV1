@@ -17,7 +17,7 @@ import { onCall, HttpsError, FunctionsErrorCode } from 'firebase-functions/v2/ht
 import * as admin from 'firebase-admin';
 import { generateOtp, hashOtp, verifyOtpHash } from './otp';
 import { checkAndConsumeRateLimit, RateLimitedError } from './rateLimit';
-import { decideChannelAndSend, getMostRecentPushToken } from './otpChannel';
+import { decideChannelAndSend } from './otpChannel';
 import { logAuditEvent } from './audit';
 import { bumpRegistrationMetric } from './metrics';
 import { localizeError } from './errorMessages';
@@ -87,14 +87,10 @@ export const loginSendOtp = onCall(
       ip,
     });
 
-    // Compte déjà existant (on est en 2ᵉ facteur, pas en inscription) :
-    // on va chercher nous-mêmes un token push déjà enregistré pour ce
-    // uid, plutôt que d'exiger un changement côté client — voir
-    // otpChannel.ts.
-    const pushToken = await getMostRecentPushToken(uid);
-    let channel: 'push' | 'sms_infobip';
+    // Toujours par SMS Infobip, directement — voir otpChannel.ts.
+    let channel: 'sms_infobip';
     try {
-      channel = await decideChannelAndSend(sessionRef.id, phone, pushToken, code, 'connexion', 'login');
+      channel = await decideChannelAndSend(sessionRef.id, phone, code, 'connexion', 'login');
     } catch (err) {
       await sessionRef.update({ status: 'send_failed' });
       await logAuditEvent({ type: 'login_otp_rejected', sessionId: sessionRef.id, phone, ip, reason: 'send_failed' });

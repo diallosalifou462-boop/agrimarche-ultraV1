@@ -112,15 +112,46 @@ const DEFAULT_SETTINGS: AiPromotionSettings = {
   scope: 'region',
 };
 
+// ⚠️ FIX (21/09) : le message par défaut lisait `product.location`, un champ
+// qui n'existe sur AUCUN document `products` (le vrai champ s'appelle
+// `region`, voir notifyRestockMatch/index.ts) — le texte envoyé affichait
+// donc littéralement "Ce produit frais de undefined...". On utilise
+// désormais le prix (toujours présent, et bien plus vendeur qu'une région)
+// et on nomme la marketplace plutôt qu'un champ absent du document produit.
+function formatFcfa(price: number, unit: string): string {
+  return `${price.toLocaleString('fr-FR')} FCFA/${unit || 'unité'}`;
+}
+
+// Plusieurs variantes de repli, pour éviter d'envoyer littéralement la même
+// phrase à chaque produit stagnant (répétitif = ignoré/désactivé par
+// l'utilisateur). Reste honnête : pas de fausse urgence ("plus que 2 en
+// stock"), juste un ton plus curieux et gourmand.
+function buildFallbackVariants(name: string, priceLabel: string | null): { title: string; body: string }[] {
+  const withPrice = (suffix: string) => (priceLabel ? `${suffix} à ${priceLabel}.` : `${suffix}.`);
+  return [
+    {
+      title: `👀 ${name}, toujours dispo`,
+      body: withPrice(`On garde ${name} bien au frais pour vous`) + ' Un coup d\'œil avant qu\'il ne parte ?',
+    },
+    {
+      title: `🔥 ${name} vous attend`,
+      body: withPrice(`Ce produit frais n'a pas encore trouvé preneur sur Sunu Mëñëf`) + ' Foncez le découvrir.',
+    },
+    {
+      title: `🌿 Un secret bien gardé : ${name}`,
+      body: withPrice(`Peu de gens l'ont encore repéré`) + ' À vous de jouer sur Sunu Mëñëf.',
+    },
+  ];
+}
+
 async function generatePromoCopy(product: {
-  name: string; category: string; price: number; unit: string; location: string; isOrganic?: boolean;
+  name: string; category: string; price: number; unit: string; region: string; isOrganic?: boolean;
 }): Promise<{ title: string; body: string; icon: string }> {
   const apiKey = process.env.DEEPSEEK_API_KEY;
-  const fallback = {
-    title: `🔥 ${product.name} vous attend`,
-    body: `Ce produit frais de ${product.location} n'a pas encore trouvé preneur. Foncez avant qu'il ne soit plus disponible !`,
-    icon: '🔥',
-  };
+  const priceLabel = typeof product.price === 'number' && product.price > 0 ? formatFcfa(product.price, product.unit) : null;
+  const variants = buildFallbackVariants(product.name, priceLabel);
+  const picked = variants[Math.floor(Math.random() * variants.length)];
+  const fallback = { title: picked.title, body: picked.body, icon: '🔥' };
   if (!apiKey) return fallback;
 
   try {
@@ -128,9 +159,13 @@ async function generatePromoCopy(product: {
       "Tu es le rédacteur marketing de Sunu Mëñëf, une marketplace agricole sénégalaise. " +
       "On te donne un produit qui a été ajouté mais n'a encore reçu aucune commande. " +
       "Génère un titre court (max 45 caractères, avec un seul emoji pertinent en tête) et un message " +
-      "(max 110 caractères) pour une notification push qui donne envie de l'acheter, sans être mensonger " +
-      "ni créer de fausse urgence artificielle (pas de \"plus que 2 en stock\" si c'est faux). Ton chaleureux, " +
-      "local, direct. Réponds UNIQUEMENT en JSON strict, sans texte autour, format exact : " +
+      "(max 110 caractères) pour une notification push. Objectif : donner envie de rouvrir l'app tout de " +
+      "suite — joue sur la curiosité (une trouvaille, un produit qu'on n'a pas encore vu, une question " +
+      "qui donne envie de savoir), la fraîcheur et l'appétit, avec un ton chaleureux, local et direct, " +
+      "comme un vendeur de marché qui vous interpelle avec le sourire. Varie les formulations d'un produit " +
+      "à l'autre pour ne jamais sonner générique. Reste TOUJOURS honnête : jamais de mensonge ni de fausse " +
+      "urgence artificielle (pas de \"plus que 2 en stock\" si c'est faux, pas de compte à rebours inventé). " +
+      "Réponds UNIQUEMENT en JSON strict, sans texte autour, format exact : " +
       '{"title":"...","body":"...","icon":"<un seul emoji>"}';
 
     const res = await fetch('https://api.deepseek.com/v1/chat/completions', {
@@ -142,7 +177,7 @@ async function generatePromoCopy(product: {
           { role: 'system', content: systemPrompt },
           {
             role: 'user',
-            content: `Produit : ${product.name}\nCatégorie : ${product.category}\nPrix : ${product.price} FCFA / ${product.unit}\nRégion : ${product.location}\nBio : ${product.isOrganic ? 'oui' : 'non'}`,
+            content: `Produit : ${product.name}\nCatégorie : ${product.category}\nPrix : ${product.price} FCFA / ${product.unit}\nRégion : ${product.region}\nBio : ${product.isOrganic ? 'oui' : 'non'}`,
           },
         ],
         max_tokens: 150,
@@ -257,7 +292,7 @@ export async function GET(req: NextRequest) {
         category: product.category,
         price: product.price,
         unit: product.unit,
-        location: product.location,
+        region: product.region,
         isOrganic: product.isOrganic,
       });
 
@@ -265,9 +300,13 @@ export async function GET(req: NextRequest) {
       // scope 'region' : uniquement les utilisateurs de la même région que
       // le produit (évite de spammer tout le monde pour un produit local).
       // scope 'all' : tout le monde, comme le "Push à tous les tokens" admin.
+      // ⚠️ FIX (21/09) : lisait `product.location` (champ inexistant) — le
+      // ciblage régional ne matchait donc JAMAIS aucun utilisateur et
+      // tombait systématiquement sur le repli "tous les tokens" ci-dessous,
+      // même quand scope === 'region'. Le vrai champ est `region`.
       let tokens: string[] = [];
-      if (settings.scope === 'region' && product.location) {
-        const usersInRegion = await db.collection('users').where('region', '==', product.location).select().get();
+      if (settings.scope === 'region' && product.region) {
+        const usersInRegion = await db.collection('users').where('region', '==', product.region).select().get();
         const uids = usersInRegion.docs.map((u) => u.id);
         const tokenSnaps = await Promise.all(
           uids.map((uid) => db.collection('users').doc(uid).collection('tokens').get())

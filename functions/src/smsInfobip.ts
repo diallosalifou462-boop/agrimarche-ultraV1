@@ -1,14 +1,14 @@
 // ============================================================
-//   smsInfobip.ts — Canal de secours UNIQUEMENT pour Expresso et
-//   Tigo, et UNIQUEMENT quand aucun push token n'est disponible
-//   pour la session d'inscription en cours.
+//   smsInfobip.ts — Canal UNIQUE d'envoi de code (OTP) pour Expresso
+//   et Tigo/Free, pour les trois parcours qui en ont besoin :
+//   inscription (registration.ts), connexion 2ᵉ facteur (loginOtp.ts)
+//   et mot de passe oublié (passwordReset.ts).
 //
 //   ⚠️ Ne jamais appeler ce module pour Orange (Orange passe par
-//   Firebase Phone Auth, voir orangeRegistration.ts) ni comme
-//   fallback "le push a échoué à être livré" — uniquement "aucun
-//   token push n'existe pour cette session" (utilisateur ayant
-//   refusé les notifications, ou token indisponible au moment de
-//   l'inscription).
+//   Firebase Phone Auth, voir orangeRegistration.ts). Le push (FCM) a
+//   été entièrement abandonné le 20/09 — voir otpChannel.ts — ce
+//   module est donc désormais le SEUL canal d'envoi, plus un simple
+//   filet de secours.
 // ============================================================
 const INFOBIP_API_KEY = process.env.INFOBIP_API_KEY;
 const INFOBIP_SENDER = process.env.INFOBIP_SENDER ?? 'SunuMenef';
