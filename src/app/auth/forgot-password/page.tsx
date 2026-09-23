@@ -341,20 +341,28 @@ export default function ForgotPasswordPage() {
       // (voir le commentaire « Rejouable » dans passwordReset.ts) : on s'en
       // sert ici pour ré-authentifier silencieusement avant d'abandonner,
       // plutôt que de renvoyer l'utilisateur revalider son code pour rien.
+      // 🔍 DIAGNOSTIC TEMPORAIRE (22/09) : à retirer une fois la cause
+      // trouvée. On trace précisément où ça coince, affiché à l'écran
+      // faute d'accès à la console de l'appareil.
+      let diag = `user0=${!!auth.currentUser}`;
       if (!user && useCustomOtpRef.current && resetSessionId) {
         const lastCode = otp.join('').replace(/\D/g, '');
+        diag += ` sess=oui code=${lastCode.length}`;
         if (lastCode.length === 6) {
           try {
             const { customToken } = await resetPasswordVerifyOtp(resetSessionId, lastCode);
+            diag += ` verify=ok`;
             await signInWithCustomToken(auth, customToken);
             user = auth.currentUser;
-          } catch {
-            // Échec silencieux : le message « Session invalide » standard
-            // s'affichera juste en dessous si `user` est toujours vide.
+            diag += ` signin=${!!user}`;
+          } catch (retryErr: any) {
+            diag += ` retryErr=${retryErr?.code || retryErr?.message || 'inconnu'}`;
           }
         }
+      } else if (!user) {
+        diag += ` sess=${resetSessionId ? 'oui' : 'NON'} custom=${useCustomOtpRef.current}`;
       }
-      if (!user) throw new Error('Session invalide');
+      if (!user) throw new Error(`Session invalide [${diag}]`);
       // ⚠️ Rafraîchit le jeton avant l'opération sensible : updatePassword()
       // exige une connexion « récente » côté Firebase, et le temps passé à
       // taper le nouveau mot de passe peut suffire à faire expirer cette
@@ -377,7 +385,11 @@ export default function ForgotPasswordPage() {
       } else if (err?.code === 'auth/network-request-failed') {
         setError('Connexion internet interrompue. Réessayez.');
       } else {
-        setError(`Impossible de mettre à jour le mot de passe${err?.code ? ` (${err.code})` : ''}. Réessayez.`);
+        // 🔍 DIAGNOSTIC TEMPORAIRE (22/09) : affiche err.message (contient le
+        // détail [...] posé plus haut pour "Session invalide") quand il n'y a
+        // pas de code Firebase standard — à retirer une fois la cause trouvée.
+        const detail = err?.code || err?.message || '';
+        setError(`Impossible de mettre à jour le mot de passe${detail ? ` (${detail})` : ''}. Réessayez.`);
       }
     } finally { setLoading(false); }
   };
