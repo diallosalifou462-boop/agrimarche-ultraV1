@@ -331,7 +331,29 @@ export default function ForgotPasswordPage() {
     if (newPassword !== confirmPassword) { setError('Les mots de passe ne correspondent pas'); return; }
     setLoading(true); setError('');
     try {
-      const user = auth.currentUser;
+      let user = auth.currentUser;
+      // ⚠️ FIX (22/09) : observé en production — `auth.currentUser` peut
+      // redevenir null entre l'écran du code et celui du nouveau mot de
+      // passe (session en mémoire perdue au changement de vue), même quand
+      // `signInWithCustomToken` avait bien réussi juste avant (sinon on ne
+      // serait jamais arrivé sur cet écran). `resetPasswordVerifyOtp` est
+      // volontairement rejouable tant que la session serveur existe encore
+      // (voir le commentaire « Rejouable » dans passwordReset.ts) : on s'en
+      // sert ici pour ré-authentifier silencieusement avant d'abandonner,
+      // plutôt que de renvoyer l'utilisateur revalider son code pour rien.
+      if (!user && useCustomOtpRef.current && resetSessionId) {
+        const lastCode = otp.join('').replace(/\D/g, '');
+        if (lastCode.length === 6) {
+          try {
+            const { customToken } = await resetPasswordVerifyOtp(resetSessionId, lastCode);
+            await signInWithCustomToken(auth, customToken);
+            user = auth.currentUser;
+          } catch {
+            // Échec silencieux : le message « Session invalide » standard
+            // s'affichera juste en dessous si `user` est toujours vide.
+          }
+        }
+      }
       if (!user) throw new Error('Session invalide');
       // ⚠️ Rafraîchit le jeton avant l'opération sensible : updatePassword()
       // exige une connexion « récente » côté Firebase, et le temps passé à
