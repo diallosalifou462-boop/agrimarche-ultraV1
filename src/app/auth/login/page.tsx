@@ -11,6 +11,8 @@ import {
   signInWithCustomToken,
   ConfirmationResult,
   signInWithEmailAndPassword,
+  signInWithCredential,
+  PhoneAuthProvider,
 } from 'firebase/auth';
 import { auth } from '@/lib/firebase/firebase';
 import { resolveLoginEmails, ensureMainAccountAfterPhoneCode, NoAccountForPhoneError } from '@/lib/auth/phoneSession';
@@ -136,8 +138,10 @@ function LoginContent() {
 
     const completedSub = FirebaseAuthentication.addListener('phoneVerificationCompleted', async (event) => {
       try {
+        // ⚠️ FIX (23/09) : on remplit seulement le code ; la connexion se
+        // fait au clic sur « Confirmer » (handleVerifyOTP → SDK web). Avant,
+        // on redirigeait sans aucune connexion côté web.
         if (event.verificationCode) setOtp(event.verificationCode.split(''));
-        router.replace(searchParams.get('redirect') || '/main/products');
       } catch {
         // L'utilisateur pourra toujours saisir/valider le code manuellement
       }
@@ -345,7 +349,10 @@ function LoginContent() {
 
       if (isNativeRef.current) {
         if (!verificationId) { setError('Session expirée, renvoyez le code'); setLoading(false); return; }
-        await FirebaseAuthentication.confirmVerificationCode({ verificationId, verificationCode: code });
+        // ⚠️ FIX (23/09) : le plugin natif ne connecte PAS le SDK web. On
+        // connecte donc le SDK web directement avec le code, sinon
+        // auth.currentUser reste null (voir auth/forgot-password).
+        await signInWithCredential(auth, PhoneAuthProvider.credential(verificationId, code));
       } else {
         if (!confirmResult) { setError('Session expirée, renvoyez le code'); setLoading(false); return; }
         await confirmResult.confirm(code);

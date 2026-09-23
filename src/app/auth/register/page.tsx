@@ -9,7 +9,7 @@ import {
   RecaptchaVerifier,
   signInWithPhoneNumber,
   signInWithCustomToken,
-  ConfirmationResult, signInWithEmailAndPassword } from 'firebase/auth';
+  ConfirmationResult, signInWithEmailAndPassword, signInWithCredential, PhoneAuthProvider } from 'firebase/auth';
 import { auth } from '@/lib/firebase/firebase';
 import { Capacitor } from '@capacitor/core';
 import { detectCarrier } from '@/lib/carrier';
@@ -268,8 +268,12 @@ export default function RegisterPage() {
     // est parfois validé automatiquement sans saisie manuelle
     const completedSub = FirebaseAuthentication.addListener('phoneVerificationCompleted', async (event) => {
       try {
-        if (event.verificationCode) setOtp(event.verificationCode.split(''));
-        await finalizeRegistration();
+        // ⚠️ FIX (23/09) : même chemin que la saisie manuelle (connexion
+        // SDK web puis finalizeRegistration), au lieu de finaliser sans
+        // utilisateur connecté côté web.
+        if (!event.verificationCode) return;
+        setOtp(event.verificationCode.split(''));
+        await verifyFnRef.current(event.verificationCode);
       } catch (err) {
         console.error('[DEBUG] finalizeRegistration a échoué (auto-vérif Android):', err);
         // L'utilisateur pourra toujours saisir/valider le code manuellement
@@ -675,10 +679,10 @@ export default function RegisterPage() {
 
       if (isNativeRef.current) {
         if (!verificationId) { setError('Session expirée, renvoyez le code'); setLoading(false); verifyingRef.current = false; return; }
-        await FirebaseAuthentication.confirmVerificationCode({ verificationId, verificationCode: code });
-        // Le plugin capacitor-firebase synchronise déjà automatiquement
-        // la session vers le SDK JS (skipNativeAuth n'est pas activé ici),
-        // pas besoin de rejouer le credential manuellement.
+        // ⚠️ FIX (23/09) : le plugin natif ne connecte PAS le SDK web. On
+        // connecte donc le SDK web directement avec le code, sinon
+        // auth.currentUser reste null (voir auth/forgot-password).
+        await signInWithCredential(auth, PhoneAuthProvider.credential(verificationId, code));
       } else {
         if (!confirmResult) { setError('Session expirée, renvoyez le code'); setLoading(false); verifyingRef.current = false; return; }
         await confirmResult.confirm(code);

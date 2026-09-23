@@ -21,6 +21,8 @@ import { apiUrl } from '@/lib/api-config';
 import { resetPasswordSendOtp, resetPasswordVerifyOtp, RegistrationActionError } from '@/lib/registrationActions';
 import { PENDING_FCM_TOKEN_KEY } from '@/hooks/useFCMToken';
 import { listenForOtpPush } from '@/lib/auth/otpPushListener';
+import AuthDiagPanel, { authDiag, errInfo, userInfo, AUTH_DIAG_BUILD } from '@/components/AuthDiagPanel';
+import { onAuthStateChanged } from 'firebase/auth';
 
 // ─── Attend que le pont natif Capacitor soit prêt ─────
 async function waitForNativeBridge(timeoutMs = 1500): Promise<boolean> {
@@ -80,6 +82,15 @@ export default function ForgotPasswordPage() {
   // refuserait et « Code incorrect » s'afficherait à tort.
   const verifyingRef = useRef(false);
 
+  // 🔍 DIAGNOSTIC (23/09) : trace chaque changement de session Firebase
+  // (SDK web). Si l'utilisateur disparaît, on voit À QUEL MOMENT.
+  useEffect(() => {
+    authDiag('info', 'Page ouverte', { build: AUTH_DIAG_BUILD, natif: Capacitor.isNativePlatform(), plateforme: Capacitor.getPlatform(), user: userInfo(auth.currentUser) });
+    return onAuthStateChanged(auth, (u) => {
+      authDiag(u ? 'info' : 'warn', 'onAuthStateChanged', userInfo(u));
+    });
+  }, []);
+
   // ─── Bypass reCAPTCHA en local (dev only, flow web) ───
   useEffect(() => {
     const isLocalHost =
@@ -96,6 +107,7 @@ export default function ForgotPasswordPage() {
     if (!Capacitor.isNativePlatform()) return;
 
     const codeSentSub = FirebaseAuthentication.addListener('phoneCodeSent', (event) => {
+      authDiag('ok', 'SMS envoyé (natif)', { verificationId: event.verificationId ? `${event.verificationId.slice(0, 8)}… (${event.verificationId.length})` : 'VIDE' });
       setVerificationId(event.verificationId);
       verificationIdRef.current = event.verificationId;
       setStep('otp');
@@ -104,6 +116,7 @@ export default function ForgotPasswordPage() {
     });
 
     const failedSub = FirebaseAuthentication.addListener('phoneVerificationFailed', (event) => {
+      authDiag('error', 'Échec envoi SMS (natif)', event);
       setError(event.message || "Impossible d'envoyer le SMS");
       setLoading(false);
     });
@@ -117,6 +130,7 @@ export default function ForgotPasswordPage() {
     // chemin que la saisie manuelle : verifyOTP → connexion SDK web.
     const completedSub = FirebaseAuthentication.addListener('phoneVerificationCompleted', (event) => {
       const code = event.verificationCode;
+      authDiag('info', 'Auto-vérification Android', { codeLu: !!code });
       if (!code) return; // pas de code lisible : l'utilisateur saisit le SMS
       setOtp(code.split(''));
       void verifyFnRef.current(code);
@@ -180,6 +194,7 @@ export default function ForgotPasswordPage() {
       // Firebase Phone Auth échoue souvent sur Free/Yas et Expresso au
       // Sénégal : on passe ces numéros par notre backend OTP (Infobip).
       const carrier = detectCarrier(phone);
+      authDiag('info', 'Envoi du code', { numero: phoneE164, operateur: carrier });
       if (carrier === 'free' || carrier === 'expresso') {
         useCustomOtpRef.current = true;
         await sendResetCode();
@@ -199,6 +214,7 @@ export default function ForgotPasswordPage() {
         body: JSON.stringify({ phone: phoneE164, purpose: 'reset' }),
       });
       const checkJson = await checkRes.json().catch(() => null);
+      authDiag(checkRes.ok ? 'ok' : 'error', 'check-phone', { status: checkRes.status, reponse: checkJson });
       if (!checkRes.ok) {
         setError(checkJson?.error || "Aucun compte n'est associé à ce numéro.");
         setLoading(false);
@@ -207,6 +223,7 @@ export default function ForgotPasswordPage() {
 
       const isNative = await waitForNativeBridge();
       isNativeRef.current = isNative;
+      authDiag('info', `Chemin ${isNative ? 'NATIF' : 'WEB'} (Orange / Firebase Phone Auth)`);
       if (isNative) {
         await FirebaseAuthentication.signInWithPhoneNumber({ phoneNumber: phoneE164 });
       } else {
@@ -219,6 +236,7 @@ export default function ForgotPasswordPage() {
         const t = setInterval(() => setResendCooldown(v => { if (v <= 1) clearInterval(t); return v - 1; }), 1000);
       }
     } catch (err: any) {
+      authDiag('error', 'Exception envoi SMS', errInfo(err));
       if (err?.code === 'auth/invalid-phone-number') setError('Numéro invalide');
       else if (err?.code === 'auth/too-many-requests') setError('Trop de tentatives');
       else setError("Impossible d'envoyer le SMS");
@@ -253,6 +271,7 @@ export default function ForgotPasswordPage() {
     const code = (codeOverride ?? otp.join('')).replace(/\D/g, '');
     if (code.length < 6) { setError('Code à 6 chiffres requis'); verifyingRef.current = false; return; }
     setLoading(true); setError('');
+    authDiag('info', 'Validation du code', { chemin: useCustomOtpRef.current ? 'custom (Free/Expresso)' : isNativeRef.current ? 'natif→SDK web' : 'web', longueur: code.length });
     try {
       if (useCustomOtpRef.current) {
         // Free/Yas et Expresso : vérification par la function
@@ -262,7 +281,9 @@ export default function ForgotPasswordPage() {
         try {
           const { customToken } = await resetPasswordVerifyOtp(resetSessionId, code);
           await signInWithCustomToken(auth, customToken);
+          authDiag('ok', 'signInWithCustomToken OK', userInfo(auth.currentUser));
         } catch (err: any) {
+          authDiag('error', 'Échec code custom', errInfo(err));
           setError(err instanceof RegistrationActionError ? err.message : 'Code incorrect');
           setLoading(false);
           return;
@@ -280,15 +301,20 @@ export default function ForgotPasswordPage() {
         const vid = verificationIdRef.current ?? verificationId;
         if (!vid) { setError('Session expirée, renvoyez le code'); setLoading(false); return; }
         await signInWithCredential(auth, PhoneAuthProvider.credential(vid, code));
+        authDiag('ok', 'signInWithCredential OK', userInfo(auth.currentUser));
       } else {
         if (!confirmResult) { setError('Session expirée'); setLoading(false); return; }
         await confirmResult.confirm(code);
+        authDiag('ok', 'confirmResult.confirm OK', userInfo(auth.currentUser));
       }
       // Orange : le nouveau mot de passe doit aller sur le VRAI compte, pas
       // sur un compte « téléphone seul » vide que Firebase aurait créé.
+      authDiag('info', 'ensureMainAccount — avant', userInfo(auth.currentUser));
       await ensureMainAccountAfterPhoneCode(phone);
+      authDiag(auth.currentUser ? 'ok' : 'error', 'ensureMainAccount — après', userInfo(auth.currentUser));
       setStep('newpwd');
     } catch (err: any) {
+      authDiag('error', 'Échec validation du code', errInfo(err));
       if (err?.code === 'auth/invalid-verification-code') setError('Code incorrect');
       else if (err?.code === 'auth/code-expired') setError('Code expiré, renvoyez');
       else if (err?.code === 'auth/session-expired') setError('Code expiré, renvoyez');
@@ -335,6 +361,7 @@ export default function ForgotPasswordPage() {
     if (newPassword.length < 6) { setError('6 caractères minimum'); return; }
     if (newPassword !== confirmPassword) { setError('Les mots de passe ne correspondent pas'); return; }
     setLoading(true); setError('');
+    authDiag(auth.currentUser ? 'info' : 'error', 'Nouveau mot de passe — session', userInfo(auth.currentUser));
     try {
       let user = auth.currentUser;
       // ⚠️ FIX (22/09) : observé en production — `auth.currentUser` peut
@@ -373,7 +400,9 @@ export default function ForgotPasswordPage() {
       // taper le nouveau mot de passe peut suffire à faire expirer cette
       // fraîcheur, même juste après une vérification par code réussie.
       await user.getIdToken(true);
+      authDiag('ok', 'getIdToken(true) OK');
       await updatePassword(user, newPassword);
+      authDiag('ok', 'updatePassword OK — mot de passe changé');
       setStep('success');
     } catch (err: any) {
       // ⚠️ Le message générique masquait la vraie cause à l'écran ET dans
@@ -382,6 +411,7 @@ export default function ForgotPasswordPage() {
       // On affiche maintenant le code technique, et un message clair pour
       // le seul cas qui a une action concrète (recommencer la vérification).
       console.error('[ForgotPassword] updatePassword a échoué:', err?.code, err?.message);
+      authDiag('error', 'Échec mise à jour mot de passe', errInfo(err));
       if (err?.code === 'auth/requires-recent-login') {
         setError('Votre session a expiré pendant la saisie. Revérifiez votre code pour continuer.');
         setStep('otp');
@@ -405,6 +435,7 @@ export default function ForgotPasswordPage() {
   // ── Succès ──────────────────────────────────────────
   if (step === 'success') return (
     <div className={wrapperClass}>
+      <AuthDiagPanel />
       <div className={`${cardClass} text-center`}>
         <div className="inline-flex items-center justify-center w-16 h-16 bg-green-100 rounded-full mb-4">
           <CheckCircle size={36} className="text-green-600" />
@@ -421,6 +452,7 @@ export default function ForgotPasswordPage() {
   // ── Nouveau mot de passe ──────────────────────────
   if (step === 'newpwd') return (
     <div className={wrapperClass}>
+      <AuthDiagPanel />
       <div className={cardClass}>
         <div className="text-center mb-6">
           <div className="inline-flex items-center justify-center w-14 h-14 bg-green-100 rounded-full mb-3">
@@ -455,6 +487,7 @@ export default function ForgotPasswordPage() {
   // ── OTP ───────────────────────────────────────────
   if (step === 'otp') return (
     <div className={wrapperClass}>
+      <AuthDiagPanel />
       <div id="recaptcha-container" />
       <div className={cardClass}>
         <button onClick={() => { setStep('phone'); setOtp(['','','','','','']); setError(''); setResetSessionId(null); setOtpChannel('sms'); }}
@@ -522,6 +555,7 @@ export default function ForgotPasswordPage() {
   // ── Saisie numéro ─────────────────────────────────
   return (
     <div className={wrapperClass}>
+      <AuthDiagPanel />
       <div id="recaptcha-container" />
       <div className={cardClass}>
         <div className="text-center mb-8">
