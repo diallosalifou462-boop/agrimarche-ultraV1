@@ -21,7 +21,7 @@ import { apiUrl } from '@/lib/api-config';
 import { resetPasswordSendOtp, resetPasswordVerifyOtp, RegistrationActionError } from '@/lib/registrationActions';
 import { PENDING_FCM_TOKEN_KEY } from '@/hooks/useFCMToken';
 import { listenForOtpPush } from '@/lib/auth/otpPushListener';
-import AuthDiagPanel, { authDiag, errInfo, userInfo, AUTH_DIAG_BUILD } from '@/components/AuthDiagPanel';
+import { authDiag, errInfo, userInfo, AUTH_DIAG_BUILD } from '@/components/AuthDiagPanel';
 import { onAuthStateChanged } from 'firebase/auth';
 
 // ─── Attend que le pont natif Capacitor soit prêt ─────
@@ -435,7 +435,6 @@ export default function ForgotPasswordPage() {
   // ── Succès ──────────────────────────────────────────
   if (step === 'success') return (
     <div className={wrapperClass}>
-      <AuthDiagPanel />
       <div className={`${cardClass} text-center`}>
         <div className="inline-flex items-center justify-center w-16 h-16 bg-green-100 rounded-full mb-4">
           <CheckCircle size={36} className="text-green-600" />
@@ -452,7 +451,6 @@ export default function ForgotPasswordPage() {
   // ── Nouveau mot de passe ──────────────────────────
   if (step === 'newpwd') return (
     <div className={wrapperClass}>
-      <AuthDiagPanel />
       <div className={cardClass}>
         <div className="text-center mb-6">
           <div className="inline-flex items-center justify-center w-14 h-14 bg-green-100 rounded-full mb-3">
@@ -487,7 +485,6 @@ export default function ForgotPasswordPage() {
   // ── OTP ───────────────────────────────────────────
   if (step === 'otp') return (
     <div className={wrapperClass}>
-      <AuthDiagPanel />
       <div id="recaptcha-container" />
       <div className={cardClass}>
         <button onClick={() => { setStep('phone'); setOtp(['','','','','','']); setError(''); setResetSessionId(null); setOtpChannel('sms'); }}
@@ -555,7 +552,6 @@ export default function ForgotPasswordPage() {
   // ── Saisie numéro ─────────────────────────────────
   return (
     <div className={wrapperClass}>
-      <AuthDiagPanel />
       <div id="recaptcha-container" />
       <div className={cardClass}>
         <div className="text-center mb-8">

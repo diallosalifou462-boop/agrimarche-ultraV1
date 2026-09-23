@@ -705,7 +705,10 @@ export default function RegisterPage() {
         // clair, cohérent avec le blocage déjà en place pour Free/Expresso.
         setError('Ce numéro est déjà inscrit. Connectez-vous ou utilisez « mot de passe oublié ».');
       } else {
-        setError("Erreur lors de la vérification");
+        // 🔍 DIAGNOSTIC (23/09) : affiche le code/message réel au lieu d'un
+        // message générique impossible à diagnostiquer depuis le terrain.
+        const detail = err?.code || err?.message || '';
+        setError(`Erreur lors de la vérification${detail ? ` (${detail})` : ''}`);
       }
     } finally {
       setLoading(false);
