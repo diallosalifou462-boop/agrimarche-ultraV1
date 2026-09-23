@@ -2,11 +2,11 @@ import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
   appId: 'com.agrimarche.app',
-  appName: 'AgriMarché',
+  appName: 'SunuMenef',
   webDir: 'out',
   plugins: {
     FirebaseAuthentication: {
-      skipNativeAuth: false,
+      skipNativeAuth: true, // connexion faite dans le SDK web (voir auth/forgot-password)
       providers: ['phone'],
     },
   },

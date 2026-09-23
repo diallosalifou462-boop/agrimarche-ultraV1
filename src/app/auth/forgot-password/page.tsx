@@ -10,6 +10,8 @@ import {
   signInWithCustomToken,
   ConfirmationResult,
   updatePassword,
+  PhoneAuthProvider,
+  signInWithCredential,
 } from 'firebase/auth';
 import { auth } from '@/lib/firebase/firebase';
 import { ensureMainAccountAfterPhoneCode } from '@/lib/auth/phoneSession';
@@ -106,22 +108,18 @@ export default function ForgotPasswordPage() {
       setLoading(false);
     });
 
-    // Auto-vérification Android : on confirme explicitement le code
-    // pour être sûr que auth.currentUser soit bien mis à jour, car
-    // handleNewPassword en dépend directement.
-    const completedSub = FirebaseAuthentication.addListener('phoneVerificationCompleted', async (event) => {
-      try {
-        if (event.verificationCode) setOtp(event.verificationCode.split(''));
-        if (verificationIdRef.current && event.verificationCode) {
-          await FirebaseAuthentication.confirmVerificationCode({
-            verificationId: verificationIdRef.current,
-            verificationCode: event.verificationCode,
-          });
-        }
-        setStep('newpwd');
-      } catch {
-        // L'utilisateur pourra toujours saisir/valider le code manuellement
-      }
+    // ⚠️ FIX (23/09) : auto-lecture du SMS sur Android. On ne confirme plus
+    // le code côté NATIF (FirebaseAuthentication.confirmVerificationCode) :
+    // ça connectait l'utilisateur dans la couche native seulement, jamais
+    // dans le SDK web → auth.currentUser restait null ("user0=false") et la
+    // session de vérification était consommée, donc la saisie manuelle
+    // échouait ensuite ("Erreur de vérification"). On passe par le même
+    // chemin que la saisie manuelle : verifyOTP → connexion SDK web.
+    const completedSub = FirebaseAuthentication.addListener('phoneVerificationCompleted', (event) => {
+      const code = event.verificationCode;
+      if (!code) return; // pas de code lisible : l'utilisateur saisit le SMS
+      setOtp(code.split(''));
+      void verifyFnRef.current(code);
     });
 
     return () => {
@@ -275,8 +273,13 @@ export default function ForgotPasswordPage() {
       }
 
       if (isNativeRef.current) {
-        if (!verificationId) { setError('Session expirée'); setLoading(false); return; }
-        await FirebaseAuthentication.confirmVerificationCode({ verificationId, verificationCode: code });
+        // ⚠️ FIX (23/09) : l'envoi du SMS se fait en natif (Play Integrity /
+        // APNs), mais la CONNEXION doit se faire dans le SDK web, sinon
+        // auth.currentUser reste null et updatePassword() est impossible
+        // ("Session invalide [user0=false sess=NON custom=false]").
+        const vid = verificationIdRef.current ?? verificationId;
+        if (!vid) { setError('Session expirée, renvoyez le code'); setLoading(false); return; }
+        await signInWithCredential(auth, PhoneAuthProvider.credential(vid, code));
       } else {
         if (!confirmResult) { setError('Session expirée'); setLoading(false); return; }
         await confirmResult.confirm(code);
@@ -288,7 +291,9 @@ export default function ForgotPasswordPage() {
     } catch (err: any) {
       if (err?.code === 'auth/invalid-verification-code') setError('Code incorrect');
       else if (err?.code === 'auth/code-expired') setError('Code expiré, renvoyez');
-      else setError(err?.code ? 'Erreur de vérification' : (err?.message || 'Erreur de vérification'));
+      else if (err?.code === 'auth/session-expired') setError('Code expiré, renvoyez');
+      // 🔍 DIAGNOSTIC TEMPORAIRE (23/09) : affiche le code Firebase réel.
+      else setError(`Erreur de vérification${err?.code ? ` (${err.code})` : err?.message ? ` (${err.message})` : ''}`);
     } finally { setLoading(false); verifyingRef.current = false; }
   };
 
