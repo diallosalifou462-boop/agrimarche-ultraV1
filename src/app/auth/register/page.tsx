@@ -705,10 +705,26 @@ export default function RegisterPage() {
         // clair, cohérent avec le blocage déjà en place pour Free/Expresso.
         setError('Ce numéro est déjà inscrit. Connectez-vous ou utilisez « mot de passe oublié ».');
       } else {
-        // 🔍 DIAGNOSTIC (23/09) : affiche le code/message réel au lieu d'un
-        // message générique impossible à diagnostiquer depuis le terrain.
-        const detail = err?.code || err?.message || '';
-        setError(`Erreur lors de la vérification${detail ? ` (${detail})` : ''}`);
+        // 🔍 DIAGNOSTIC (25/09) : la version précédente (23/09) affichait
+        // "Erreur lors de la vérification" SANS rien entre parenthèses dès
+        // que err.code ET err.message étaient tous les deux vides/undefined
+        // (ex: un objet d'erreur atypique, ou err.message === '') — nous
+        // laissant sans AUCUN indice pour diagnostiquer à distance. On
+        // construit désormais un détail qui ne peut jamais être vide :
+        // code, nom, message, puis en dernier recours un JSON.stringify
+        // brut de l'objet complet.
+        const parts = [err?.code, err?.name, err?.message].filter(
+          (v) => typeof v === 'string' && v.trim() !== '',
+        );
+        let detail = parts.join(' / ');
+        if (!detail) {
+          try {
+            detail = JSON.stringify(err, Object.getOwnPropertyNames(err ?? {})) || 'inconnu';
+          } catch {
+            detail = String(err) || 'inconnu';
+          }
+        }
+        setError(`Erreur lors de la vérification (${detail})`);
       }
     } finally {
       setLoading(false);
