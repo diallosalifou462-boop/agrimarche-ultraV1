@@ -37,7 +37,8 @@ import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
 import { MessageSquare, Bell, ArrowLeft, Lock, CheckCircle, Eye, EyeOff } from 'lucide-react';
 
 function toE164(phone: string): string {
-  const digits = phone.replace(/\D/g, '');
+  let digits = phone.replace(/\D/g, '');
+  if (digits.startsWith('00')) digits = digits.slice(2); // « 00221… » saisi à la main
   if (digits.startsWith('221')) return `+${digits}`;
   if (digits.length === 9) return `+221${digits}`;
   return `+${digits}`;
@@ -55,6 +56,23 @@ function readPendingPushToken(): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+// Messages natifs Firebase (anglais, techniques) → français clair.
+// « We have blocked all requests from this device due to unusual activity »
+// = protection anti-abus temporaire de Firebase (trop de codes demandés).
+function friendlyNativePhoneError(event: any, fallback: string): string {
+  const code = String(event?.code ?? '');
+  const msg = String(event?.message ?? '');
+  if (/too-many-requests|unusual activity|blocked all requests/i.test(code + ' ' + msg)) {
+    return 'Trop de demandes de code depuis cet appareil. Réessayez dans quelques heures.';
+  }
+  if (/quota/i.test(code + ' ' + msg)) return 'Service SMS momentanément saturé. Réessayez plus tard.';
+  if (/connection abort|network|timeout|unreachable/i.test(msg)) {
+    return 'Connexion internet interrompue pendant l’envoi. Vérifiez votre réseau et réessayez.';
+  }
+  if (/invalid-phone-number|invalid phone/i.test(code + ' ' + msg)) return 'Numéro invalide';
+  return (msg || fallback) + (code ? ` (code: ${code})` : '');
 }
 
 type Step = 'phone' | 'otp' | 'newpwd' | 'success';
@@ -81,6 +99,11 @@ export default function ForgotPasswordPage() {
   // rejouerait le même code sur une session déjà consommée : le serveur le
   // refuserait et « Code incorrect » s'afficherait à tort.
   const verifyingRef = useRef(false);
+  // ⚠️ AJOUT (26/09) : true dès que le code a été accepté (passage à l'écran
+  // « Nouveau mot de passe »). L'auto-lecture SMS Android peut arriver APRÈS
+  // une saisie manuelle réussie : elle rejouait la vérification (code déjà
+  // consommé → erreur, voire perte de la session ouverte juste avant).
+  const codeAcceptedRef = useRef(false);
 
   // 🔍 DIAGNOSTIC (23/09) : trace chaque changement de session Firebase
   // (SDK web). Si l'utilisateur disparaît, on voit À QUEL MOMENT.
@@ -117,7 +140,10 @@ export default function ForgotPasswordPage() {
 
     const failedSub = FirebaseAuthentication.addListener('phoneVerificationFailed', (event) => {
       authDiag('error', 'Échec envoi SMS (natif)', event);
-      setError(event.message || "Impossible d'envoyer le SMS");
+      // Échec natif tardif pendant/après une vérification réussie côté web :
+      // on l'ignore (sinon message d'erreur + boutons réactivés en plein vol).
+      if (verifyingRef.current || codeAcceptedRef.current) return;
+      setError(friendlyNativePhoneError(event, "Impossible d'envoyer le SMS"));
       setLoading(false);
     });
 
@@ -131,7 +157,16 @@ export default function ForgotPasswordPage() {
     const completedSub = FirebaseAuthentication.addListener('phoneVerificationCompleted', (event) => {
       const code = event.verificationCode;
       authDiag('info', 'Auto-vérification Android', { codeLu: !!code });
-      if (!code) return; // pas de code lisible : l'utilisateur saisit le SMS
+      if (codeAcceptedRef.current) return; // code déjà validé : ne rien rejouer
+      if (!code) {
+        // Vérification « instantanée » Android sans code : impossible à
+        // transmettre au SDK web. Avant, rien ne se passait et le bouton
+        // restait en chargement indéfiniment.
+        if (verifyingRef.current) return;
+        setLoading(false);
+        setError('Vérification automatique incomplète. Réessayez dans un instant (bouton « Renvoyer »).');
+        return;
+      }
       setOtp(code.split(''));
       void verifyFnRef.current(code);
     });
@@ -164,6 +199,7 @@ export default function ForgotPasswordPage() {
   // le même changement dans auth/register/page.tsx) — toujours SMS
   // Infobip direct, aucun pushToken transmis. Un seul chemin fiable.
   const sendResetCode = async () => {
+    codeAcceptedRef.current = false; // nouveau code à valider
     setError(''); setLoading(true);
     try {
       // forceSms: true est INDISPENSABLE ici — contrairement à l'inscription,
@@ -186,6 +222,7 @@ export default function ForgotPasswordPage() {
 
   const sendOTP = async () => {
     if (!phone) { setError('Saisissez votre numéro'); return; }
+    codeAcceptedRef.current = false; // nouvel envoi = nouveau code à valider
     setError(''); setLoading(true);
     try {
       const phoneE164 = toE164(phone);
@@ -238,8 +275,8 @@ export default function ForgotPasswordPage() {
     } catch (err: any) {
       authDiag('error', 'Exception envoi SMS', errInfo(err));
       if (err?.code === 'auth/invalid-phone-number') setError('Numéro invalide');
-      else if (err?.code === 'auth/too-many-requests') setError('Trop de tentatives');
-      else setError("Impossible d'envoyer le SMS");
+      else if (err?.code === 'auth/too-many-requests') setError('Trop de demandes de code depuis cet appareil. Réessayez dans quelques heures.');
+      else setError(friendlyNativePhoneError(err, "Impossible d'envoyer le SMS"));
       setLoading(false);
     }
   };
@@ -266,7 +303,7 @@ export default function ForgotPasswordPage() {
   // `codeOverride` : code arrivé par notification push, validé sans attendre
   // le prochain rendu React (otp.join('') renverrait encore l'ancienne valeur).
   const verifyOTP = async (codeOverride?: string) => {
-    if (loading || verifyingRef.current) return;
+    if (loading || verifyingRef.current || codeAcceptedRef.current) return;
     verifyingRef.current = true;
     const code = (codeOverride ?? otp.join('')).replace(/\D/g, '');
     if (code.length < 6) { setError('Code à 6 chiffres requis'); verifyingRef.current = false; return; }
@@ -288,6 +325,7 @@ export default function ForgotPasswordPage() {
           setLoading(false);
           return;
         }
+        codeAcceptedRef.current = true;
         setStep('newpwd');
         setLoading(false);
         return;
@@ -312,6 +350,12 @@ export default function ForgotPasswordPage() {
       authDiag('info', 'ensureMainAccount — avant', userInfo(auth.currentUser));
       await ensureMainAccountAfterPhoneCode(phone);
       authDiag(auth.currentUser ? 'ok' : 'error', 'ensureMainAccount — après', userInfo(auth.currentUser));
+      if (!auth.currentUser) {
+        // Ne JAMAIS afficher l'écran « Nouveau mot de passe » sans session :
+        // l'utilisateur taperait son mot de passe pour rien.
+        throw new Error('Connexion non établie après le code SMS. Réessayez.');
+      }
+      codeAcceptedRef.current = true;
       setStep('newpwd');
     } catch (err: any) {
       authDiag('error', 'Échec validation du code', errInfo(err));
@@ -391,6 +435,31 @@ export default function ForgotPasswordPage() {
             diag += ` retryErr=${retryErr?.code || retryErr?.message || 'inconnu'}`;
           }
         }
+      } else if (!user && !useCustomOtpRef.current) {
+        // ⚠️ FIX (26/09) : même filet de secours que ci-dessus, pour Orange
+        // cette fois. Après verifyOTP(), ensureMainAccountAfterPhoneCode()
+        // remplace la session « téléphone seul » par celle du vrai compte
+        // via signInWithCustomToken — cette bascule de session est ce qui
+        // se perd entre l'écran du code et celui du nouveau mot de passe
+        // (observé : user0=false sess=NON custom=false, sans AUCUNE tentative
+        // de récupération jusqu'ici pour ce chemin). On rejoue donc la
+        // connexion par identifiant SMS (verificationId + dernier code
+        // entré, toujours en mémoire), puis on relance la bascule vers le
+        // vrai compte, exactement comme juste après la vérification initiale.
+        const lastCode = otp.join('').replace(/\D/g, '');
+        const vid = verificationIdRef.current ?? verificationId;
+        diag += ` sess=NON custom=false vid=${!!vid} code=${lastCode.length}`;
+        if (vid && lastCode.length === 6) {
+          try {
+            await signInWithCredential(auth, PhoneAuthProvider.credential(vid, lastCode));
+            diag += ` recredit=ok`;
+            await ensureMainAccountAfterPhoneCode(phone);
+            user = auth.currentUser;
+            diag += ` reensure=${!!user}`;
+          } catch (retryErr: any) {
+            diag += ` retryErr=${retryErr?.code || retryErr?.message || 'inconnu'}`;
+          }
+        }
       } else if (!user) {
         diag += ` sess=${resetSessionId ? 'oui' : 'NON'} custom=${useCustomOtpRef.current}`;
       }
@@ -403,6 +472,10 @@ export default function ForgotPasswordPage() {
       authDiag('ok', 'getIdToken(true) OK');
       await updatePassword(user, newPassword);
       authDiag('ok', 'updatePassword OK — mot de passe changé');
+      // L'écran suivant invite à se connecter avec le NOUVEAU mot de passe :
+      // on ferme la session de réinitialisation, pour repartir d'une
+      // connexion propre (et vérifier du même coup que le mot de passe marche).
+      await auth.signOut().catch(() => {});
       setStep('success');
     } catch (err: any) {
       // ⚠️ Le message générique masquait la vraie cause à l'écran ET dans
@@ -414,6 +487,7 @@ export default function ForgotPasswordPage() {
       authDiag('error', 'Échec mise à jour mot de passe', errInfo(err));
       if (err?.code === 'auth/requires-recent-login') {
         setError('Votre session a expiré pendant la saisie. Revérifiez votre code pour continuer.');
+        codeAcceptedRef.current = false; // sinon « Confirmer » ne ferait plus rien
         setStep('otp');
       } else if (err?.code === 'auth/weak-password') {
         setError('Mot de passe trop faible : utilisez au moins 6 caractères.');
@@ -487,7 +561,7 @@ export default function ForgotPasswordPage() {
     <div className={wrapperClass}>
       <div id="recaptcha-container" />
       <div className={cardClass}>
-        <button onClick={() => { setStep('phone'); setOtp(['','','','','','']); setError(''); setResetSessionId(null); setOtpChannel('sms'); }}
+        <button onClick={() => { codeAcceptedRef.current = false; setStep('phone'); setOtp(['','','','','','']); setError(''); setResetSessionId(null); setOtpChannel('sms'); }}
           className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 mb-6">
           <ArrowLeft size={16} /> Retour
         </button>

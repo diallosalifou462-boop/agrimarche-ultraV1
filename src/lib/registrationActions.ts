@@ -66,7 +66,11 @@ interface StartResponse {
 export async function startRegistration(phone: string, pushToken?: string): Promise<StartResponse> {
   const fn = httpsCallable<{ phone: string; pushToken?: string }, StartResponse>(functions, 'registrationStart');
   try {
-    const res = await callWithRetry(() => fn({ phone, pushToken }));
+    // ⚠️ FIX (26/09) : PAS de retry automatique sur un ENVOI de code. Un envoi
+    // lent (Infobip > 8 s) peut arriver quand même : le relancer créait une
+    // nouvelle session + un nouveau SMS, et le premier code reçu devenait faux
+    // (tentative brûlée). L'utilisateur garde le bouton « Renvoyer ».
+    const res = await fn({ phone, pushToken });
     return res.data;
   } catch (e) {
     throw toActionError(e);
@@ -84,7 +88,11 @@ export async function resendRegistrationCode(
     'registrationResend',
   );
   try {
-    const res = await callWithRetry(() => fn({ sessionId, pushToken: opts.forceSms ? undefined : pushToken, forceSms: opts.forceSms }));
+    // ⚠️ FIX (26/09) : PAS de retry automatique sur un ENVOI de code. Un envoi
+    // lent (Infobip > 8 s) peut arriver quand même : le relancer créait une
+    // nouvelle session + un nouveau SMS, et le premier code reçu devenait faux
+    // (tentative brûlée). L'utilisateur garde le bouton « Renvoyer ».
+    const res = await fn({ sessionId, pushToken: opts.forceSms ? undefined : pushToken, forceSms: opts.forceSms });
     return res.data;
   } catch (e) {
     throw toActionError(e);
@@ -118,7 +126,9 @@ export async function verifyRegistrationCode(
   const RETRY_TECH_CODES = new Set(['VERIFICATION_IN_PROGRESS']);
   const RETRY_FIREBASE_CODES = new Set([
     'functions/unavailable',
-    'functions/deadline-exceeded',
+    // 'functions/deadline-exceeded' retiré (26/09) : c'est aussi le code de
+    // CODE_EXPIRED — le rejouer transformait « code expiré » en « session
+    // plus active » et brouillait le message.
     'functions/internal',
     'functions/aborted',
   ]);
@@ -150,8 +160,11 @@ export async function verifyRegistrationCode(
 export async function completeOrangeRegistration(
   profile: RegistrationProfile,
   pushToken?: string,
-): Promise<{ uid: string; alreadyRegistered: boolean }> {
-  const fn = httpsCallable<{ profile: RegistrationProfile; pushToken?: string }, { uid: string; alreadyRegistered: boolean }>(
+  // customToken (ajouté le 26/09) : jeton frais émis APRÈS que le serveur a
+  // posé email + mot de passe — ce qui révoque la session SMS en cours.
+  // Le client doit s'en servir pour se reconnecter (voir register/page.tsx).
+): Promise<{ uid: string; alreadyRegistered: boolean; customToken?: string }> {
+  const fn = httpsCallable<{ profile: RegistrationProfile; pushToken?: string }, { uid: string; alreadyRegistered: boolean; customToken?: string }>(
     functions,
     'completeOrangeRegistration',
   );
@@ -183,7 +196,11 @@ interface OtpSessionResponse {
 export async function loginSendOtp(): Promise<OtpSessionResponse> {
   const fn = httpsCallable<Record<string, never>, OtpSessionResponse>(functions, 'loginSendOtp');
   try {
-    const res = await callWithRetry(() => fn({}));
+    // ⚠️ FIX (26/09) : PAS de retry automatique sur un ENVOI de code. Un envoi
+    // lent (Infobip > 8 s) peut arriver quand même : le relancer créait une
+    // nouvelle session + un nouveau SMS, et le premier code reçu devenait faux
+    // (tentative brûlée). L'utilisateur garde le bouton « Renvoyer ».
+    const res = await fn({});
     return res.data;
   } catch (e) {
     throw toActionError(e);
@@ -226,7 +243,11 @@ export async function resetPasswordSendOtp(
   if (opts.pushToken) payload.pushToken = opts.pushToken;
   if (opts.forceSms) payload.forceSms = true;
   try {
-    const res = await callWithRetry(() => fn(payload));
+    // ⚠️ FIX (26/09) : PAS de retry automatique sur un ENVOI de code. Un envoi
+    // lent (Infobip > 8 s) peut arriver quand même : le relancer créait une
+    // nouvelle session + un nouveau SMS, et le premier code reçu devenait faux
+    // (tentative brûlée). L'utilisateur garde le bouton « Renvoyer ».
+    const res = await fn(payload);
     return res.data;
   } catch (e) {
     throw toActionError(e);

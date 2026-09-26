@@ -34,7 +34,11 @@ export async function POST(req: NextRequest) {
     const auth = getAuth(getAdminApp());
     const decoded = await auth.verifyIdToken(idToken).catch(() => null);
     const phoneE164 = decoded?.phone_number ? toE164Senegal(decoded.phone_number) : null;
-    if (!decoded || !phoneE164) {
+    // ⚠️ FIX (26/09) : le jeton doit provenir d'une connexion PAR SMS
+    // (sign_in_provider 'phone'). Sinon, un compte email/mot de passe portant
+    // un phone_number (attaché par ailleurs) servirait de « preuve » de
+    // possession du numéro sans code SMS.
+    if (!decoded || !phoneE164 || decoded.firebase?.sign_in_provider !== 'phone') {
       return NextResponse.json({ error: 'Vérification du numéro invalide' }, { status: 401, headers: CORS_HEADERS });
     }
     // Le jeton doit venir d'une vérification SMS récente (moins de 10 min).

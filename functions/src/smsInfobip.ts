@@ -47,12 +47,25 @@ export async function sendOtpSmsInfobip(
     throw new Error('Configuration InfoBip manquante (INFOBIP_BASE_URL / INFOBIP_API_KEY).');
   }
 
+  // ⚠️ FIX (26/09) : texte 100 % GSM-7. Le « ë »/« ñ » de « Sunu Mëñëf »
+  // n'existent PAS dans l'alphabet GSM 03.38 : leur seule présence
+  // basculait tout le SMS en Unicode (UCS-2, 70 caractères max par
+  // segment) → message découpé en 2 SMS, donc facturé 2 fois. Seuls des
+  // caractères du jeu de base GSM-7 sont gardés ici : « é » (de
+  // « réinitialisation ») en fait partie, comme è, ù, ì, ò, à, É — mais
+  // PAS ë, ñ, ê, â ni le « ç » minuscule. Toute modification de ce texte
+  // doit respecter cette règle.
+  // ⚠️ FIX (26/09) : validityPeriod (en minutes) = durée de vie du code.
+  // Sans ça, un SMS bloqué chez l'opérateur (téléphone éteint, réseau
+  // saturé) pouvait être livré des heures plus tard, avec un code déjà
+  // expiré qui ne fait que semer la confusion.
   const body = {
     messages: [
       {
         destinations: [{ to: phoneE164.replace('+', '') }],
         from: INFOBIP_SENDER,
-        text: `Votre code de ${purpose} Sunu Mëñëf est : ${code}. Ce code expire dans 5 minutes.`,
+        text: `Votre code de ${purpose} Sunu Menef : ${code}. Valable 5 min.`,
+        validityPeriod: 5,
       },
     ],
   };
@@ -77,8 +90,17 @@ export async function sendOtpSmsInfobip(
       signal: AbortSignal.timeout(8000),
     });
   } catch (err: any) {
-    const reason = err?.name === 'TimeoutError' ? 'timeout (8s)' : err?.message || err;
-    console.error(`❌ Échec réseau envoi SMS InfoBip: ${reason}`);
+    // ⚠️ FIX (26/09) : un TIMEOUT n'est pas un échec certain — la requête
+    // a pu atteindre Infobip, et le SMS partir quand même (juste en
+    // retard). On le signale donc avec une erreur DISTINCTE
+    // (SMS_SEND_TIMEOUT) pour que l'appelant puisse garder la session
+    // utilisable au lieu de la déclarer morte alors que le code arrive
+    // quelques secondes plus tard sur le téléphone.
+    if (err?.name === 'TimeoutError') {
+      console.error('⏱️ Timeout (8s) envoi SMS InfoBip — le SMS a pu partir quand même.');
+      throw new Error('SMS_SEND_TIMEOUT');
+    }
+    console.error(`❌ Échec réseau envoi SMS InfoBip: ${err?.message || err}`);
     throw new Error('SMS_SEND_FAILED');
   }
 
@@ -89,6 +111,31 @@ export async function sendOtpSmsInfobip(
     // les logs serveur).
     const errText = await res.text().catch(() => '');
     console.error(`❌ Échec envoi SMS InfoBip (status ${res.status}): ${errText}`);
+    throw new Error('SMS_SEND_FAILED');
+  }
+
+  // ⚠️ FIX (26/09) : un HTTP 200 ne veut PAS dire « SMS accepté ». Infobip
+  // répond 200 même quand il REJETTE le message (numéro invalide, crédit
+  // épuisé, expéditeur non autorisé…) : le refus n'apparaît que dans
+  // messages[0].status (groupName 'REJECTED', groupId 5). Avant, ces refus
+  // étaient comptés comme des envois réussis — l'utilisateur attendait un
+  // code qui ne partirait jamais. On ne journalise que le nom/la
+  // description du statut, jamais `code`.
+  // Lecture du corps « sûre » : si le JSON est illisible (ou si sa lecture
+  // expire), on ne peut rien conclure — on garde le comportement
+  // historique (HTTP 200 = envoyé) plutôt que d'annoncer un faux échec.
+  let payload: any = null;
+  try {
+    payload = await res.json();
+  } catch (err: any) {
+    console.warn(`⚠️ Réponse InfoBip illisible (HTTP ${res.status}), envoi considéré comme accepté: ${err?.message || err}`);
+    return;
+  }
+  const status = payload?.messages?.[0]?.status;
+  if (status?.groupName === 'REJECTED' || status?.groupId === 5) {
+    console.error(
+      `❌ SMS InfoBip REJETÉ (statut ${status?.name ?? '?'}): ${status?.description ?? 'sans description'}`,
+    );
     throw new Error('SMS_SEND_FAILED');
   }
 }

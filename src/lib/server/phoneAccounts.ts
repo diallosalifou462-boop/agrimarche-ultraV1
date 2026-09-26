@@ -64,6 +64,9 @@ export function syntheticEmailCandidates(e164: string): string[] {
   ];
 }
 
+/** Comptes « email synthétique » créés avant cette date : historiques, acceptés sans phoneIndex. */
+const SQUAT_DEFENSE_CUTOFF_MS = Date.parse('2026-09-27T00:00:00Z');
+
 const hasPassword = (u: UserRecord | null | undefined) => !!u?.providerData?.some((p) => p.providerId === 'password');
 
 export interface PhoneAccounts {
@@ -89,9 +92,35 @@ export async function findAccountsForPhone(e164: string): Promise<PhoneAccounts>
   if (phoneUser && hasPassword(phoneUser)) return { e164, phoneUser, main: phoneUser, hasPassword: true };
 
   const { users } = await auth.getUsers(syntheticEmailCandidates(e164).map((email) => ({ email })));
+
+  // ⚠️ FIX (26/09) : anti-squattage. N'importe qui peut créer côté client
+  // (createUserWithEmailAndPassword) un compte 221XXXXXXXXX@sunumenef.sn
+  // pour le numéro d'un autre : ce compte était alors pris pour « LE »
+  // compte du numéro → la vraie personne voyait « déjà inscrit », et après
+  // sa vérification SMS resolveVerifiedPhoneAccount lui attachait le numéro
+  // (et pouvait supprimer son compte téléphone comme « doublon vide »).
+  // Un compte trouvé par email synthétique n'est retenu que si :
+  //   - il ne porte pas un AUTRE numéro, ET
+  //   - phoneIndex/{e164}.accountId le désigne (inscription par les Cloud
+  //     Functions, qui revendiquent le numéro), OU il existait avant le
+  //     27/09/2026 (comptes historiques, créés avant ce correctif).
+  // Le compte qui porte le numéro dans Firebase Auth (phoneUser) reste fiable :
+  // seul un code SMS permet d'y attacher un numéro.
+  const indexedUid = await getFirestore(getAdminApp())
+    .collection('phoneIndex').doc(e164).get()
+    .then((s) => (s.data()?.accountId as string | undefined) ?? null)
+    .catch(() => null);
+  const isTrustedEmailCandidate = (u: UserRecord) => {
+    if (u.phoneNumber && u.phoneNumber !== e164) return false;
+    if (indexedUid && u.uid === indexedUid) return true;
+    const createdMs = Date.parse(u.metadata?.creationTime ?? '');
+    return Number.isFinite(createdMs) && createdMs < SQUAT_DEFENSE_CUTOFF_MS;
+  };
+
   const byEmail = syntheticEmailCandidates(e164)
     .map((email) => users.find((u) => u.email?.toLowerCase() === email))
-    .filter((u): u is UserRecord => !!u);
+    .filter((u): u is UserRecord => !!u)
+    .filter(isTrustedEmailCandidate);
   const emailMain = byEmail.find(hasPassword) ?? null;
 
   const main = emailMain ?? phoneUser;
@@ -145,7 +174,12 @@ export async function resolveVerifiedPhoneAccount(e164: string): Promise<string 
     if (!(await isEmptyDuplicate(phoneUser))) throw new DuplicateAccountWithDataError();
     const profileRef = db.collection('users').doc(phoneUser.uid);
     await db.recursiveDelete(profileRef).catch(() => {});
-    await auth.deleteUser(phoneUser.uid);
+    // ⚠️ FIX (26/09) : deux appels quasi simultanés (double validation du
+    // code, retry réseau) : le second trouvait le doublon déjà supprimé et
+    // répondait 500 — l'utilisateur restait bloqué. Déjà supprimé = succès.
+    await auth.deleteUser(phoneUser.uid).catch((e: any) => {
+      if (e?.code !== 'auth/user-not-found') throw e;
+    });
     console.log(`[phoneAccounts] doublon vide ${phoneUser.uid} supprimé, numéro ${e164} rattaché à ${main.uid}`);
   }
 

@@ -35,7 +35,8 @@ import { Phone, Lock, Eye, EyeOff, MessageSquare, ArrowLeft } from 'lucide-react
 
 // ─── Helpers ─────────────────────────────────────────────
 function toE164(phone: string): string {
-  const digits = phone.replace(/\D/g, '');
+  let digits = phone.replace(/\D/g, '');
+  if (digits.startsWith('00')) digits = digits.slice(2); // « 00221… » saisi à la main
   if (digits.startsWith('221')) return `+${digits}`;
   if (digits.length === 9) return `+221${digits}`;
   return `+${digits}`;
@@ -95,11 +96,26 @@ function LoginContent() {
     console.log('=====================================================');
   }, []);
 
+  // ⚠️ FIX (26/09) :
+  //  1. On ne redirige que pour un compte COMPLET (avec email). Une session
+  //     « téléphone seul » (inscription interrompue) ou invité (commande sans
+  //     compte) laissait entrer dans l'app sans mot de passe ni profil, et
+  //     empêchait d'atteindre l'écran de connexion.
+  //  2. On attend le profil avant de choisir la destination : sinon un
+  //     vendeur partait sur /main/products (rôle encore inconnu) au lieu de
+  //     son tableau de bord. Filet de 3 s si le profil tarde.
+  const [profileWaitOver, setProfileWaitOver] = useState(false);
   useEffect(() => {
-    if (!mounted || authLoading || !user) return;
+    if (!user?.email || profile) return;
+    const t = setTimeout(() => setProfileWaitOver(true), 3000);
+    return () => clearTimeout(t);
+  }, [user, profile]);
+  useEffect(() => {
+    if (!mounted || authLoading || !user?.email) return;
+    if (!profile && !profileWaitOver) return;
     const requested = searchParams.get('redirect');
     router.replace(requested && requested.startsWith('/') && !requested.startsWith('//') ? requested : getRedirectPath(profile?.role));
-  }, [user, profile, authLoading, mounted, router]);
+  }, [user, profile, authLoading, mounted, router, profileWaitOver]);
 
   useEffect(() => {
     if (resendCooldown <= 0) return;
@@ -300,8 +316,11 @@ function LoginContent() {
       setConfirmResult(result);
       setResendCooldown(60);
       setLoading(false);
-    } catch {
-      setError("Impossible d'envoyer le SMS");
+    } catch (err: any) {
+      // ⚠️ FIX (26/09) : `catch {}` sans variable ne capturait même pas
+      // l'erreur — impossible de savoir pourquoi l'envoi échouait.
+      const detail = err?.code || err?.message || '';
+      setError(`Impossible d'envoyer le SMS${detail ? ` (${detail})` : ''}`);
       setLoading(false);
     }
   };
@@ -368,7 +387,14 @@ function LoginContent() {
       } else if (err?.code === 'auth/code-expired') {
         setError('Code expiré, renvoyez un nouveau SMS');
       } else {
-        setError(err?.code ? 'Erreur de vérification' : (err?.message || 'Erreur de vérification'));
+        // ⚠️ FIX (26/09) — audit complet du dossier auth : cette branche
+        // masquait le code d'erreur au lieu de l'afficher (elle affichait
+        // "Erreur de vérification" SANS détail dès que err.code existait,
+        // l'inverse de ce qu'on veut). Corrigé pour toujours montrer un
+        // détail exploitable, comme dans register/page.tsx et
+        // forgot-password/page.tsx.
+        const detail = err?.code || err?.message || '';
+        setError(`Erreur de vérification${detail ? ` (${detail})` : ''}`);
       }
     } finally {
       setLoading(false);

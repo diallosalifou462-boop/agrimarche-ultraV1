@@ -65,6 +65,9 @@ const MAX_VERIFY_ATTEMPTS = 5;
 const MAX_RESENDS = 5;
 const RESEND_MIN_DELAY_MS = 45 * 1000;
 const PHONE_RESERVATION_TTL_MS = OTP_TTL_MS + 10 * 60 * 1000;
+// ⚠️ FIX (26/09) : fenêtre de rejeu d'une session déjà 'verified' (voir
+// registrationVerify) — assez pour un retry réseau, pas au-delà.
+const REPLAY_WINDOW_MS = 10 * 60 * 1000;
 
 // Machine à états de registrationSessions.status (documentée ici car
 // dispersée entre start/resend/verify) :
@@ -80,7 +83,10 @@ const PHONE_RESERVATION_TTL_MS = OTP_TTL_MS + 10 * 60 * 1000;
 //                             hash), seul /resend peut relancer un nouveau
 //                             code sur la même session/réservation
 //   verified                → compte créé, accountId renseigné, terminal
-//   expired / locked        → terminal, recommencer une nouvelle inscription
+//                             (verifiedAt + verifiedCodeHash : rejeu borné,
+//                             voir registrationVerify)
+//   expired / locked        → code mort ; /resend relance un nouveau code
+//                             sur la même session (FIX 26/09)
 
 type Channel = 'sms_infobip';
 
@@ -134,6 +140,15 @@ async function decideChannelAndSend(sessionId: string, phone: string, code: stri
   try {
     await sendOtpSmsInfobip(phone, code);
   } catch (err: any) {
+    // ⚠️ FIX (26/09) : un timeout réseau n'est PAS un échec certain (le SMS
+    // arrive très souvent, juste en retard) — code technique distinct, que
+    // start/resend traitent comme un envoi réussi. Ce code n'est JAMAIS
+    // renvoyé tel quel au client (pas d'entrée dans errorMessages.ts).
+    if (err?.message === 'SMS_SEND_TIMEOUT') {
+      console.warn(`⏱️ Envoi SMS OTP en timeout (session ${sessionId}) — session gardée active.`);
+      await bumpRegistrationMetric('send_timeout_sms');
+      throw new HttpsError('unavailable', 'SMS_SEND_TIMEOUT');
+    }
     console.error(`❌ Échec envoi SMS OTP (session ${sessionId}):`, err?.message || err);
     await bumpRegistrationMetric('send_failed_sms');
     throw new HttpsError('unavailable', 'SMS_SEND_FAILED');
@@ -224,21 +239,38 @@ export const registrationStart = onCall(
     });
 
     let channel: Channel;
+    let smsMaybeDelayed = false;
     try {
       channel = await decideChannelAndSend(sessionRef.id, phone, code);
     } catch (err) {
-      await sessionRef.update({ status: 'send_failed' });
-      await releasePhoneReservation(phone, sessionRef.id);
       const techCode = err instanceof HttpsError ? err.message : 'SMS_SEND_FAILED';
-      throwLocalized('unavailable', techCode);
+      if (techCode === 'SMS_SEND_TIMEOUT') {
+        // ⚠️ FIX (26/09) : timeout ≠ échec. Avant, la session passait en
+        // 'send_failed' et la réservation était libérée — alors que le SMS
+        // arrivait quelques secondes plus tard avec un code devenu
+        // inutilisable. On garde donc la session 'pending' et la
+        // réservation, et on répond comme si l'envoi avait réussi.
+        channel = 'sms_infobip';
+        smsMaybeDelayed = true;
+      } else {
+        await sessionRef.update({ status: 'send_failed' });
+        await releasePhoneReservation(phone, sessionRef.id);
+        throwLocalized('unavailable', techCode === 'SMS_SEND_FAILED' ? techCode : 'SMS_SEND_FAILED');
+      }
     }
 
     await sessionRef.update({ channel });
-    await logAuditEvent({ type: 'start', sessionId: sessionRef.id, phone, carrier, channel, ip });
+    await logAuditEvent({ type: 'start', sessionId: sessionRef.id, phone, carrier, channel, ip, ...(smsMaybeDelayed ? { reason: 'sms_timeout' } : {}) });
     await bumpRegistrationMetric('started');
     await bumpRegistrationMetric(`started_${carrier}`);
 
-    return { sessionId: sessionRef.id, channel, maxAttempts: MAX_VERIFY_ATTEMPTS, otpTtlSeconds: OTP_TTL_MS / 1000 };
+    return {
+      sessionId: sessionRef.id,
+      channel,
+      maxAttempts: MAX_VERIFY_ATTEMPTS,
+      otpTtlSeconds: OTP_TTL_MS / 1000,
+      ...(smsMaybeDelayed ? { smsMaybeDelayed: true } : {}),
+    };
   }
 );
 
@@ -273,13 +305,40 @@ export const registrationResend = onCall(
     const reopenableVerifying =
       data.status === 'verifying' &&
       Date.now() - ((data.verifyingAt as FirebaseFirestore.Timestamp | undefined)?.toMillis() ?? 0) > 90 * 1000;
+    // ⚠️ FIX (26/09) : 'expired' et 'locked' sont désormais RELANÇABLES.
+    // Les messages affichés pour CODE_EXPIRED et TOO_MANY_ATTEMPTS disent
+    // « Demande un nouveau code », mais /resend refusait justement ces deux
+    // statuts : l'utilisateur tombait sur « session plus active » et devait
+    // tout recommencer. Le renvoi reste borné par les limites ci-dessus
+    // (délai minimum, MAX_RESENDS par session, plafond par IP), et
+    // l'update plus bas remet attempts à 0, un nouveau code et une
+    // nouvelle expiration. 'verified' (compte créé) et un 'verifying'
+    // récent restent refusés.
     if (
       data.status !== 'pending' &&
       data.status !== 'send_failed' &&
       data.status !== 'account_creation_failed' &&
+      data.status !== 'expired' &&
+      data.status !== 'locked' &&
       !reopenableVerifying
     ) {
       throwLocalized('failed-precondition', 'SESSION_NOT_ACTIVE');
+    }
+
+    // ⚠️ FIX (26/09) : la réservation du numéro a pu expirer (TTL de 15 min
+    // depuis /start) ou être libérée (échec d'envoi) — surtout maintenant
+    // qu'on peut relancer une session 'expired'/'locked'. On la
+    // rafraîchit, ce qui refuse aussi proprement le renvoi si un compte a
+    // été créé entre-temps pour ce numéro. Toute autre erreur n'est pas
+    // bloquante : l'unicité réelle reste tranchée par claimPhoneForAccount.
+    try {
+      await reservePhoneForSession(data.phone, sessionId, PHONE_RESERVATION_TTL_MS);
+    } catch (err) {
+      if (err instanceof PhoneAlreadyUsedError) {
+        await logAuditEvent({ type: 'resend_rejected', sessionId, phone: data.phone, ip, reason: 'phone_already_used' });
+        throwLocalized('already-exists', 'PHONE_ALREADY_USED');
+      }
+      console.warn(`⚠️ Rafraîchissement réservation impossible (session ${sessionId}):`, err);
     }
 
     const code = generateOtp();
@@ -296,18 +355,32 @@ export const registrationResend = onCall(
     });
 
     let channel: Channel;
+    let smsMaybeDelayed = false;
     try {
       channel = await decideChannelAndSend(sessionId, data.phone, code);
     } catch (err) {
-      await ref.update({ status: 'send_failed' });
       const techCode = err instanceof HttpsError ? err.message : 'SMS_SEND_FAILED';
-      throwLocalized('unavailable', techCode);
+      if (techCode === 'SMS_SEND_TIMEOUT') {
+        // ⚠️ FIX (26/09) : timeout ≠ échec (voir registrationStart) — la
+        // session reste 'pending' avec le nouveau code, qui arrivera très
+        // probablement en retard.
+        channel = 'sms_infobip';
+        smsMaybeDelayed = true;
+      } else {
+        await ref.update({ status: 'send_failed' });
+        throwLocalized('unavailable', techCode === 'SMS_SEND_FAILED' ? techCode : 'SMS_SEND_FAILED');
+      }
     }
 
     await ref.update({ channel });
-    await logAuditEvent({ type: 'resend', sessionId, phone: data.phone, carrier: data.carrier, channel, ip });
+    await logAuditEvent({ type: 'resend', sessionId, phone: data.phone, carrier: data.carrier, channel, ip, ...(smsMaybeDelayed ? { reason: 'sms_timeout' } : {}) });
 
-    return { sessionId, channel, resendsLeft: MAX_RESENDS - ((data.resendCount ?? 0) + 1) };
+    return {
+      sessionId,
+      channel,
+      resendsLeft: MAX_RESENDS - ((data.resendCount ?? 0) + 1),
+      ...(smsMaybeDelayed ? { smsMaybeDelayed: true } : {}),
+    };
   }
 );
 
@@ -373,7 +446,16 @@ export const registrationVerify = onCall(
       TOO_MANY_ATTEMPTS: { https: 'resource-exhausted', audit: 'verify_locked', metric: 'verify_locked' },
     };
 
-    let claim: { alreadyDone: boolean; uid?: string; phone?: string; pushToken?: string | null; carrier?: string };
+    // ⚠️ FIX (26/09) : une transaction Firestore dont la fonction LÈVE une
+    // erreur est entièrement annulée — y compris les tx.update() faits
+    // juste avant le throw. Résultat : l'incrément de `attempts` après un
+    // mauvais code, et les passages en 'expired'/'locked', n'étaient
+    // JAMAIS enregistrés (la limite de 5 essais n'existait pas en
+    // pratique). Ces cas RENVOIENT désormais `failCode` depuis la
+    // transaction (écritures validées), et l'erreur est levée juste après,
+    // dans le même try, pour garder exactement le même traitement
+    // audit/métriques/erreur localisée qu'avant.
+    let claim: { alreadyDone: boolean; uid?: string; phone?: string; pushToken?: string | null; carrier?: string; failCode?: string };
     try {
       claim = await admin.firestore().runTransaction(async (tx) => {
         const snap = await tx.get(ref);
@@ -381,6 +463,18 @@ export const registrationVerify = onCall(
         const data = snap.data()!;
 
         if (data.status === 'verified') {
+          // ⚠️ FIX (26/09) SÉCURITÉ : avant, une session 'verified' renvoyait
+          // un customToken frais pour N'IMPORTE QUEL code — quiconque
+          // connaissait le sessionId obtenait une connexion au compte, sans
+          // limite de durée. Le rejeu (réponse réseau perdue, double appui)
+          // n'est plus accepté que dans les 10 min suivant la vérification
+          // ET avec le même code (comparé au hash conservé à la
+          // vérification, HMAC+pepper, temps constant).
+          const verifiedAtMs = (data.verifiedAt as FirebaseFirestore.Timestamp | undefined)?.toMillis() ?? 0;
+          const storedHash = typeof data.verifiedCodeHash === 'string' ? data.verifiedCodeHash : '';
+          if (!storedHash || Date.now() - verifiedAtMs > REPLAY_WINDOW_MS || !verifyOtpHash(code, sessionId, storedHash)) {
+            throw new HttpsError('failed-precondition', 'SESSION_NOT_ACTIVE');
+          }
           return { alreadyDone: true, uid: data.accountId as string | undefined };
         }
         // ⚠️ FIX course critique : 'verifying' est un état transitoire posé
@@ -405,31 +499,50 @@ export const registrationVerify = onCall(
           const startedAt = (data.verifyingAt as FirebaseFirestore.Timestamp | undefined)?.toMillis() ?? 0;
           if (Date.now() - startedAt > 90 * 1000) {
             tx.update(ref, { status: 'account_creation_failed' });
-            throw new HttpsError('failed-precondition', 'SESSION_NOT_ACTIVE');
+            return { alreadyDone: false, failCode: 'SESSION_NOT_ACTIVE' };
           }
           throw new HttpsError('aborted', 'VERIFICATION_IN_PROGRESS');
         }
-        if (data.status !== 'pending') {
+        if (data.status !== 'pending' || typeof data.otpHash !== 'string') {
           throw new HttpsError('failed-precondition', 'SESSION_NOT_ACTIVE');
         }
         if ((data.otpExpiresAt as FirebaseFirestore.Timestamp).toMillis() < Date.now()) {
           tx.update(ref, { status: 'expired' });
-          throw new HttpsError('deadline-exceeded', 'CODE_EXPIRED');
+          return { alreadyDone: false, failCode: 'CODE_EXPIRED' };
         }
-        if (data.attempts >= data.maxAttempts) {
+        const maxAttempts: number = data.maxAttempts ?? MAX_VERIFY_ATTEMPTS;
+        const attempts: number = data.attempts ?? 0;
+        if (attempts >= maxAttempts) {
           tx.update(ref, { status: 'locked' });
-          throw new HttpsError('resource-exhausted', 'TOO_MANY_ATTEMPTS');
+          return { alreadyDone: false, failCode: 'TOO_MANY_ATTEMPTS' };
         }
 
         const ok = verifyOtpHash(code, sessionId, data.otpHash);
         if (!ok) {
           tx.update(ref, { attempts: admin.firestore.FieldValue.increment(1) });
-          throw new HttpsError('invalid-argument', `INVALID_CODE:${data.maxAttempts - data.attempts - 1}`);
+          return { alreadyDone: false, failCode: `INVALID_CODE:${Math.max(0, maxAttempts - attempts - 1)}` };
         }
 
-        tx.update(ref, { status: 'verifying', verifyingAt: admin.firestore.Timestamp.now(), otpHash: admin.firestore.FieldValue.delete() });
+        // verifiedCodeHash : copie du hash du code validé, seule preuve
+        // acceptée pour un rejeu 'verified' (voir plus haut). otpHash est
+        // toujours supprimé ici (voir le commentaire sur
+        // account_creation_failed plus bas).
+        tx.update(ref, {
+          status: 'verifying',
+          verifyingAt: admin.firestore.Timestamp.now(),
+          verifiedCodeHash: data.otpHash,
+          otpHash: admin.firestore.FieldValue.delete(),
+        });
         return { alreadyDone: false, phone: data.phone as string, pushToken: data.pushToken as string | null, carrier: data.carrier as string };
       });
+      // Écritures de la transaction validées → on lève maintenant l'erreur
+      // métier, traitée par le catch ci-dessous comme avant.
+      if (claim.failCode) {
+        const failHttps: FunctionsErrorCode = claim.failCode.startsWith('INVALID_CODE:')
+          ? 'invalid-argument'
+          : VERIFY_ERROR_MAP[claim.failCode]?.https ?? 'failed-precondition';
+        throw new HttpsError(failHttps, claim.failCode);
+      }
     } catch (err) {
       if (err instanceof HttpsError) {
         const techCode = err.message; // le code technique a été passé comme 2ᵉ argument de HttpsError
@@ -475,14 +588,30 @@ export const registrationVerify = onCall(
     // plus haut) dès la création du compte.
     const syntheticEmail = phoneToSyntheticEmail(phone);
 
+    // ⚠️ FIX (26/09) : displayName transmis à Firebase Auth quand un nom
+    // (chaîne non vide) est fourni — createUser refuse une valeur non-string.
+    const authDisplayName = typeof profile.name === 'string' && profile.name.trim() ? profile.name.trim() : undefined;
+
     let uid: string | undefined;
     try {
-      const userRecord = await admin.auth().createUser({ phoneNumber: phone, email: syntheticEmail, password });
+      const userRecord = await admin.auth().createUser({
+        phoneNumber: phone,
+        email: syntheticEmail,
+        password,
+        ...(authDisplayName ? { displayName: authDisplayName } : {}),
+      });
       uid = userRecord.uid;
 
       await claimPhoneForAccount(phone, sessionId, uid);
 
       await admin.firestore().collection('users').doc(uid).set({
+        // ⚠️ FIX (26/09) : uid / email / displayName manquaient au profil
+        // Free/Expresso alors que l'app les lit (même forme que les comptes
+        // créés côté client). email = l'email synthétique utilisé pour
+        // createUser (celui qui sert à la connexion).
+        uid,
+        email: syntheticEmail,
+        displayName: profile.name ?? null,
         phone,
         phoneVerified: true,
         role: sanitizeSelfRegisteredRole(profile.role),
@@ -506,7 +635,8 @@ export const registrationVerify = onCall(
         });
       }
 
-      await ref.update({ status: 'verified', accountId: uid });
+      // verifiedAt : point de départ de la fenêtre de rejeu (FIX 26/09).
+      await ref.update({ status: 'verified', accountId: uid, verifiedAt: admin.firestore.Timestamp.now() });
     } catch (err) {
       if (uid) await admin.auth().deleteUser(uid).catch(() => {});
       // ⚠️ FIX bug crash : NE PAS remettre 'pending' ici. otpHash a déjà
@@ -534,13 +664,25 @@ export const registrationVerify = onCall(
       console.error(`❌ Échec création de compte (session ${sessionId}):`, err);
       await bumpRegistrationMetric('account_creation_failed');
       await logAuditEvent({ type: 'account_creation_failed', sessionId, phone, reason: String(err) });
-      throwLocalized('internal', 'ACCOUNT_CREATION_FAILED');
+      // ⚠️ FIX (26/09) : 'failed-precondition' au lieu de 'internal'. Le
+      // client relance automatiquement les erreurs 'internal' — sur un OTP
+      // déjà consommé, ce retry ne pouvait qu'échouer et finissait par
+      // afficher un message trompeur. L'utilisateur doit passer par /resend.
+      throwLocalized('failed-precondition', 'ACCOUNT_CREATION_FAILED');
     }
 
-    await bumpRegistrationMetric('verify_success');
-    await bumpRegistrationMetric(`accounts_created_${carrier === 'orange' ? 'orange' : 'push_infobip'}`);
-    await logAuditEvent({ type: 'verify_success', sessionId, phone, carrier, accountId: uid });
-    await logAuditEvent({ type: 'account_created', sessionId, phone, carrier, accountId: uid });
+    // ⚠️ FIX (26/09) : métriques et audit HORS du chemin critique (même
+    // correctif que orangeRegistration.ts). Le compte EXISTE déjà : une
+    // erreur d'écriture de statistique ne doit jamais transformer ce
+    // succès en échec côté client.
+    try {
+      await bumpRegistrationMetric('verify_success');
+      await bumpRegistrationMetric(`accounts_created_${carrier === 'orange' ? 'orange' : 'push_infobip'}`);
+      await logAuditEvent({ type: 'verify_success', sessionId, phone, carrier, accountId: uid });
+      await logAuditEvent({ type: 'account_created', sessionId, phone, carrier, accountId: uid });
+    } catch (e) {
+      console.warn(`⚠️ Métriques/audit inscription non écrits (uid ${uid}):`, e);
+    }
 
     // Le compte EXISTE désormais. Si la signature du jeton échoue (droit
     // iam.serviceAccounts.signBlob manquant, panne IAM), on ne fait PAS

@@ -16,7 +16,22 @@
 //   deux gagner (section 3 et 8 du cahier des charges).
 // ============================================================
 import * as admin from 'firebase-admin';
-import { syntheticEmailCandidates } from './carrier';
+// Toutes les formes d'email synthétique ayant existé pour un numéro. Définie
+// ICI (et non importée de carrier.ts) : certaines versions déployées de
+// carrier.ts ne l'exportent pas — la compilation échouait.
+function syntheticEmailCandidates(phoneE164: string): string[] {
+  const local = phoneE164.replace(/\D/g, '').replace(/^221/, '');
+  return [
+    `221${local}@sunumenef.sn`,
+    `${local}@sunumenef.sn`,
+    `221${local}@sunnumenef.sn`,
+    `${local}@sunnumenef.sn`,
+    `221${local}@agrimarche.sn`,
+    `${local}@agrimarche.sn`,
+    `${local}@gmail.com`,
+    `221${local}@gmail.com`,
+  ];
+}
 
 export class PhoneAlreadyUsedError extends Error {
   constructor() {
@@ -95,10 +110,15 @@ export async function claimPhoneForAccount(
     const snap = await tx.get(ref);
     const data = snap.data();
 
-    if (data?.accountId) {
+    if (data?.accountId && data.accountId !== accountId) {
       // Un autre appareil/une autre requête a fini avant nous.
       throw new PhoneAlreadyUsedError();
     }
+    // ⚠️ FIX (26/09) : si le numéro est DÉJÀ attribué à ce même compte
+    // (2ᵉ appel après un premier appel partiellement réussi, retry réseau
+    // automatique de callWithRetry…), ce n'est pas un conflit : on continue
+    // au lieu de lever PHONE_ALREADY_USED — qui laissait un compte avec mot
+    // de passe mais SANS profil, et un utilisateur bloqué.
 
     tx.set(
       ref,
@@ -118,25 +138,75 @@ export async function claimPhoneForAccount(
 // claimPhoneForAccount au moment de la création, cette fonction n'est
 // qu'un raccourci UX pour éviter de faire tourner tout un parcours
 // d'OTP pour un numéro déjà pris.
+// 🔑 RÈGLE : Firebase Authentication est la SOURCE DE VÉRITÉ. phoneIndex n'est
+// qu'un index de rapidité. Quand les deux se contredisent (compte supprimé à la
+// main, création de compte interrompue), on croit Authentication et on RÉPARE
+// l'index. Sans ça, un numéro pouvait rester bloqué pour toujours : « déjà
+// inscrit » à l'inscription, « aucun compte » au mot de passe oublié.
 export async function isPhoneAlreadyUsed(phone: string): Promise<boolean> {
-  const snap = await phoneIndexRef(phone).get();
-  if (snap.data()?.accountId) return true;
-  return !!(await findAuthAccountForPhone(phone));
+  return !!(await getAccountIdForPhone(phone));
+}
+
+/** Efface une réservation ou un accountId qui ne correspond à aucun compte. */
+async function clearStaleIndex(phone: string, reason: string): Promise<void> {
+  console.warn(`🧹 phoneIndex ${phone} nettoyé (${reason})`);
+  await phoneIndexRef(phone)
+    .set(
+      {
+        accountId: admin.firestore.FieldValue.delete(),
+        pendingSessionId: admin.firestore.FieldValue.delete(),
+        pendingExpiresAt: admin.firestore.FieldValue.delete(),
+        clearedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    )
+    .catch(() => {});
 }
 
 // Comptes créés AVANT l'index phoneIndex (ou hors des functions) : ils n'y
 // figurent pas. Sans cette recherche, un numéro déjà inscrit avec un email
 // seul pouvait être réinscrit (doublon), et le mot de passe oublié répondait
 // « compte introuvable ». Priorité au compte qui a un mot de passe.
+// ⚠️ FIX (26/09) SÉCURITÉ — squat de compte : n'importe qui peut créer,
+// depuis le SDK client, un compte email/mot de passe
+// « 221<numéro de la victime>@sunumenef.sn ». Avant, le PREMIER candidat
+// email synthétique avec mot de passe gagnait : l'attaquant devenait « le
+// compte » de ce numéro (inscription de la victime refusée, mot de passe
+// oublié envoyant un customToken… pour le compte de l'attaquant). Un compte
+// trouvé par email synthétique n'est donc plus accepté que si :
+//   - son phoneNumber est vide OU égal au numéro, ET
+//   - phoneIndex/{phone}.accountId désigne déjà ce compte, OU il a été créé
+//     avant le 27/09/2026 (comptes historiques, créés avant ce correctif et
+//     qu'on ne peut pas distinguer autrement).
+// Le chemin getUserByPhoneNumber reste de confiance : un numéro attaché au
+// compte Auth ne peut être posé que par vérification SMS ou par le serveur.
+const SYNTHETIC_EMAIL_TRUST_CUTOFF_MS = Date.parse('2026-09-27T00:00:00Z');
+
 export async function findAuthAccountForPhone(phone: string): Promise<string | null> {
   const hasPassword = (u?: admin.auth.UserRecord | null) => !!u?.providerData?.some((p) => p.providerId === 'password');
   const phoneUser = await admin.auth().getUserByPhoneNumber(phone).catch(() => null);
   if (phoneUser && hasPassword(phoneUser)) return phoneUser.uid;
   const candidates = syntheticEmailCandidates(phone);
   const { users } = await admin.auth().getUsers(candidates.map((email) => ({ email })));
+  // Lecture de l'index hors transaction : simple preuve de rattachement,
+  // l'unicité réelle reste tranchée par claimPhoneForAccount.
+  const indexedAccountId =
+    ((await phoneIndexRef(phone).get().then((s) => s.data()?.accountId).catch(() => undefined)) as string | undefined) ?? null;
+  const isTrustedEmailAccount = (u: admin.auth.UserRecord): boolean => {
+    if (u.phoneNumber && u.phoneNumber !== phone) return false;
+    if (indexedAccountId && indexedAccountId === u.uid) return true;
+    const createdMs = Date.parse(u.metadata?.creationTime ?? '');
+    return Number.isFinite(createdMs) && createdMs < SYNTHETIC_EMAIL_TRUST_CUTOFF_MS;
+  };
   const emailUser = candidates
     .map((email) => users.find((u) => u.email?.toLowerCase() === email))
-    .find((u) => hasPassword(u));
+    .find((u) => !!u && hasPassword(u) && isTrustedEmailAccount(u));
+  if (!emailUser) {
+    const rejected = users.filter((u) => hasPassword(u) && !isTrustedEmailAccount(u));
+    if (rejected.length > 0) {
+      console.warn(`🛡️ ${rejected.length} compte(s) email synthétique ignoré(s) pour ${phone} (non rattaché(s) au numéro) : ${rejected.map((u) => u.uid).join(', ')}`);
+    }
+  }
   return emailUser?.uid ?? phoneUser?.uid ?? null;
 }
 
@@ -149,8 +219,17 @@ export async function getAccountIdForPhone(phone: string): Promise<string | null
   if (indexed) {
     const exists = await admin.auth().getUser(indexed).then(() => true).catch(() => false);
     if (exists) return indexed;
+    // L'index désigne un compte qui n'existe plus → on le nettoie.
+    await clearStaleIndex(phone, `compte ${indexed} introuvable`);
   }
-  return findAuthAccountForPhone(phone);
+
+  const found = await findAuthAccountForPhone(phone);
+  if (found) {
+    // Compte réel non indexé (créé hors functions, ou index perdu) → on répare.
+    await phoneIndexRef(phone).set({ accountId: found }, { merge: true }).catch(() => {});
+    return found;
+  }
+  return null;
 }
 
 // Purge des réservations abandonnées : une session commencée puis jamais

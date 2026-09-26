@@ -4,6 +4,7 @@ import { createContext, useContext, useEffect, useRef, useState, ReactNode } fro
 import {
   User,
   onAuthStateChanged,
+  onIdTokenChanged,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut,
@@ -40,7 +41,13 @@ import { trackActivityTick } from '@/lib/interests/trackActivity';
 
 // ─── Helper : numéro → email synthétique ─────────────────
 export function phoneToEmail(phone: string): string {
-  return `${phone.replace(/\D/g, '')}@sunnumenef.sn`;
+  // ⚠️ FIX (26/09) : aligné sur le format OFFICIEL du serveur
+  // (221XXXXXXXXX@sunumenef.sn, un seul « n »). L'ancien « @sunnumenef.sn »
+  // sans préfixe 221 fabriquait des comptes introuvables à la connexion.
+  let digits = phone.replace(/\D/g, '');
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (!digits.startsWith('221') && digits.length === 9) digits = `221${digits}`;
+  return `${digits}@sunumenef.sn`;
 }
 
 // ─── Rafraîchir le token FCM (SANS jamais demander la permission) ─────────
@@ -259,6 +266,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // complet). On suspend la création automatique tant qu'une inscription
   // est en cours (voir signUp plus bas).
   const suppressAutoProfileRef = useRef(false);
+  // Dernier objet User remis au contexte (voir onIdTokenChanged plus bas).
+  const contextUserRef = useRef<User | null>(null);
 
   // ─── Chargement profil Firestore ──────────────────────
   const fetchUserProfile = async (uid: string, email: string | null) => {
@@ -277,6 +286,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const currentUser = auth.currentUser;
       if (!currentUser || currentUser.uid !== uid) {
         trace('AUTH', 'fetchUserProfile abandonné — currentUser ne correspond plus à uid');
+        return;
+      }
+
+      // ⚠️ FIX (26/09) : une session SANS email (« téléphone seul ») est soit
+      // une inscription Orange pas encore finalisée (appli fermée juste après
+      // le code SMS, coupure réseau…), soit un doublon temporaire pendant
+      // « mot de passe oublié ». Avant, ensureUserExists lui fabriquait un
+      // profil « client » vide : la personne semblait inscrite, sans nom, sans
+      // région, sans mot de passe — et un doc orphelin restait après la
+      // fusion des comptes. On ne CRÉE plus rien dans ce cas ; on lit
+      // seulement un profil déjà existant (anciens comptes, invités).
+      if (!currentUser.email) {
+        await waitForFirestoreReady();
+        const snap = await getDoc(doc(db, 'users', uid));
+        setProfile(snap.exists() ? snap.data() : null);
+        trace('PROFIL', `session sans email — profil ${snap.exists() ? 'lu' : 'absent (non créé)'}`);
         return;
       }
 
@@ -318,6 +343,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       clearTimeout(failsafe);
       setAuthDebugInfo('');
       trace('AUTH', `onAuthStateChanged déclenché, user=${firebaseUser?.uid ?? 'null'}`);
+      contextUserRef.current = firebaseUser;
       setUser(firebaseUser);
 
       if (firebaseUser) {
@@ -375,9 +401,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
     }
 
+    // ⚠️ FIX (26/09) : onAuthStateChanged ne se redéclenche PAS quand on se
+    // reconnecte sur le MÊME compte (même uid) — ce que font désormais
+    // l'inscription Orange et le mot de passe oublié avec signInWithCustomToken,
+    // pour remplacer une session révoquée par le serveur. Sans ce second
+    // écouteur, le contexte gardait l'ancien objet User (session révoquée,
+    // appels futurs en échec) et un profil vide chargé avant la création du
+    // compte. onIdTokenChanged, lui, se déclenche à chaque nouvelle session :
+    // on met le contexte à jour quand l'uid est identique mais l'objet User a
+    // changé. (Changement d'uid et déconnexion restent gérés ci-dessus ; un
+    // simple rafraîchissement horaire du jeton garde le même objet → rien.)
+    const unsubscribeToken = onIdTokenChanged(auth, (tokenUser) => {
+      const prev = contextUserRef.current;
+      if (tokenUser && prev && prev.uid === tokenUser.uid && prev !== tokenUser) {
+        trace('AUTH', `nouvelle session sur le même compte (${tokenUser.uid}) — contexte mis à jour`);
+        contextUserRef.current = tokenUser;
+        setUser(tokenUser);
+        if (!suppressAutoProfileRef.current) {
+          fetchUserProfile(tokenUser.uid, tokenUser.email).catch(() => {});
+        }
+      }
+    });
+
     return () => {
       clearTimeout(failsafe);
       unsubscribe();
+      unsubscribeToken();
       removeResumeListener?.();
     };
   }, []);

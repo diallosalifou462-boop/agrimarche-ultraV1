@@ -82,10 +82,37 @@ const DEPARTMENTS_BY_REGION: Record<SenegalRegion, string[]> = {
 
 // ─── Formatage numéro → E.164 Sénégal ────────────────────
 function toE164(phone: string): string {
-  const digits = phone.replace(/\D/g, '');
+  let digits = phone.replace(/\D/g, '');
+  if (digits.startsWith('00')) digits = digits.slice(2); // « 00221… » saisi à la main
   if (digits.startsWith('221')) return `+${digits}`;
   if (digits.length === 9) return `+221${digits}`;
   return `+${digits}`;
+}
+
+// Messages natifs Firebase (en anglais, souvent techniques) → français clair.
+// Ex. observé le 26/09 : « We have blocked all requests from this device due
+// to unusual activity » = protection anti-abus de Firebase après beaucoup
+// de demandes de code depuis le même appareil/numéro (temporaire).
+function friendlyNativePhoneError(event: any, fallback: string): string {
+  const code = String(event?.code ?? '');
+  const msg = String(event?.message ?? '');
+  if (/too-many-requests|unusual activity|blocked all requests/i.test(code + ' ' + msg)) {
+    return 'Trop de demandes de code depuis cet appareil. Réessayez dans quelques heures.';
+  }
+  if (/quota/i.test(code + ' ' + msg)) {
+    return "Service SMS momentanément saturé. Réessayez plus tard.";
+  }
+  if (/connection abort|network|timeout|unreachable/i.test(msg)) {
+    return 'Connexion internet interrompue pendant l’envoi. Vérifiez votre réseau et réessayez.';
+  }
+  if (/invalid-phone-number|invalid phone/i.test(code + ' ' + msg)) {
+    return 'Numéro de téléphone invalide';
+  }
+  return (msg || fallback) + (code ? ` (code: ${code})` : '');
+}
+
+function isPhoneAlreadyUsedError(err: any): boolean {
+  return err?.techCode === 'PHONE_ALREADY_USED' || err?.code === 'functions/already-exists';
 }
 
 type Step = 'form' | 'otp' | 'success';
@@ -145,6 +172,13 @@ export default function RegisterPage() {
   // Un ref et non un état : il est lu dans un .finally(), avant que React
   // n'ait commité le rendu suivant.
   const lastVerifyOkRef = useRef<boolean | null>(null);
+  // ⚠️ AJOUT (26/09) : passe à true dès que le serveur a confirmé la
+  // création du compte (Orange). Empêche (1) toute nouvelle vérification du
+  // même code — l'auto-lecture SMS Android peut arriver APRÈS une saisie
+  // manuelle réussie et rejouait tout le parcours — et (2) l'affichage
+  // d'une erreur pour un compte qui existe déjà.
+  const registrationSucceededRef = useRef(false);
+  const submittingRef = useRef(false);
 
   useEffect(() => { setIsClient(true); }, []);
 
@@ -218,7 +252,13 @@ export default function RegisterPage() {
   }, []);
 
   useEffect(() => {
-    if (isClient && user && !authLoading && !registrationInProgressRef.current) {
+    // ⚠️ FIX (26/09) : on ne redirige que pour un compte COMPLET (avec email,
+    // donc avec mot de passe). Avant, n'importe quelle session suffisait —
+    // y compris une session « téléphone seul » restée d'une inscription
+    // interrompue, ou une session invité (commande sans compte) : la
+    // personne était renvoyée dans l'app sans pouvoir jamais finir son
+    // inscription.
+    if (isClient && user?.email && !authLoading && !registrationInProgressRef.current) {
       router.push(getSafeRedirect());
     }
   }, [user, authLoading, router, isClient]);
@@ -259,9 +299,14 @@ export default function RegisterPage() {
 
     const failedSub = FirebaseAuthentication.addListener('phoneVerificationFailed', (event: any) => {
       console.error('[DEBUG] phoneVerificationFailed — événement complet:', JSON.stringify(event));
-      const detail = event?.code ? ` (code: ${event.code})` : '';
-      setError((event.message || "Impossible d'envoyer le SMS. Vérifiez le numéro.") + detail);
+      // ⚠️ FIX (26/09) : un échec NATIF tardif (ex : la couche native tente
+      // sa propre connexion avec un code déjà utilisé par le SDK web) ne doit
+      // ni afficher d'erreur ni réactiver les boutons pendant une vérification
+      // en cours, ni après une inscription réussie.
+      if (verifyingRef.current || registrationSucceededRef.current) return;
+      setError(friendlyNativePhoneError(event, "Impossible d'envoyer le SMS. Vérifiez le numéro."));
       setLoading(false);
+      releaseRegistrationGuards();
     });
 
     // Auto-vérification Android (SMS Retriever) : le code
@@ -271,7 +316,18 @@ export default function RegisterPage() {
         // ⚠️ FIX (23/09) : même chemin que la saisie manuelle (connexion
         // SDK web puis finalizeRegistration), au lieu de finaliser sans
         // utilisateur connecté côté web.
-        if (!event.verificationCode) return;
+        if (!event.verificationCode) {
+          // ⚠️ FIX (26/09) : « vérification instantanée » Android (aucun SMS,
+          // aucun code, et parfois aucun phoneCodeSent) : avant, on sortait
+          // sans rien faire et le bouton restait en chargement pour
+          // toujours. Impossible de transmettre cette vérification au SDK
+          // web sans code : on débloque l'écran et on propose de réessayer.
+          if (verifyingRef.current || registrationSucceededRef.current) return;
+          setLoading(false);
+          releaseRegistrationGuards();
+          setError("Vérification automatique incomplète. Réessayez dans un instant (ou appuyez sur « Renvoyer le code SMS »).");
+          return;
+        }
         setOtp(event.verificationCode.split(''));
         await verifyFnRef.current(event.verificationCode);
       } catch (err) {
@@ -383,6 +439,7 @@ export default function RegisterPage() {
           pushDiag('server', 'error', 'registrationStart a échoué', err?.techCode || err?.code || msg);
           if (err?.details?.pushDiag) setServerPushDiag(err.details.pushDiag);
           setError(msg);
+          releaseRegistrationGuards();
         } finally {
           setLoading(false);
         }
@@ -405,6 +462,35 @@ export default function RegisterPage() {
       if (!checkRes.ok) {
         setError(checkJson?.error || 'Ce numéro est déjà inscrit.');
         setLoading(false);
+        releaseRegistrationGuards();
+        return;
+      }
+
+      // ⚠️ AJOUT (26/09) — reprise d'une inscription Orange interrompue :
+      // si l'appareil est DÉJÀ connecté par SMS à ce même numéro (session
+      // « téléphone seul », sans email = inscription jamais terminée : coupure
+      // réseau, appli fermée, erreur…), cette session prouve déjà la
+      // possession du numéro. On finalise directement, SANS redemander de
+      // code : chaque nouvel SMS rapproche du blocage anti-abus de Firebase
+      // (« We have blocked all requests from this device… »).
+      const existing = auth.currentUser;
+      if (existing && !existing.email && existing.phoneNumber === phoneE164) {
+        isNativeRef.current = Capacitor.isNativePlatform();
+        try {
+          await finalizeRegistration();
+        } catch (err: any) {
+          console.error('[register] reprise inscription Orange échouée:', err);
+          if (isPhoneAlreadyUsedError(err)) await auth.signOut().catch(() => {});
+          if (!registrationSucceededRef.current) {
+            const detail = err?.code || err?.message || '';
+            setError(err instanceof RegistrationActionError
+              ? err.message
+              : `Impossible de terminer l'inscription${detail ? ` (${detail})` : ''}. Réessayez.`);
+            releaseRegistrationGuards();
+          }
+        } finally {
+          setLoading(false);
+        }
         return;
       }
 
@@ -454,17 +540,31 @@ export default function RegisterPage() {
       if (err?.code === 'auth/invalid-phone-number') {
         setError('Numéro de téléphone invalide');
       } else if (err?.code === 'auth/too-many-requests') {
-        setError('Trop de tentatives. Réessayez plus tard.');
+        setError('Trop de demandes de code depuis cet appareil. Réessayez dans quelques heures.');
       } else {
-        setError("Impossible d'envoyer le SMS. Vérifiez le numéro.");
+        setError(friendlyNativePhoneError(err, "Impossible d'envoyer le SMS. Vérifiez le numéro."));
       }
       setLoading(false);
+      releaseRegistrationGuards();
     }
   };
+
+  // Relâche les garde-fous posés par handleFormSubmit quand l'envoi du code
+  // échoue : sinon le chargement automatique du profil restait suspendu pour
+  // toute la suite de la session (ex : une connexion juste après).
+  function releaseRegistrationGuards() {
+    if (registrationSucceededRef.current) return;
+    suppressAutoProfileRef.current = false;
+    registrationInProgressRef.current = false;
+  }
 
   // ─── Validation du formulaire avant envoi OTP ─────────
   const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    // ⚠️ FIX (26/09) : double appui sur « Continuer » → deux SMS, et le code
+    // du premier échouait contre la session du second. `loading` ne suffit
+    // pas (il ne prend effet qu'au rendu suivant) : verrou synchrone.
+    if (submittingRef.current || loading) return;
     setError('');
 
     if (formData.password !== formData.confirmPassword) {
@@ -496,7 +596,12 @@ export default function RegisterPage() {
     // signUp() en cas de succès, ou ici même si l'utilisateur abandonne.
     suppressAutoProfileRef.current = true;
     registrationInProgressRef.current = true;
-    await sendOTP();
+    submittingRef.current = true;
+    try {
+      await sendOTP();
+    } finally {
+      submittingRef.current = false;
+    }
   };
 
   // ─── Saisie OTP (6 cases) ─────────────────────────────
@@ -567,7 +672,7 @@ export default function RegisterPage() {
     // — au lieu du writeDoc direct côté client (signUp) d'avant, qui
     // dépendait de firestore.rules et ne passait jamais par les mêmes
     // vérifications (unicité du numéro, journalisation) que Free/Expresso.
-    await completeOrangeRegistration({
+    const result = await completeOrangeRegistration({
       password: formData.password,
       name: formData.name,
       region: formData.region,
@@ -576,11 +681,77 @@ export default function RegisterPage() {
       quartier: formData.quartier.trim() || '',
       role: 'client',
     });
-    // Le SDK client ne sait pas encore que l'e-mail/mot de passe viennent
-    // d'être ajoutés côté serveur (Admin SDK) : on force un rafraîchissement
-    // du user local pour que le reste de l'app (ex: affichage de l'email)
-    // ne reste pas sur l'ancien état "téléphone seul".
-    await auth.currentUser?.reload();
+    // ⚠️ FIX (26/09) — CAUSE RACINE de « Erreur lors de la vérification »
+    // alors que le compte était bien créé : le serveur vient de poser email
+    // + mot de passe via l'Admin SDK, ce qui RÉVOQUE la session SMS en cours.
+    // L'ancien `auth.currentUser.reload()` échouait donc avec
+    // auth/user-token-expired, le SDK déconnectait l'utilisateur et l'écran
+    // affichait une erreur. À partir d'ici le compte EXISTE : plus aucune
+    // erreur ne doit s'afficher. On se reconnecte avec le jeton frais renvoyé
+    // par le serveur ; à défaut, avec numéro + mot de passe ; à défaut,
+    // on envoie vers l'écran de connexion avec un message positif.
+    registrationSucceededRef.current = true;
+    // Le profil existe maintenant côté serveur : on réactive le chargement
+    // automatique du profil AVANT de se reconnecter, pour que le contexte
+    // (AuthContext → onIdTokenChanged) charge le vrai profil complet.
+    suppressAutoProfileRef.current = false;
+    let connected = false;
+    if (result?.alreadyRegistered) {
+      // Deux cas possibles : (a) un appel précédent de CETTE inscription a
+      // déjà réussi (réponse réseau perdue puis retry automatique) — le mot de
+      // passe tapé est alors bien le bon ; (b) le numéro était inscrit AVANT —
+      // le mot de passe tapé n'a PAS été enregistré. On tranche en essayant
+      // de se connecter avec : si ça marche, c'est (a).
+      try {
+        for (const email of await resolveLoginEmails(toE164(formData.phone))) {
+          try {
+            await signInWithEmailAndPassword(auth, email, formData.password);
+            connected = true;
+            break;
+          } catch { /* format suivant */ }
+        }
+      } catch { /* serveur injoignable */ }
+      if (!connected) {
+        await auth.signOut().catch(() => {});
+        clearRegistrationDraft();
+        registrationInProgressRef.current = false;
+        registrationSucceededRef.current = false;
+        setError('Ce numéro est déjà inscrit. Connectez-vous, ou utilisez « Mot de passe oublié ».');
+        setStep('form');
+        return;
+      }
+    }
+    if (!connected && result?.customToken) {
+      try {
+        await signInWithCustomToken(auth, result.customToken);
+        connected = true;
+      } catch (e) {
+        console.warn('[register] signInWithCustomToken après inscription Orange a échoué:', e);
+      }
+    }
+    if (!connected) {
+      try {
+        for (const email of await resolveLoginEmails(toE164(formData.phone))) {
+          try {
+            await signInWithEmailAndPassword(auth, email, formData.password);
+            connected = true;
+            break;
+          } catch { /* format suivant */ }
+        }
+      } catch { /* serveur injoignable : on passe au message ci-dessous */ }
+    }
+    if (!connected) {
+      // Session SMS révoquée par le serveur et reconnexion impossible : on la
+      // ferme proprement, sinon l'écran de connexion croirait l'utilisateur
+      // connecté et le ferait entrer avec une session qui va lâcher.
+      await auth.signOut().catch(() => {});
+      clearRegistrationDraft();
+      registrationInProgressRef.current = false;
+      setError('');
+      setStep('success');
+      setTimeout(() => router.replace('/auth/login'), 2500);
+      return;
+    }
     clearRegistrationDraft();
     void haptic('success');
     setStep('success');
@@ -601,7 +772,7 @@ export default function RegisterPage() {
     // Un deuxième appui pendant la vérification renvoie le même code sur une
     // session DÉJÀ consommée : le serveur le refuse et « Code incorrect »
     // s'affiche alors que le compte vient d'être créé.
-    if (loading || verifyingRef.current) return;
+    if (loading || verifyingRef.current || registrationSucceededRef.current) return;
     verifyingRef.current = true;
     lastVerifyOkRef.current = null;
     const code = (codeOverride ?? otp.join('')).replace(/\D/g, '');
@@ -677,7 +848,15 @@ export default function RegisterPage() {
         return;
       }
 
-      if (isNativeRef.current) {
+      // ⚠️ AJOUT (26/09) : 2ᵉ appui sur « Confirmer » après un échec de la
+      // finalisation (coupure réseau…) : le code SMS a DÉJÀ ouvert la session
+      // de ce numéro. Le réutiliser échouerait (code consommé → « code
+      // expiré ») ; on reprend directement à la finalisation.
+      const alreadyPhoneSignedIn =
+        !!auth.currentUser && !auth.currentUser.email && auth.currentUser.phoneNumber === toE164(formData.phone);
+      if (alreadyPhoneSignedIn) {
+        // rien à faire : on passe directement à finalizeRegistration()
+      } else if (isNativeRef.current) {
         if (!verificationId) { setError('Session expirée, renvoyez le code'); setLoading(false); verifyingRef.current = false; return; }
         // ⚠️ FIX (23/09) : le plugin natif ne connecte PAS le SDK web. On
         // connecte donc le SDK web directement avec le code, sinon
@@ -691,6 +870,22 @@ export default function RegisterPage() {
       await finalizeRegistration();
     } catch (err: any) {
       console.error('[DEBUG] Erreur handleVerifyOTP:', err);
+      // Le serveur a SUPPRIMÉ ce compte « téléphone seul » (numéro déjà
+      // porté par un autre compte) : on ferme cette session morte, sinon le
+      // prochain essai la réutiliserait et échouerait sur « user-not-found ».
+      if (isPhoneAlreadyUsedError(err)) await auth.signOut().catch(() => {});
+      if (registrationSucceededRef.current) {
+        // Le compte a été créé côté serveur : quoi qu'il ait échoué ensuite
+        // (reconnexion, navigation…), ce n'est PAS un échec d'inscription.
+        await auth.signOut().catch(() => {});
+        suppressAutoProfileRef.current = false;
+        clearRegistrationDraft();
+        registrationInProgressRef.current = false;
+        setError('');
+        setStep('success');
+        setTimeout(() => router.replace('/auth/login'), 2500);
+        return;
+      }
       if (err instanceof RegistrationActionError) {
         setError(err.message);
       } else if (err?.code === 'auth/invalid-verification-code') {

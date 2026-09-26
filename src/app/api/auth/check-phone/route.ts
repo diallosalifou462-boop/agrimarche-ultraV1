@@ -34,7 +34,13 @@ export async function POST(req: NextRequest) {
     const { main, hasPassword } = await findAccountsForPhone(phoneE164);
     const accountExists = !!main;
 
-    if (purpose === 'register' && accountExists) {
+    // ⚠️ FIX (26/09) : un compte SANS mot de passe (orphelin « téléphone
+    // seul », inscription Orange interrompue) renvoyait 409 « déjà inscrit »
+    // — impasse : impossible de se connecter (aucun mot de passe) ni de se
+    // réinscrire. On le traite comme un numéro libre : l'inscription
+    // (vérification SMS puis resolveVerifiedPhoneAccount) récupère ce compte.
+    // 409 seulement si un mot de passe existe vraiment.
+    if (purpose === 'register' && accountExists && hasPassword) {
       return NextResponse.json(
         { error: 'Ce numéro est déjà inscrit. Connectez-vous ou utilisez « mot de passe oublié ».' },
         { status: 409, headers: CORS_HEADERS }
