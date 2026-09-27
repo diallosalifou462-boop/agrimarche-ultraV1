@@ -268,6 +268,7 @@ jobs:
         run: |
           set -e
           BUILD_NUMBER=$(date -u +%y%m%d%H%M)
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
 
           echo "Build number : $BUILD_NUMBER"
           echo "Marketing version (depuis package.json) : $APP_VERSION"
@@ -381,12 +382,11 @@ jobs:
 
           echo "📦 IPA : $IPA_PATH"
 
-          echo "🔎 Validation de l'IPA auprès d'App Store Connect..."
-          xcrun altool --validate-app --type ios --file "$IPA_PATH" --apple-id "$APP_APPLE_ID" --apiKey "$API_KEY_ID" --apiIssuer "$API_ISSUER_ID" --output-format xml
-
-          echo "✅ Validation App Store Connect réussie"
-
-          echo "🚀 Upload vers TestFlight..."
+          echo "🚀 Upload vers TestFlight (version $APP_VERSION, build $BUILD_NUMBER)..."
+          # --upload-package : on donne explicitement l'app, le bundle ID et les versions.
+          # altool n'a donc plus à deviner l'app à partir des bundles de l'IPA
+          # (--validate-app / --upload-app tombaient sur l'extension de notifications).
+          # Apple valide de toute façon l'IPA pendant l'upload.
 
           MAX_ATTEMPTS=5
           ATTEMPT=1
@@ -394,7 +394,7 @@ jobs:
           while [ "$ATTEMPT" -le "$MAX_ATTEMPTS" ]; do
             echo "===== Tentative $ATTEMPT/$MAX_ATTEMPTS ====="
 
-            if xcrun altool --upload-app --type ios --file "$IPA_PATH" --apple-id "$APP_APPLE_ID" --apiKey "$API_KEY_ID" --apiIssuer "$API_ISSUER_ID" --output-format xml; then
+            if xcrun altool --upload-package "$IPA_PATH" --type ios --apple-id "$APP_APPLE_ID" --bundle-id "$BUNDLE_ID" --bundle-version "$BUILD_NUMBER" --bundle-short-version-string "$APP_VERSION" --apiKey "$API_KEY_ID" --apiIssuer "$API_ISSUER_ID" --output-format xml; then
 
               echo "✅ Upload vers App Store Connect réussi."
               exit 0
