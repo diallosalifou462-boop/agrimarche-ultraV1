@@ -7,7 +7,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-        <string>AgriMarché</string>
+        <string>SunuMenef</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -25,13 +25,13 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>AgriMarché a besoin d'accéder à l'appareil photo pour prendre des photos de vos produits.</string>
+	<string>SunuMenef a besoin d'accéder à l'appareil photo pour prendre des photos de vos produits.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>AgriMarché a besoin d'accéder à vos photos pour illustrer vos annonces.</string>
+	<string>SunuMenef a besoin d'accéder à vos photos pour illustrer vos annonces.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>AgriMarché a besoin d'enregistrer des photos dans votre galerie.</string>
+	<string>SunuMenef a besoin d'enregistrer des photos dans votre galerie.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>AgriMarché utilise votre position pour vous montrer les produits et acheteurs proches de vous.</string>
+	<string>SunuMenef utilise votre position pour vous montrer les produits et acheteurs proches de vous.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>remote-notification</string>
