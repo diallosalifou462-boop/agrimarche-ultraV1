@@ -264,6 +264,23 @@ jobs:
 
           echo "✅ Xcode configuré avec les UUID réels des profils installés."
 
+      - name: Vérifier les Info.plist (app + extension) [workflow v3]
+        run: |
+          set -e
+          APP_PLIST="ios/App/App/Info.plist"
+          EXT_PLIST="ios/App/NotificationServiceExtension/Info.plist"
+          if ! /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPointIdentifier" "$EXT_PLIST" >/dev/null 2>&1; then
+            echo "❌ $EXT_PLIST n'est pas le plist de l'extension (NSExtensionPointIdentifier absent)."
+            echo "   Contenu actuel :"; plutil -p "$EXT_PLIST" || cat "$EXT_PLIST"
+            echo "   Tu as probablement copié le Info.plist de l'app à la place. Remets celui de l'extension."
+            exit 1
+          fi
+          if [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$APP_PLIST")" != "APPL" ]; then
+            echo "❌ $APP_PLIST n'est pas le plist de l'app (CFBundlePackageType != APPL)."
+            exit 1
+          fi
+          echo "✅ Info.plist app et extension OK"
+
       - name: Archive
         run: |
           set -e
@@ -282,6 +299,31 @@ jobs:
             -destination "generic/platform=iOS" \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
             MARKETING_VERSION="$APP_VERSION"
+      - name: Vérifier / réparer le Info.plist de l'extension dans l'archive
+        run: |
+          set -e
+          APPEX_PLIST="$RUNNER_TEMP/App.xcarchive/Products/Applications/App.app/PlugIns/NotificationServiceExtension.appex/Info.plist"
+          if [ ! -f "$APPEX_PLIST" ]; then
+            echo "❌ Extension introuvable dans l'archive : $APPEX_PLIST"
+            ls -R "$RUNNER_TEMP/App.xcarchive/Products/Applications/App.app/PlugIns" || true
+            exit 1
+          fi
+          echo "===== Info.plist de l'extension tel que compilé ====="
+          plutil -p "$APPEX_PLIST"
+
+          if /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPointIdentifier" "$APPEX_PLIST" >/dev/null 2>&1; then
+            echo "✅ NSExtension présent dans l'extension compilée."
+          else
+            echo "⚠️ NSExtension absent : ajout automatique (sera re-signé à l'export)."
+            /usr/libexec/PlistBuddy -c "Delete :NSExtension" "$APPEX_PLIST" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :NSExtension dict" "$APPEX_PLIST"
+            /usr/libexec/PlistBuddy -c "Add :NSExtension:NSExtensionPointIdentifier string com.apple.usernotifications.service" "$APPEX_PLIST"
+            /usr/libexec/PlistBuddy -c "Add :NSExtension:NSExtensionPrincipalClass string NotificationServiceExtension.NotificationService" "$APPEX_PLIST"
+            /usr/libexec/PlistBuddy -c "Set :CFBundlePackageType XPC!" "$APPEX_PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string XPC!" "$APPEX_PLIST"
+            echo "===== Info.plist de l'extension après réparation ====="
+            plutil -p "$APPEX_PLIST"
+          fi
+
       - name: Export IPA
         run: |
           set -e
