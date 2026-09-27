@@ -16,6 +16,9 @@ jobs:
       XCODE_SCHEME: App
       BUNDLE_ID: com.agrimarche.app
       EXTENSION_BUNDLE_ID: com.agrimarche.app.NotificationServiceExtension
+      # Identifiant Apple numérique de l'app (App Store Connect > Informations sur l'app > Identifiant Apple).
+      # Sans lui, altool devine l'app à partir des bundle IDs de l'IPA et peut tomber sur l'extension.
+      APP_APPLE_ID: "6790944134"
 
     steps:
       - name: Checkout
@@ -365,6 +368,10 @@ jobs:
 
           echo "✅ Clé API valide"
 
+          case "$APP_APPLE_ID" in
+            ''|*[!0-9]*) echo "❌ APP_APPLE_ID doit être l'identifiant Apple numérique de l'app (ex: 6741234567)"; exit 1 ;;
+          esac
+
           IPA_PATH=$(find build/ios/ipa -name "*.ipa" -print -quit)
 
           if [ -z "$IPA_PATH" ]; then
@@ -375,7 +382,7 @@ jobs:
           echo "📦 IPA : $IPA_PATH"
 
           echo "🔎 Validation de l'IPA auprès d'App Store Connect..."
-          xcrun altool             --validate-app             --type ios             --file "$IPA_PATH"             --apiKey "$API_KEY_ID"             --apiIssuer "$API_ISSUER_ID"             --output-format xml
+          xcrun altool --validate-app --type ios --file "$IPA_PATH" --apple-id "$APP_APPLE_ID" --apiKey "$API_KEY_ID" --apiIssuer "$API_ISSUER_ID" --output-format xml
 
           echo "✅ Validation App Store Connect réussie"
 
@@ -387,7 +394,7 @@ jobs:
           while [ "$ATTEMPT" -le "$MAX_ATTEMPTS" ]; do
             echo "===== Tentative $ATTEMPT/$MAX_ATTEMPTS ====="
 
-            if xcrun altool               --upload-app               --type ios               --file "$IPA_PATH"               --apiKey "$API_KEY_ID"               --apiIssuer "$API_ISSUER_ID"               --output-format xml; then
+            if xcrun altool --upload-app --type ios --file "$IPA_PATH" --apple-id "$APP_APPLE_ID" --apiKey "$API_KEY_ID" --apiIssuer "$API_ISSUER_ID" --output-format xml; then
 
               echo "✅ Upload vers App Store Connect réussi."
               exit 0
