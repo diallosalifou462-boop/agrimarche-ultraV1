@@ -15,6 +15,7 @@ import {
   Package, Leaf, Image as ImageIcon, Sparkles,
   Tag, Scale, MapPin, AlignLeft, Layers, Info
 } from 'lucide-react';
+import { messageErreur } from '@/lib/errors/messageErreur';
 
 // Alignées avec CATEGORIES dans src/app/main/products/page.tsx — un vendeur
 // ne doit jamais pouvoir choisir une catégorie que le filtre acheteur ne
@@ -181,14 +182,14 @@ export default function AddProductPage() {
           resolve(url);
         } else {
           const err = new Error(`Cloudinary error ${xhr.status}`);
-          setPhotos(prev => prev.map(p => p.id === item.id ? { ...p, uploading: false, error: err.message } : p));
+          setPhotos(prev => prev.map(p => p.id === item.id ? { ...p, uploading: false, error: messageErreur(err, "Échec de l'envoi de la photo.") } : p));
           reject(err);
         }
       };
 
       xhr.onerror = () => {
         const err = new Error('Erreur réseau Cloudinary');
-        setPhotos(prev => prev.map(p => p.id === item.id ? { ...p, uploading: false, error: err.message } : p));
+        setPhotos(prev => prev.map(p => p.id === item.id ? { ...p, uploading: false, error: messageErreur(err, "Échec de l'envoi de la photo.") } : p));
         reject(err);
       };
 
@@ -314,7 +315,7 @@ export default function AddProductPage() {
       // lire/noter un message d'erreur technique, et la console n'est pas
       // accessible sur iPhone sans Mac. L'alert() reste affichée tant qu'on
       // ne la ferme pas — copie ce qu'elle affiche si le problème persiste.
-      alert(`Erreur lors de la publication\n\ncode: ${err?.code ?? 'inconnu'}\nmessage: ${err?.message ?? String(err)}`);
+      alert(messageErreur(err, 'Erreur lors de la publication. Réessayez.'));
       showToast('error', 'Erreur lors de la publication');
       setSubmitting(false);
     }

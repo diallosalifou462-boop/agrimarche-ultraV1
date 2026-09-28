@@ -436,10 +436,22 @@ jobs:
           while [ "$ATTEMPT" -le "$MAX_ATTEMPTS" ]; do
             echo "===== Tentative $ATTEMPT/$MAX_ATTEMPTS ====="
 
-            if xcrun altool --upload-package "$IPA_PATH" --type ios --apple-id "$APP_APPLE_ID" --bundle-id "$BUNDLE_ID" --bundle-version "$BUILD_NUMBER" --bundle-short-version-string "$APP_VERSION" --apiKey "$API_KEY_ID" --apiIssuer "$API_ISSUER_ID" --output-format xml; then
+            if xcrun altool --upload-package "$IPA_PATH" --type ios --apple-id "$APP_APPLE_ID" --bundle-id "$BUNDLE_ID" --bundle-version "$BUILD_NUMBER" --bundle-short-version-string "$APP_VERSION" --apiKey "$API_KEY_ID" --apiIssuer "$API_ISSUER_ID" --output-format xml 2>&1 | tee "$RUNNER_TEMP/altool.log"; [ "${PIPESTATUS[0]}" -eq 0 ]; then
 
               echo "✅ Upload vers App Store Connect réussi."
               exit 0
+            fi
+
+            # Une tentative précédente a en fait abouti côté Apple : ce build est déjà reçu.
+            if [ "$ATTEMPT" -gt 1 ] && grep -q "previousBundleVersion = $BUILD_NUMBER;" "$RUNNER_TEMP/altool.log"; then
+              echo "✅ Build $BUILD_NUMBER déjà reçu par App Store Connect lors d'une tentative précédente."
+              exit 0
+            fi
+
+            # Erreurs définitives : inutile de réessayer.
+            if grep -q "90348\|90062\|90186\|ENTITY_ERROR" "$RUNNER_TEMP/altool.log"; then
+              echo "❌ Erreur définitive renvoyée par Apple, pas de nouvelle tentative."
+              exit 1
             fi
 
             if [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; then

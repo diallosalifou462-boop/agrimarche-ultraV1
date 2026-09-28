@@ -44,6 +44,7 @@ import {
   PieChart, Pie, Cell, RadarChart, Radar, PolarGrid,
   PolarAngleAxis, PolarRadiusAxis, ComposedChart, Scatter
 } from "recharts";
+import { messageErreur } from '@/lib/errors/messageErreur';
 
 // ============================================================
 // INTERFACE CODES D'ACCÈS IA
@@ -1605,17 +1606,56 @@ export default function AdminDashboard() {
     } catch { toast.error('Erreur rôle'); }
   };
 
+  // Appel de la route serveur qui supprime VRAIMENT un compte : Firebase
+  // Auth + profil Firestore + comptes fantômes du même numéro + phoneIndex.
+  // (Avant, seul users/{uid} était supprimé : le numéro restait bloqué —
+  // « déjà associé à un compte » à l'inscription, « pas de mot de passe »
+  // à la connexion.)
+  const callDeleteUserApi = async (payload: { uid?: string; phone?: string }) => {
+    const token = await auth.currentUser?.getIdToken();
+    if (!token) throw new Error('Votre session a expiré. Reconnectez-vous.');
+    const res = await fetch(apiUrl('/api/admin/delete-user'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json?.error || 'La suppression a échoué. Réessayez.');
+    return json as { phone: string | null; deleted: number; kept: number };
+  };
+
   const deleteUser = async (userId: string) => {
     // ⚠️ Message générique remplacé : sans nom affiché, un admin qui
     // supprime plusieurs comptes à la suite ne peut pas vérifier qu'il
     // clique bien sur le bon avant de confirmer.
     const target = users.find(u => u.id === userId);
-    const label = target?.displayName || target?.email || 'cet utilisateur';
-    if (!confirm(`Supprimer définitivement le compte de "${label}" ? Cette action est irréversible.`)) return;
+    const label = target?.displayName || target?.phone || target?.email || 'cet utilisateur';
+    if (!confirm(`Supprimer définitivement le compte de "${label}" ? Le numéro pourra être réutilisé pour une nouvelle inscription. Cette action est irréversible.`)) return;
     try {
-      await deleteDoc(doc(db, 'users', userId));
-      toast.success('Utilisateur supprimé');
-    } catch { toast.error('Erreur suppression'); }
+      const r = await callDeleteUserApi({ uid: userId, phone: target?.phone || undefined });
+      setUsers(prev => prev.filter(u => u.id !== userId));
+      toast.success(r.kept > 0
+        ? `Utilisateur supprimé (${r.kept} autre compte avec des données conservé pour ce numéro)`
+        : 'Utilisateur supprimé, numéro libéré');
+    } catch (e) {
+      toast.error(messageErreur(e, 'Erreur lors de la suppression.'));
+    }
+  };
+
+  // Numéro bloqué par un compte déjà supprimé de la liste (ancienne
+  // suppression partielle) : supprime les comptes fantômes de ce numéro.
+  const freePhoneNumber = async () => {
+    const phone = prompt('Numéro à libérer (ex : 772142553) :')?.trim();
+    if (!phone) return;
+    if (!confirm(`Supprimer les comptes vides/fantômes liés au ${phone} ? Les comptes qui ont des commandes ou des produits sont conservés.`)) return;
+    try {
+      const r = await callDeleteUserApi({ phone });
+      toast.success(r.deleted > 0
+        ? `${r.deleted} compte(s) fantôme(s) supprimé(s) — numéro libéré`
+        : r.kept > 0 ? 'Ce numéro a un compte actif avec des données : rien supprimé.' : 'Aucun compte trouvé pour ce numéro : il est déjà libre.');
+    } catch (e) {
+      toast.error(messageErreur(e, 'Erreur lors de la libération du numéro.'));
+    }
   };
 
   const updateLoanStatus = async (loanId: string, status: Loan['status']) => {
@@ -1802,7 +1842,7 @@ export default function AdminDashboard() {
       );
       setWeatherData(results);
     } catch (e: any) {
-      setWeatherError("Erreur chargement météo : " + (e?.message ?? 'inconnue'));
+      setWeatherError(messageErreur(e, 'Impossible de charger la météo.'));
     } finally {
       setWeatherLoading(false);
     }
@@ -2191,7 +2231,7 @@ Donne 3 à 5 conseils agricoles pratiques, concis et adaptés à cette région d
       toast.success('Photo ajoutée');
     } catch (e: any) {
       console.error(e);
-      toast.error(e?.message || "Erreur lors de l'upload de la photo");
+      toast.error(messageErreur(e, "Erreur lors de l'envoi de la photo."));
     } finally {
       setPushAllImageUploading(false);
     }
@@ -3515,6 +3555,14 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                       </p>
                     </div>
                     <div style={{ display:'flex', flexWrap:'wrap', gap:10 }}>
+                      <button
+                        type="button"
+                        onClick={freePhoneNumber}
+                        title="Supprimer les comptes fantômes qui bloquent un numéro"
+                        style={{ padding:'6px 12px', borderRadius:10, fontSize:12, fontWeight:600, background:'rgba(239,68,68,0.1)', color:'#f87171', border:'1px solid rgba(239,68,68,0.3)', cursor:'pointer' }}
+                      >
+                        Libérer un numéro
+                      </button>
                       <div style={{ position:'relative' }}>
                         <Search size={14} style={{ position:'absolute', left:10, top:'50%', transform:'translateY(-50%)', color:'#6b7280' }}/>
                         <input
@@ -6751,7 +6799,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                                   newPath = uploaded.publicId;
                                 } catch (uploadErr: any) {
                                   console.error('[Cloudinary] Erreur upload:', uploadErr?.message);
-                                  toast.error(`Erreur upload : ${uploadErr?.message ?? 'inconnue'}`);
+                                  toast.error(messageErreur(uploadErr, "Erreur lors de l'envoi de la photo."));
                                   return;
                                 } finally {
                                   setPubUploading(false);
@@ -6789,7 +6837,7 @@ Réponds toujours en français, de façon concise et professionnelle. Si on te p
                               setPubForm({ title:'', partnerName:'', imageFile:null, imagePreview:'', imageUrl:'', linkUrl:'', placement:'banner', active:true, priority:0 });
                             } catch (err: any) {
                               console.error('[Publicité] Erreur générale:', err);
-                              toast.error(`Erreur : ${err?.message ?? 'inconnue'}`);
+                              toast.error(messageErreur(err));
                             } finally {
                               setPubUploading(false);
                               setPubSaving(false);

@@ -38,6 +38,7 @@ async function waitForNativeBridge(timeoutMs = 1500): Promise<boolean> {
 }
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
 import { Eye, EyeOff, Lock, User, Phone, Truck, Shield, MapPin, Map, Home, CheckCircle, ArrowLeft, MessageSquare, Bell } from 'lucide-react';
+import { messageErreur, estErreurReseau } from '@/lib/errors/messageErreur';
 
 // ─── Token FCM capté avant l'inscription (voir useFCMToken.ts) ────────
 // useFCMToken écrit ce token en localStorage dès qu'il est obtenu, sans
@@ -172,6 +173,11 @@ export default function RegisterPage() {
   // Un ref et non un état : il est lu dans un .finally(), avant que React
   // n'ait commité le rendu suivant.
   const lastVerifyOkRef = useRef<boolean | null>(null);
+  // Free/Expresso : le serveur a déjà créé le compte (code vérifié) mais la
+  // connexion de l'app n'a pas encore abouti. Un nouvel appui sur « Confirmer »
+  // reprend à la connexion au lieu de revérifier un code déjà consommé.
+  const accountCreatedRef = useRef(false);
+  const createdTokenRef = useRef<string | null>(null);
   // ⚠️ AJOUT (26/09) : passe à true dès que le serveur a confirmé la
   // création du compte (Orange). Empêche (1) toute nouvelle vérification du
   // même code — l'auto-lecture SMS Android peut arriver APRÈS une saisie
@@ -375,7 +381,7 @@ export default function RegisterPage() {
       autoVerifiedRef.current = null;
       setAutoCode(null);
     } catch (err: any) {
-      setError(err instanceof RegistrationActionError ? err.message : "Le code n'a pas pu être renvoyé");
+      setError(messageErreur(err, "Le code n'a pas pu être renvoyé. Réessayez."));
     } finally {
       setLoading(false);
     }
@@ -435,7 +441,7 @@ export default function RegisterPage() {
           // attend le code : à la fin, l'affichage est immédiat.
           try { router.prefetch(getSafeRedirect()); } catch { /* best-effort */ }
         } catch (err: any) {
-          const msg = err instanceof RegistrationActionError ? err.message : "Erreur lors de l'envoi du code";
+          const msg = messageErreur(err, "Erreur lors de l'envoi du code. Réessayez.");
           pushDiag('server', 'error', 'registrationStart a échoué', err?.techCode || err?.code || msg);
           if (err?.details?.pushDiag) setServerPushDiag(err.details.pushDiag);
           setError(msg);
@@ -482,10 +488,7 @@ export default function RegisterPage() {
           console.error('[register] reprise inscription Orange échouée:', err);
           if (isPhoneAlreadyUsedError(err)) await auth.signOut().catch(() => {});
           if (!registrationSucceededRef.current) {
-            const detail = err?.code || err?.message || '';
-            setError(err instanceof RegistrationActionError
-              ? err.message
-              : `Impossible de terminer l'inscription${detail ? ` (${detail})` : ''}. Réessayez.`);
+            setError(messageErreur(err, "Impossible de terminer l'inscription. Réessayez."));
             releaseRegistrationGuards();
           }
         } finally {
@@ -721,25 +724,9 @@ export default function RegisterPage() {
         return;
       }
     }
-    if (!connected && result?.customToken) {
-      try {
-        await signInWithCustomToken(auth, result.customToken);
-        connected = true;
-      } catch (e) {
-        console.warn('[register] signInWithCustomToken après inscription Orange a échoué:', e);
-      }
-    }
-    if (!connected) {
-      try {
-        for (const email of await resolveLoginEmails(toE164(formData.phone))) {
-          try {
-            await signInWithEmailAndPassword(auth, email, formData.password);
-            connected = true;
-            break;
-          } catch { /* format suivant */ }
-        }
-      } catch { /* serveur injoignable : on passe au message ci-dessous */ }
-    }
+    // Même logique que Free/Expresso : plusieurs essais si le réseau lâche,
+    // jeton serveur d'abord, puis numéro + mot de passe.
+    if (!connected) connected = await signInAfterAccountCreated(result?.customToken ?? null);
     if (!connected) {
       // Session SMS révoquée par le serveur et reconnexion impossible : on la
       // ferme proprement, sinon l'écran de connexion croirait l'utilisateur
@@ -761,6 +748,42 @@ export default function RegisterPage() {
     // s'en charge.
     registrationInProgressRef.current = false;
     setTimeout(() => router.replace(getSafeRedirect()), 2500);
+  };
+
+  // ─── Connexion juste après la création du compte ──────
+  const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  // Connexion avec le numéro + le mot de passe saisis dans ce formulaire.
+  const signInWithTypedPassword = async (): Promise<boolean> => {
+    try {
+      for (const email of await resolveLoginEmails(toE164(formData.phone))) {
+        try {
+          await signInWithEmailAndPassword(auth, email, formData.password);
+          return true;
+        } catch { /* format suivant */ }
+      }
+    } catch { /* serveur injoignable */ }
+    return false;
+  };
+
+  // Le compte existe déjà côté serveur : on insiste sur la connexion
+  // (3 essais espacés si le réseau lâche), jeton serveur d'abord, puis
+  // numéro + mot de passe. Renvoie false seulement si tout a échoué.
+  const signInAfterAccountCreated = async (customToken: string | null): Promise<boolean> => {
+    for (let essai = 0; essai < 3; essai++) {
+      if (essai > 0) await pause(1500 * essai);
+      if (customToken) {
+        try {
+          await signInWithCustomToken(auth, customToken);
+          return true;
+        } catch (e) {
+          console.warn(`[register] connexion par jeton, essai ${essai + 1} échoué:`, e);
+          if (!estErreurReseau(e)) customToken = null; // jeton refusé : on passe au mot de passe
+        }
+      }
+      if ((!customToken || essai === 2) && (await signInWithTypedPassword())) return true;
+    }
+    return false;
   };
 
   // ─── Vérification OTP + création compte ───────────────
@@ -788,59 +811,69 @@ export default function RegisterPage() {
         // functions/src/registration.ts. On ne rappelle plus signUp()
         // ici : le profil est déjà écrit, il ne reste qu'à établir la
         // session côté client avec le customToken renvoyé.
-        if (!sessionId) { setError('Session expirée, renvoyez le code'); setLoading(false); verifyingRef.current = false; return; }
-        try {
-          const { customToken } = await verifyRegistrationCode(sessionId, code, {
-            password: formData.password,
-            name: formData.name,
-            region: formData.region,
-            departement: formData.departement,
-            commune: formData.commune.trim(),
-            quartier: formData.quartier.trim(),
-            role: 'client',
-          });
-          // Le compte est créé. Si le serveur n'a pas pu signer le jeton de
-          // connexion (droit IAM manquant côté Google), on se connecte avec le
-          // numéro et le mot de passe qui viennent d'être choisis : l'inscription
-          // ne doit JAMAIS échouer alors que le compte existe.
-          if (customToken) {
-            await signInWithCustomToken(auth, customToken);
-          } else {
-            let connected = false;
-            // ⚠️ FIX (19/09) : `phone` n'existait pas dans cette portée
-            // (seul `phoneE164`, local à sendOTP). Ce repli — le seul chemin
-            // de connexion quand le serveur n'a pas pu signer de customToken
-            // (droit IAM signBlob manquant) — levait donc un ReferenceError
-            // attrapé plus bas, et affichait « Code incorrect » alors que le
-            // compte venait d'être créé correctement.
-            for (const email of await resolveLoginEmails(toE164(formData.phone))) {
-              try {
-                await signInWithEmailAndPassword(auth, email, formData.password);
-                connected = true;
-                break;
-              } catch { /* format suivant */ }
-            }
-            if (!connected) {
-              lastVerifyOkRef.current = true;
-              setError('Compte créé. Connectez-vous avec votre numéro et votre mot de passe.');
-              setLoading(false);
-              verifyingRef.current = false;
-              setTimeout(() => router.replace('/auth/login'), 2500);
-              return;
-            }
-          }
+        // ⚠️ FIX (27/09) — « Erreur lors de la vérification » puis, au 2ᵉ
+        // essai, « numéro déjà inscrit » : le serveur CRÉAIT bien le compte,
+        // puis la connexion côté app (signInWithCustomToken) échouait sur une
+        // micro-coupure réseau (auth/network-request-failed, fréquent juste
+        // après la vérification sur iOS). L'erreur s'affichait, et le nouvel
+        // essai revérifiait un code déjà consommé sur un compte déjà créé.
+        // Désormais : dès que le serveur a répondu OK, le compte EXISTE → plus
+        // jamais d'erreur ; on réessaie la connexion, et un nouvel appui sur
+        // « Confirmer » reprend directement à la connexion.
+        const goToCatalogue = () => {
           lastVerifyOkRef.current = true;
+          accountCreatedRef.current = false;
+          createdTokenRef.current = null;
           suppressAutoProfileRef.current = false;
           clearRegistrationDraft();
           void haptic('success');
+          setError('');
           setStep('success');
-          // 1,1 s : juste assez pour voir « Compte créé ! » et comprendre ce
-          // qui vient de se passer, assez court pour que l'enchaînement
-          // notification → compte → catalogue reste d'un seul geste.
           setTimeout(() => router.replace(getSafeRedirect()), 1100);
-        } catch (err: any) {
-          lastVerifyOkRef.current = false;
-          setError(err instanceof RegistrationActionError ? err.message : 'Code incorrect');
+        };
+        const goToLoginAfterCreation = () => {
+          // Compte créé mais connexion impossible (réseau coupé trop longtemps) :
+          // écran de succès, puis connexion manuelle — jamais un message d'erreur.
+          lastVerifyOkRef.current = true;
+          accountCreatedRef.current = false;
+          createdTokenRef.current = null;
+          clearRegistrationDraft();
+          setError('');
+          setStep('success');
+          setTimeout(() => router.replace('/auth/login'), 2500);
+        };
+
+        try {
+          if (!accountCreatedRef.current) {
+            if (!sessionId) { setError('Session expirée, renvoyez le code'); return; }
+            try {
+              const { customToken } = await verifyRegistrationCode(sessionId, code, {
+                password: formData.password,
+                name: formData.name,
+                region: formData.region,
+                departement: formData.departement,
+                commune: formData.commune.trim(),
+                quartier: formData.quartier.trim(),
+                role: 'client',
+              });
+              accountCreatedRef.current = true;
+              createdTokenRef.current = customToken || null;
+            } catch (err: any) {
+              // « Déjà inscrit » juste après un essai qui a en fait réussi côté
+              // serveur (réponse perdue) : le mot de passe saisi est alors le bon.
+              if (isPhoneAlreadyUsedError(err) && (await signInWithTypedPassword())) {
+                goToCatalogue();
+                return;
+              }
+              lastVerifyOkRef.current = false;
+              setError(messageErreur(err, 'Code incorrect.'));
+              return;
+            }
+          }
+
+          // À partir d'ici le compte existe : on se connecte, avec plusieurs essais.
+          if (await signInAfterAccountCreated(createdTokenRef.current)) goToCatalogue();
+          else goToLoginAfterCreation();
         } finally {
           setLoading(false);
           verifyingRef.current = false;
@@ -887,7 +920,7 @@ export default function RegisterPage() {
         return;
       }
       if (err instanceof RegistrationActionError) {
-        setError(err.message);
+        setError(messageErreur(err));
       } else if (err?.code === 'auth/invalid-verification-code') {
         setError('Code incorrect, vérifiez le SMS');
       } else if (err?.code === 'auth/code-expired') {
@@ -908,18 +941,9 @@ export default function RegisterPage() {
         // construit désormais un détail qui ne peut jamais être vide :
         // code, nom, message, puis en dernier recours un JSON.stringify
         // brut de l'objet complet.
-        const parts = [err?.code, err?.name, err?.message].filter(
-          (v) => typeof v === 'string' && v.trim() !== '',
-        );
-        let detail = parts.join(' / ');
-        if (!detail) {
-          try {
-            detail = JSON.stringify(err, Object.getOwnPropertyNames(err ?? {})) || 'inconnu';
-          } catch {
-            detail = String(err) || 'inconnu';
-          }
-        }
-        setError(`Erreur lors de la vérification (${detail})`);
+        // Le détail technique (code, nom, message) reste dans la console
+        // via le console.error ci-dessus ; l'utilisateur voit un message clair.
+        setError(messageErreur(err, 'Erreur lors de la vérification. Réessayez.'));
       }
     } finally {
       setLoading(false);

@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { collection, query, getDocs, where, orderBy, limit, startAfter } from 'firebase/firestore';
 import { db, waitForFirestoreReady } from '@/lib/firebase/firebase';
+import { messageErreur } from '@/lib/errors/messageErreur';
 
 export function useProducts(filters: any = {}) {
   const [products, setProducts] = useState<any[]>([]);
@@ -36,7 +37,7 @@ export function useProducts(filters: any = {}) {
       }
     } catch (err: any) {
       console.error(err);
-      setError(err.message);
+      setError(messageErreur(err, 'Impossible de charger les produits. Réessayez.'));
     } finally {
       setLoading(false);
     }
@@ -68,7 +69,7 @@ export function useProducts(filters: any = {}) {
       }
     } catch (err: any) {
       console.error(err);
-      setError(err.message);
+      setError(messageErreur(err, 'Impossible de charger les produits. Réessayez.'));
     } finally {
       setLoading(false);
     }

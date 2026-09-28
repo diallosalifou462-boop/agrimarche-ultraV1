@@ -29,6 +29,7 @@ import {
   type LocationRecord,
   type LocationSource,
 } from '@/lib/geo/quality';
+import { messageErreur } from '@/lib/errors/messageErreur';
 
 interface LocationEditorProps {
   initial?: LocationRecord | null;
@@ -171,7 +172,7 @@ export default function LocationEditor({
         ...(withInstructions && instructions.trim() ? { instructions: instructions.trim() } : {}),
       });
     } catch (err: any) {
-      setError(err?.message || "La position n'a pas pu être enregistrée. Réessayez.");
+      setError(messageErreur(err, "La position n'a pas pu être enregistrée. Réessayez."));
     } finally {
       setConfirming(false);
     }

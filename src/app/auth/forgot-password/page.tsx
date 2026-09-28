@@ -18,7 +18,7 @@ import { ensureMainAccountAfterPhoneCode } from '@/lib/auth/phoneSession';
 import { Capacitor } from '@capacitor/core';
 import { detectCarrier } from '@/lib/carrier';
 import { apiUrl } from '@/lib/api-config';
-import { resetPasswordSendOtp, resetPasswordVerifyOtp, RegistrationActionError } from '@/lib/registrationActions';
+import { resetPasswordSendOtp, resetPasswordVerifyOtp } from '@/lib/registrationActions';
 import { PENDING_FCM_TOKEN_KEY } from '@/hooks/useFCMToken';
 import { listenForOtpPush } from '@/lib/auth/otpPushListener';
 import { authDiag, errInfo, userInfo, AUTH_DIAG_BUILD } from '@/components/AuthDiagPanel';
@@ -35,6 +35,7 @@ async function waitForNativeBridge(timeoutMs = 1500): Promise<boolean> {
 }
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
 import { MessageSquare, Bell, ArrowLeft, Lock, CheckCircle, Eye, EyeOff } from 'lucide-react';
+import { messageErreur } from '@/lib/errors/messageErreur';
 
 function toE164(phone: string): string {
   let digits = phone.replace(/\D/g, '');
@@ -214,7 +215,7 @@ export default function ForgotPasswordPage() {
       setStep('otp');
       startCooldown();
     } catch (err: any) {
-      setError(err instanceof RegistrationActionError ? err.message : "Erreur lors de l'envoi du code");
+      setError(messageErreur(err, "Erreur lors de l'envoi du code. Réessayez."));
     } finally {
       setLoading(false);
     }
@@ -321,7 +322,7 @@ export default function ForgotPasswordPage() {
           authDiag('ok', 'signInWithCustomToken OK', userInfo(auth.currentUser));
         } catch (err: any) {
           authDiag('error', 'Échec code custom', errInfo(err));
-          setError(err instanceof RegistrationActionError ? err.message : 'Code incorrect');
+          setError(messageErreur(err, 'Code incorrect.'));
           setLoading(false);
           return;
         }
@@ -363,7 +364,7 @@ export default function ForgotPasswordPage() {
       else if (err?.code === 'auth/code-expired') setError('Code expiré, renvoyez');
       else if (err?.code === 'auth/session-expired') setError('Code expiré, renvoyez');
       // 🔍 DIAGNOSTIC TEMPORAIRE (23/09) : affiche le code Firebase réel.
-      else setError(`Erreur de vérification${err?.code ? ` (${err.code})` : err?.message ? ` (${err.message})` : ''}`);
+      else setError(messageErreur(err, 'Erreur lors de la vérification. Réessayez.'));
     } finally { setLoading(false); verifyingRef.current = false; }
   };
 
@@ -497,8 +498,7 @@ export default function ForgotPasswordPage() {
         // 🔍 DIAGNOSTIC TEMPORAIRE (22/09) : affiche err.message (contient le
         // détail [...] posé plus haut pour "Session invalide") quand il n'y a
         // pas de code Firebase standard — à retirer une fois la cause trouvée.
-        const detail = err?.code || err?.message || '';
-        setError(`Impossible de mettre à jour le mot de passe${detail ? ` (${detail})` : ''}. Réessayez.`);
+        setError(messageErreur(err, 'Impossible de mettre à jour le mot de passe. Réessayez.'));
       }
     } finally { setLoading(false); }
   };

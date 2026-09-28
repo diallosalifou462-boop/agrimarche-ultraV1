@@ -12,6 +12,7 @@ import { ArrowLeft, Star, AlertCircle, CheckCircle, Loader2 } from 'lucide-react
 // anti-doublon atomique) — voir src/lib/reviewActions.ts.
 import { submitOrderReview, ReviewActionError } from '@/lib/reviewActions';
 import { fetchWithRetry } from '@/lib/notifications/notifyUser';
+import { messageErreur } from '@/lib/errors/messageErreur';
 
 function ReviewContent() {
   const searchParams = useSearchParams();
@@ -146,7 +147,7 @@ function ReviewContent() {
       console.error('[saveReview] Échec sur commande', id, {
         code: err?.code, message: err?.message,
       });
-      alert(err?.message ?? "Erreur lors de l'envoi");
+      alert(messageErreur(err, "Erreur lors de l'envoi de l'avis. Réessayez."));
     } finally {
       setSubmitting(false);
     }

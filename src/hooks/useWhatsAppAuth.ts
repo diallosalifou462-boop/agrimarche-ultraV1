@@ -5,6 +5,7 @@ import { useState, useCallback } from 'react';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { signInWithCustomToken } from 'firebase/auth';
 import { auth } from '@/lib/firebase/firebase';
+import { messageErreur } from '@/lib/errors/messageErreur';
 
 function toE164(phone: string): string {
   const digits = phone.replace(/\D/g, '');
@@ -26,7 +27,7 @@ export function useWhatsAppAuth() {
       await call({ phone: toE164(phone) });
       return true;
     } catch (e: any) {
-      setError(e?.message || "Échec de l'envoi du code");
+      setError(messageErreur(e, "Échec de l'envoi du code. Réessayez."));
       return false;
     } finally {
       setLoading(false);
@@ -44,7 +45,7 @@ export function useWhatsAppAuth() {
       await signInWithCustomToken(auth, customToken);
       return true;
     } catch (e: any) {
-      setError(e?.message || 'Code incorrect');
+      setError(messageErreur(e, 'Code incorrect.'));
       return false;
     } finally {
       setLoading(false);

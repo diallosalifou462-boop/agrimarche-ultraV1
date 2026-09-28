@@ -16,6 +16,7 @@ import { confirmOrderDelivery, cancelClientOrder, OrderActionError } from '@/lib
 // ✅ Le code de livraison appartient au client : cette fonction est la
 // seule façon de le lire, vérifiée côté serveur (order.userId === uid).
 import { getDeliveryCode, DeliveryCodeError } from '@/lib/deliveryCodeActions';
+import { messageErreur } from '@/lib/errors/messageErreur';
 
 interface Order {
   id: string;
@@ -108,7 +109,7 @@ function OrdersContent() {
     } catch (e) {
       const err = e instanceof OrderActionError ? e : null;
       console.error('Erreur annulation', err ?? e);
-      alert(err?.message ?? "Erreur lors de l'annulation. Réessayez.");
+      alert(messageErreur(err, "Erreur lors de l'annulation. Réessayez."));
     } finally {
       setCancelling(null);
     }
@@ -126,7 +127,7 @@ function OrdersContent() {
     } catch (e) {
       const err = e instanceof OrderActionError ? e : null;
       console.error('Erreur confirmation', err ?? e);
-      alert(err?.message ?? 'Erreur lors de la confirmation. Réessayez.');
+      alert(messageErreur(err, 'Erreur lors de la confirmation. Réessayez.'));
     } finally {
       setConfirming(null);
     }

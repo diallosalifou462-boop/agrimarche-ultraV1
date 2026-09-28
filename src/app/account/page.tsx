@@ -26,6 +26,7 @@ import { confirmOrderDelivery, cancelClientOrder, OrderActionError } from '@/lib
 // affiche en temps réel commandes, avis, messages... pour le client aussi.
 import { NotificationBell } from '@/components/NotificationBell';
 import { getAvatarInitial, getAvatarColor } from '@/lib/avatar';
+import { messageErreur } from '@/lib/errors/messageErreur';
 
 interface UserFormData {
   displayName: string;
@@ -171,7 +172,7 @@ export default function AccountPage() {
       console.error('[handleCancelOrder] Échec sur commande', orderId, {
         code: err?.code, message: err?.message, statusActuel: orders.find((o: any) => o.id === orderId)?.status,
       });
-      alert(err?.message ?? "😊 Petit souci technique de notre côté — ta commande n'a pas pu être annulée pour l'instant. Réessaie dans un instant, ou contacte-nous si ça persiste, on s'en occupe !");
+      alert(messageErreur(err, "😊 Petit souci technique de notre côté — ta commande n'a pas pu être annulée pour l'instant. Réessaie dans un instant, ou contacte-nous si ça persiste, on s'en occupe !"));
     } finally {
       setUpdating(null);
     }
@@ -188,7 +189,7 @@ export default function AccountPage() {
       console.error('[handleConfirmOrder] Échec sur commande', orderId, {
         code: err?.code, message: err?.message, statusActuel: orders.find((o: any) => o.id === orderId)?.status,
       });
-      alert(err?.message ?? "😊 Petit souci technique de notre côté — la confirmation n'a pas pu être enregistrée pour l'instant. Réessaie dans un instant, ou contacte-nous si ça persiste, on s'en occupe !");
+      alert(messageErreur(err, "😊 Petit souci technique de notre côté — la confirmation n'a pas pu être enregistrée pour l'instant. Réessaie dans un instant, ou contacte-nous si ça persiste, on s'en occupe !"));
     } finally {
       setUpdating(null);
     }

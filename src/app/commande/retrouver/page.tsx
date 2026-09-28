@@ -19,8 +19,9 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { findGuestOrders, claimGuestOrderSession, GuestOrderSummary, DeliveryCodeError } from '@/lib/deliveryCodeActions';
+import { findGuestOrders, claimGuestOrderSession, GuestOrderSummary } from '@/lib/deliveryCodeActions';
 import { formatFCFA } from '@/lib/orderStatus';
+import { messageErreur } from '@/lib/errors/messageErreur';
 
 export default function RetrouverCommandePage() {
   const router = useRouter();
@@ -47,7 +48,7 @@ export default function RetrouverCommandePage() {
       setOrders(found);
       setStep('choose');
     } catch (e) {
-      setError(e instanceof DeliveryCodeError ? e.message : 'Erreur de connexion. Réessayez.');
+      setError(messageErreur(e, 'Erreur de connexion. Réessayez.'));
     } finally {
       setLoading(false);
     }
@@ -60,7 +61,7 @@ export default function RetrouverCommandePage() {
       await claimGuestOrderSession(orderId, phone);
       router.push(`/account/orders?id=${orderId}`);
     } catch (e) {
-      setError(e instanceof DeliveryCodeError ? e.message : 'Erreur de connexion. Réessayez.');
+      setError(messageErreur(e, 'Erreur de connexion. Réessayez.'));
       setClaimingId(null);
     }
   };

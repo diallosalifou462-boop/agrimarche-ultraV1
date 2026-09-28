@@ -10,6 +10,7 @@ import { ADMIN_MARGIN_RATE } from '@/lib/pricing';
 import LocationEditor from '@/components/LocationEditor';
 import { saveSellerShopLocation, readSellerShopLocation } from '@/lib/geo/userLocation';
 import type { LocationRecord } from '@/lib/geo/quality';
+import { messageErreur } from '@/lib/errors/messageErreur';
 
 // Associe la région renvoyée par le géocodage (« Région de Thiès »,
 // « Saint-Louis Region »…) à la liste officielle, sans accents ni casse.
@@ -179,7 +180,7 @@ export default function SellerRegisterPage() {
       }, 1000);
     } catch (error: any) {
       console.error(error);
-      alert('Erreur : ' + (error?.code || '') + ' — ' + (error?.message || error));
+      alert(messageErreur(error, "L'inscription vendeur a échoué. Réessayez."));
       setSaving(false);
     }
   };

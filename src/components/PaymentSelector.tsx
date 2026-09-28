@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { initiatePayment, PAYMENT_METHODS, PaymentMethod } from '@/lib/payment/paytech';
+import { messageErreur } from '@/lib/errors/messageErreur';
 
 interface PaymentSelectorProps {
   orderId: string;
@@ -24,7 +25,7 @@ export function PaymentSelector({ orderId, total, onSuccess, onError }: PaymentS
       // Redirection vers la page de paiement mobile
       window.location.href = result.paymentUrl;
     } catch (err: any) {
-      const msg = err.message || 'Erreur paiement';
+      const msg = messageErreur(err, 'Le paiement n’a pas pu être lancé. Réessayez.');
       setError(msg);
       if (onError) onError(msg);
     } finally {

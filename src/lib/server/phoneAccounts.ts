@@ -132,7 +132,7 @@ export async function findAccountsForPhone(e164: string): Promise<PhoneAccounts>
  * Oui seulement si : aucun mot de passe/email, et aucun profil réel, aucune
  * commande (client ou vendeur), aucun produit.
  */
-async function isEmptyDuplicate(user: UserRecord): Promise<boolean> {
+export async function isEmptyDuplicate(user: UserRecord): Promise<boolean> {
   if (user.email || hasPassword(user)) return false;
   const db = getFirestore(getAdminApp());
   const profile = await db.collection('users').doc(user.uid).get();

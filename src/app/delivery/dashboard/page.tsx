@@ -27,6 +27,7 @@ import { apiUrl } from '@/lib/api-config';
 import { claimOrder as claimOrderSecure, confirmDeliveryWithCode, DeliveryCodeError } from '@/lib/deliveryCodeActions';
 import FleetMap, { type FleetPoint } from '@/components/FleetMap';
 import { isValidCoordinate, formatDistance } from '@/lib/geo/distance';
+import { messageErreur } from '@/lib/errors/messageErreur';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -823,7 +824,7 @@ function DeliveryCodeModal({
     try {
       await onSubmit(orderId, code);
     } catch (e: any) {
-      setError(e?.message || 'Code incorrect.');
+      setError(messageErreur(e, 'Code incorrect.'));
       setCode('');
     } finally {
       setSubmitting(false);

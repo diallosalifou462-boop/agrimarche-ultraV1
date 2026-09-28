@@ -12,6 +12,7 @@ import { Suspense } from 'react';
 // `updateOrderStatus` (transaction atomique côté serveur), plus par une
 // écriture Firestore directe — voir src/lib/orderActions.ts pour le détail.
 import { cancelClientOrder, OrderActionError } from '@/lib/orderActions';
+import { messageErreur } from '@/lib/errors/messageErreur';
 
 interface Order {
   id: string;
@@ -112,7 +113,7 @@ function OrdersContent() {
     } catch (e) {
       const err = e instanceof OrderActionError ? e : null;
       console.error('Erreur annulation', err ?? e);
-      alert(err?.message ?? "Erreur lors de l'annulation. Réessayez.");
+      alert(messageErreur(err, "Erreur lors de l'annulation. Réessayez."));
     } finally {
       setCancelling(null);
     }

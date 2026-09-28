@@ -39,6 +39,7 @@ interface SellerRating {
 }
 
 import { ORDER_STATUS_CONFIG, normalizeStatus, statusTint, formatFCFA, canClientCancel, canClientConfirmDelivery } from '@/lib/orderStatus';
+import { messageErreur } from '@/lib/errors/messageErreur';
 // ✅ Le vocabulaire de statut (normalizeStatus, couleurs, libellés) vient
 // désormais de @/lib/orderStatus — la même source unique que account
 // (page.tsx), account/orders et orders. Avant, cette page avait sa propre
@@ -168,7 +169,7 @@ export default function AccountPage() {
       console.error('[handleCancelOrder] Échec sur commande', orderId, {
         code: err?.code, message: err?.message, statusActuel: orders.find((o: any) => o.id === orderId)?.status,
       });
-      alert(err?.message ?? "😊 Petit souci technique de notre côté — ta commande n'a pas pu être annulée pour l'instant. Réessaie dans un instant, ou contacte-nous si ça persiste, on s'en occupe !");
+      alert(messageErreur(err, "😊 Petit souci technique de notre côté — ta commande n'a pas pu être annulée pour l'instant. Réessaie dans un instant, ou contacte-nous si ça persiste, on s'en occupe !"));
     } finally {
       setUpdating(null);
     }
@@ -185,7 +186,7 @@ export default function AccountPage() {
       console.error('[handleConfirmOrder] Échec sur commande', orderId, {
         code: err?.code, message: err?.message, statusActuel: orders.find((o: any) => o.id === orderId)?.status,
       });
-      alert(err?.message ?? "😊 Petit souci technique de notre côté — la confirmation n'a pas pu être enregistrée pour l'instant. Réessaie dans un instant, ou contacte-nous si ça persiste, on s'en occupe !");
+      alert(messageErreur(err, "😊 Petit souci technique de notre côté — la confirmation n'a pas pu être enregistrée pour l'instant. Réessaie dans un instant, ou contacte-nous si ça persiste, on s'en occupe !"));
     } finally {
       setUpdating(null);
     }

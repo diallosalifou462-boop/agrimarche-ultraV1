@@ -32,6 +32,7 @@ async function waitForNativeBridge(timeoutMs = 1500): Promise<boolean> {
 }
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
 import { Phone, Lock, Eye, EyeOff, MessageSquare, ArrowLeft } from 'lucide-react';
+import { messageErreur } from '@/lib/errors/messageErreur';
 
 // ─── Helpers ─────────────────────────────────────────────
 function toE164(phone: string): string {
@@ -147,8 +148,7 @@ function LoginContent() {
 
     const failedSub = FirebaseAuthentication.addListener('phoneVerificationFailed', (event: any) => {
       console.error('[DEBUG] phoneVerificationFailed — événement complet:', JSON.stringify(event));
-      const detail = event?.code ? ` (code: ${event.code})` : '';
-      setError((event.message || "Impossible d'envoyer le SMS") + detail);
+      setError(messageErreur(event, "Impossible d'envoyer le SMS. Réessayez."));
       setLoading(false);
     });
 
@@ -319,8 +319,8 @@ function LoginContent() {
     } catch (err: any) {
       // ⚠️ FIX (26/09) : `catch {}` sans variable ne capturait même pas
       // l'erreur — impossible de savoir pourquoi l'envoi échouait.
-      const detail = err?.code || err?.message || '';
-      setError(`Impossible d'envoyer le SMS${detail ? ` (${detail})` : ''}`);
+      console.error('[login] envoi SMS échoué:', err);
+      setError(messageErreur(err, "Impossible d'envoyer le SMS. Réessayez."));
       setLoading(false);
     }
   };
@@ -393,8 +393,8 @@ function LoginContent() {
         // l'inverse de ce qu'on veut). Corrigé pour toujours montrer un
         // détail exploitable, comme dans register/page.tsx et
         // forgot-password/page.tsx.
-        const detail = err?.code || err?.message || '';
-        setError(`Erreur de vérification${detail ? ` (${detail})` : ''}`);
+        console.error('[login] vérification échouée:', err);
+        setError(messageErreur(err, 'Erreur lors de la vérification. Réessayez.'));
       }
     } finally {
       setLoading(false);
