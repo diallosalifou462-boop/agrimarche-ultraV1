@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@/contexts/AuthContext';
-import { db } from '@/lib/firebase/firebase';
+import { db, auth } from '@/lib/firebase/firebase';
 import { apiUrl } from '@/lib/api-config';
 import {
   collection, query, orderBy, limit, getDocs, addDoc, Timestamp,
@@ -77,24 +77,7 @@ async function getTokenUsage(uid: string): Promise<{ used: number; limit: number
   }
 }
 
-async function trackTokenUsage(uid: string, tokensUsed: number): Promise<boolean> {
-  if (!db || !uid) return false;
-  try {
-    const userRef = doc(db, 'users', uid);
-    await updateDoc(userRef, { aiTokensUsed: increment(tokensUsed), aiLastUsageAt: Timestamp.now() });
-    const snap = await getDoc(userRef);
-    const data = snap.data();
-    const percentage = (data?.aiTokensUsed ?? 0) / TOKEN_LIMIT;
-    if (percentage >= TOKEN_ALERT_THRESHOLD && !data?.aiAlertSent) {
-      await updateDoc(userRef, { aiAlertSent: true });
-      return true;
-    }
-    return false;
-  } catch (e) {
-    console.error('trackTokenUsage error:', e);
-    return false;
-  }
-}
+// trackTokenUsage supprimé : la consommation est comptée côté serveur (/api/chat).
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GAMIFICATION
@@ -305,102 +288,28 @@ async function callDeepSeek(
   if (intent.needsProducts)     contextParts.push(await fetchProductsContext());
   if (intent.needsMarketPrices) contextParts.push(await fetchMarketPricesContext());
 
-  const today = new Date().toLocaleDateString('fr-FR', {
-    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-  });
-
-  const systemPrompt = `Tu es **Agri**, l'assistant IA officiel de Sunu Mëñëf Sénégal — la plateforme agricole de référence au Sénégal.
-
-**Ta mission principale :**
-Rendre l'abonnement Sunu Mëñëf Premium INDISPENSABLE en apportant une valeur concrète et mesurable aux agriculteurs sur ces 7 piliers :
-
----
-
-## 1. 📣 PLUS DE CLIENTS
-- Conseille l'agriculteur sur comment optimiser ses annonces Sunu Mëñëf (photos, description, prix compétitif)
-- Indique les périodes de forte demande par culture et région
-- Suggère des cultures à fort potentiel commercial selon la saison
-- Aide à rédiger des descriptions de produits attractives
-- Exemple de formulation : "Pour vendre plus de maïs à Dakar, postez vos annonces le lundi matin avec photo et indiquez 'récolte de la semaine'"
-
-## 2. 💰 MEILLEURS PRIX DE VENTE
-- Analyse les prix du marché en temps réel et indique le MEILLEUR MOMENT pour vendre
-- Compare les prix entre régions pour suggérer où vendre (ex: "Le mil se vend 20% plus cher à Dakar qu'à Kaolack en ce moment")
-- Conseille de ne pas vendre en période de surplus post-récolte
-- Recommande la vente directe B2B pour éviter les intermédiaires
-- Donne toujours les prix en FCFA/kg ET FCFA/tonne
-- Si les données sont marquées "indicatives", précise-le clairement à l'utilisateur
-
-## 3. 📉 RÉDUCTION DES PERTES
-- Conseille sur la conservation post-récolte : silos, sacs hermétiques, traitement
-- Alerte sur les risques selon la météo actuelle (humidité → moisissures, etc.)
-- Recommande les bonnes pratiques de stockage par culture
-- Indique les signes précoces de maladies et ravageurs courants au Sénégal
-- Calcule le coût estimé des pertes pour motiver l'action
-
-## 4. 🌤️ INFORMATIONS MÉTÉO AGRICOLES
-- Interprète la météo en termes agricoles concrets (pas juste la température)
-- Donne des conseils d'action liés à la météo : "Avec 65% d'humidité, traitez contre les champignons maintenant"
-- Indique les meilleures dates de semis, d'épandage, de récolte selon les prévisions
-- Alerte sur les événements extrêmes : sécheresse, excès de pluie, orage
-- Fournis le bilan hydrique (ETP vs précipitations) quand disponible
-
-## 5. 🚚 LOGISTIQUE
-- Explique comment utiliser la livraison Sunu Mëñëf pour réduire les coûts de transport
-- Conseil sur les regroupements de commandes entre agriculteurs du même village
-- Calcule le coût logistique estimé selon la distance et le volume
-- Suggère les meilleures solutions de transport selon le produit (réfrigéré, vrac, ensaché)
-- Indique les points de collecte disponibles par région
-
-## 6. 📊 ALERTES DE MARCHÉ
-- Identifie les tendances haussières ou baissières sur les principales cultures
-- Alerte sur les opportunités : "La tomate va manquer dans 3 semaines, c'est le bon moment pour planter"
-- Indique les événements qui impactent les prix : Tabaski, Korité, saison des pluies, récoltes massives
-- Compare les marges par culture pour aider les choix de diversification
-- Signale les nouveaux acheteurs professionnels actifs sur Sunu Mëñëf
-
-## 7. 💳 ACCÈS AU CRÉDIT ET À L'ASSURANCE
-- Simule des crédits agricoles : montant, durée, taux, mensualités en FCFA
-- Présente les produits financiers adaptés : BOA Sénégal, Ecobank, BICIS, CBAO, La Poste, DER/FJ, CNCAS (Caisse Nationale de Crédit Agricole du Sénégal)
-- Explique l'assurance récolte CNAAS (Compagnie Nationale d'Assurance Agricole du Sénégal)
-- Guide pour constituer un dossier de crédit solide
-- Calcule le ROI d'un investissement agricole (intrants, matériel) pour justifier un prêt
-
-**Format de simulation crédit :**
-Montant : X FCFA | Durée : N mois | Taux : 10–14% | Mensualité : Y FCFA | Coût total : Z FCFA
-
----
-
-**Règles de réponse :**
-- Réponds UNIQUEMENT en français
-- Utilise FCFA pour toutes les valeurs monétaires (jamais d'euros ou dollars)
-- Adapte tes conseils aux 14 régions du Sénégal
-- Formatage Markdown : **gras** pour les valeurs clés, · pour les listes
-- Sois précis, professionnel et chaleureux — tu es un conseiller de confiance
-- Termine TOUJOURS par une action concrète à faire maintenant
-- Max 350 mots sauf si calcul financier complexe (alors jusqu'à 500)
-- Ne jamais dire "je suis une IA" — tu es Agri, le conseiller de Sunu Mëñëf
-
-**Contexte utilisateur :**
-- Nom : ${userName}
-- Date : ${today}
-${contextParts.length ? `\n**Données temps réel :**\n${contextParts.join('\n\n')}` : ''}`;
+  // Les consignes d'Agri sont désormais construites par le SERVEUR (/api/chat).
+  // Le navigateur n'envoie que les données temps réel, traitées comme de simples données.
+  const context = contextParts.filter(Boolean).join('\n\n');
 
   const messages = [
     ...history.slice(-12).map(h => ({ role: h.role, content: h.content })),
     { role: 'user' as const, content: userMessage },
   ];
 
+  const idToken = await auth.currentUser?.getIdToken();
+  if (!idToken) throw new Error('AUTH_REQUIRED');
   const resp = await fetch(apiUrl('/api/chat'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ systemPrompt, messages }),
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+    body: JSON.stringify({ messages, context, userName }),
   });
 
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
     if (err.error === 'INVALID_API_KEY') throw new Error('INVALID_API_KEY');
     if (err.error === 'INSUFFICIENT_BALANCE' || resp.status === 402) throw new Error('INSUFFICIENT_BALANCE');
+    if (['AUTH_REQUIRED', 'AI_ACCESS_REQUIRED', 'TOKEN_LIMIT_REACHED', 'RATE_LIMITED'].includes(err.error)) throw new Error(err.error);
     throw new Error(`API error ${resp.status}`);
   }
 
@@ -408,7 +317,8 @@ ${contextParts.length ? `\n**Données temps réel :**\n${contextParts.join('\n\n
   const text = data.choices?.[0]?.message?.content ?? "Désolé, je n'ai pas pu générer une réponse.";
   const tokensUsed = data.usage?.total_tokens ?? Math.floor(text.length / 4);
   const xpGained = Math.min(30, Math.max(5, Math.floor(text.length / 50)));
-  return { text, xpGained, tokensUsed };
+  const quota = data.quota as { used: number; limit: number; percentage: number; alert: boolean } | undefined;
+  return { text, xpGained, tokensUsed, quota };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -610,13 +520,12 @@ export default function AIAssistantPage() {
 
     try {
       const userName = profile?.displayName || user?.email?.split('@')[0] || 'Agriculteur';
-      const { text: response, xpGained, tokensUsed } = await callDeepSeek(text, conversationHistory, userName);
+      const { text: response, xpGained, tokensUsed, quota } = await callDeepSeek(text, conversationHistory, userName);
 
-      if (user?.uid) {
-        const alertTriggered = await trackTokenUsage(user.uid, tokensUsed);
-        const updatedTokenInfo = await getTokenUsage(user.uid);
-        setTokenPercentage(updatedTokenInfo.percentage);
-        if (alertTriggered || updatedTokenInfo.percentage >= 80) {
+      // La consommation est comptée par le SERVEUR ; on affiche simplement ce qu'il renvoie.
+      if (user?.uid && quota) {
+        setTokenPercentage(quota.percentage);
+        if (quota.alert || quota.percentage >= 80) {
           setShowTokenAlert(true);
           setTimeout(() => setShowTokenAlert(false), 6000);
         }
@@ -660,6 +569,14 @@ export default function AIAssistantPage() {
       const errorText =
         e?.message === 'INVALID_API_KEY'
           ? "Configuration API DeepSeek invalide. Contactez l'administrateur."
+          : e?.message === 'AI_ACCESS_REQUIRED'
+          ? "Votre accès à l'assistant a expiré. Réactivez-le depuis la page de déblocage."
+          : e?.message === 'TOKEN_LIMIT_REACHED'
+          ? "Vous avez atteint votre quota de jetons pour cette période."
+          : e?.message === 'RATE_LIMITED'
+          ? 'Trop de messages en peu de temps. Patientez une minute.'
+          : e?.message === 'AUTH_REQUIRED'
+          ? 'Session expirée. Reconnectez-vous.'
           : e?.message === 'INSUFFICIENT_BALANCE'
           ? "⚠️ **CRÉDITS DEEPSEEK ÉPUISÉS**\n\nLe service IA est temporairement suspendu. Contactez l'administrateur pour recharger le compte."
           : 'Connexion IA temporairement indisponible. Réessayez dans un instant.';

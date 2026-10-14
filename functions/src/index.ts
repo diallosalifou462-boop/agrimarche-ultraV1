@@ -111,6 +111,27 @@ export { resetPasswordSendOtp, resetPasswordVerifyOtp } from './passwordReset';
 // Alerting automatique (taux d'échec anormal) + endpoint dashboard admin.
 export { checkRegistrationHealth, getRegistrationMetrics } from './monitoring';
 
+// ============================================================
+//   AGENTCORP — passerelle d'actions des agents IA (Saliou et
+//   l'équipe « Opérations SunuMenef »). Point d'entrée HTTP signé
+//   (HMAC + horodatage) : catalogue des actions + exécution.
+//   Risques définis dans agentcorpGateway.ts : lecture automatique,
+//   modification/sensible seulement avec approved_by='propriétaire',
+//   paiements, remboursements, rôles, comptes et statut « livré »
+//   INTERDITS. Aucune suppression définitive ; chaque action est
+//   journalisée dans `agentcorp_actions`.
+//   Secrets requis : AGENTCORP_GATEWAY_SECRET et WHATSAPP_ACCESS_TOKEN (envoi des réponses validées)
+//   Déploiement isolé : firebase deploy --only functions:agentcorpGateway
+// ============================================================
+export { agentcorpGateway } from './agentcorpGateway';
+
+// AGENTCORP — support client WhatsApp : webhook Meta (signature vérifiée) → agents
+// AgentCorp → réponse au client selon le mode choisi par le propriétaire
+// (off | brouillons | automatique). Voir whatsappSupport.ts.
+// Secrets : WHATSAPP_APP_SECRET, WHATSAPP_VERIFY_TOKEN, AGENTCORP_SUPPORT_TOKEN, WHATSAPP_ACCESS_TOKEN
+// Déploiement isolé : firebase deploy --only functions:whatsappWebhook
+export { whatsappWebhook } from './whatsappSupport';
+
 export const processEmailQueue = functions.firestore.onDocumentCreated(
   {
     document: 'email_queue/{docId}',

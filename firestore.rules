@@ -172,6 +172,15 @@ service cloud.firestore {
     // de champ role (comptes créés avant son ajout, ou juste après la
     // migration auth téléphone) — on ne bloque que le passage vers un rôle
     // à privilèges (admin/delivery), qui reste réservé à l'admin.
+    // 🔒 AGENTCORP v7 : champs d'accès à l'assistant IA. Écrits uniquement par
+    // le serveur (/api/chat, /api/ai/redeem — Admin SDK, hors règles) ou par
+    // l'admin. Avant, l'utilisateur pouvait s'accorder lui-même hasAIAccess
+    // ou remettre aiTokensUsed à 0 depuis les outils du navigateur.
+    function aiFields() {
+      return ['hasAIAccess', 'aiExpiryDate', 'aiUnlockedAt', 'aiTokensUsed',
+              'aiTokensLimit', 'aiAlertSent', 'aiLastUsageAt'];
+    }
+
     function isClientToSellerUpgrade() {
       return request.resource.data.role == 'seller'
         && resource.data.get('role', 'client') != 'admin'
@@ -204,6 +213,7 @@ service cloud.firestore {
       allow create: if (isOwner(userId)
                           && hasFields(['email', 'createdAt', 'role'])
                           && request.resource.data.role in ['client', 'seller']
+                          && !request.resource.data.keys().hasAny(aiFields())
                           && isReasonableSize())
                     || (isAdmin()
                           && hasFields(['email', 'createdAt', 'role'])
@@ -216,6 +226,7 @@ service cloud.firestore {
       allow update: if isAdmin()
                     || (isOwner(userId)
                         && doesNotChange(['uid', 'email', 'createdAt'])
+                        && doesNotChange(aiFields())
                         && (doesNotChange(['role']) || isClientToSellerUpgrade()));
 
       allow delete: if isAdmin();
@@ -478,8 +489,15 @@ service cloud.firestore {
       // un format légèrement différent. On garde juste : connecté, et
       // userId = soi-même (sinon on pourrait créer des commandes au nom
       // d'un autre utilisateur).
-      allow create: if isAuth()
-        && request.resource.data.userId == request.auth.uid;
+      allow create: if (isAuth()
+                        && request.resource.data.userId == request.auth.uid)
+                    // ✅ VENTES WHATSAPP / HORS APP (onglet admin « Ventes WhatsApp »,
+                    // components/admin/ManualSaleTab.tsx) : l'admin enregistre une
+                    // vente conclue hors de l'application. L'acheteur n'est PAS
+                    // l'auteur de l'écriture (userId = son compte s'il en a un, sinon
+                    // null), d'où cette branche dédiée, limitée à l'admin et aux
+                    // documents marqués source == 'whatsapp'.
+                    || (isAdmin() && request.resource.data.get('source', null) == 'whatsapp');
 
       // ✅ Assoupli : l'acheteur peut annuler ('annule') ou confirmer la
       // réception ('livre') quel que soit le statut actuel de la commande
@@ -513,7 +531,10 @@ service cloud.firestore {
                         && (isDelivererTrackingUpdate() || isDelivererReleaseUpdate()))
                     || isAdmin();
 
-      allow delete: if false;
+      // Les commandes de l'application ne sont jamais supprimées (historique,
+      // litiges). Seule exception : une vente WhatsApp saisie par erreur par
+      // l'admin (bouton « Supprimer » de l'onglet Ventes WhatsApp).
+      allow delete: if isAdmin() && resource.data.get('source', null) == 'whatsapp';
     }
 
     // 🔐 Code de livraison en clair — écrit et lu UNIQUEMENT par les Cloud
@@ -768,14 +789,14 @@ service cloud.firestore {
     // =========================================================
     // CODES D'ACCÈS IA (déverrouillage de l'assistant, unlock-ia)
     // =========================================================
+    // 🔒 AGENTCORP v7 : la vérification et l'utilisation d'un code passent
+    // désormais par /api/ai/redeem (Admin SDK, transaction). Avant, tout
+    // utilisateur connecté pouvait LIRE tous les codes (donc en voler un
+    // non utilisé) et en marquer un comme utilisé depuis son navigateur.
     match /accessCodes/{code} {
-      allow read: if isAuth();
+      allow read: if isAdmin();
       allow create: if isAdmin();
-      allow update: if isAuth()
-                    && resource.data.used == false
-                    && onlyChanges(['used', 'usedBy', 'usedAt'])
-                    && request.resource.data.used == true
-                    && request.resource.data.usedBy == request.auth.uid;
+      allow update: if isAdmin();
       allow delete: if isAdmin();
     }
 
@@ -833,6 +854,38 @@ service cloud.firestore {
     // =========================================================
     match /guestAccessAttempts/{key} {
       allow read, write: if false;
+    }
+
+    // =========================================================
+    // AGENTCORP v7 — écrits UNIQUEMENT par le serveur (Admin SDK :
+    // /api/chat, webhook WhatsApp, passerelle agentcorpGateway).
+    // L'admin peut consulter ; personne n'écrit depuis le navigateur,
+    // sauf le réglage du message d'attente WhatsApp (admin).
+    // =========================================================
+    match /ai_rate/{docId} {
+      allow read, write: if false;
+    }
+    match /whatsapp_inbound/{docId} {
+      allow read, write: if false;
+    }
+    match /support_conversations/{phone} {
+      allow read: if isAdmin();
+      allow write: if false;
+      match /messages/{messageId} {
+        allow read: if isAdmin();
+        allow write: if false;
+      }
+    }
+    match /agentcorp_actions/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    match /agentcorp_trash/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    match /agentcorp_config/{docId} {
+      allow read, write: if isAdmin();
     }
 
     // =========================================================

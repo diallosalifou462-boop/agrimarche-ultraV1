@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.cleanupRegistrationLeftovers = exports.cleanupRegistrationRateLimits = exports.cleanupProcessedEvents = exports.notifyDeliveryPhaseChange = exports.checkDeliveryProximity = exports.syncSellerLocation = exports.sellerDailyRecap = exports.abandonedCartReminder = exports.smartReorderReminder = exports.notifyPriceDrop = exports.weeklyInterestDigest = exports.notifyRestockMatch = exports.flushQueuedPersonalizedNotifications = exports.syncProductSearchKeywords = exports.remindUnconfirmedDelivery = exports.notifyNewReview = exports.notifyDelivererClaimed = exports.notifyLowStock = exports.notifyOrderStatusStep = exports.notifyOrderCancelled = exports.notifyNewOrder = exports.notifyNewProduct = exports.onUserTokenSync = exports.processEmailQueue = exports.getRegistrationMetrics = exports.checkRegistrationHealth = exports.resetPasswordVerifyOtp = exports.resetPasswordSendOtp = exports.loginVerifyOtp = exports.loginSendOtp = exports.completeOrangeRegistration = exports.registrationVerify = exports.registrationResend = exports.registrationStart = exports.startGuestCheckoutSession = exports.claimGuestOrderSession = exports.findGuestOrders = exports.getDeliveryCodeAdmin = exports.getDeliveryCode = exports.confirmDeliveryWithCode = exports.claimOrder = exports.submitReview = exports.updateOrderStatus = void 0;
+exports.cleanupRegistrationLeftovers = exports.cleanupRegistrationRateLimits = exports.cleanupProcessedEvents = exports.notifyDeliveryPhaseChange = exports.checkDeliveryProximity = exports.syncSellerLocation = exports.sellerDailyRecap = exports.abandonedCartReminder = exports.smartReorderReminder = exports.notifyPriceDrop = exports.weeklyInterestDigest = exports.notifyRestockMatch = exports.flushQueuedPersonalizedNotifications = exports.syncProductSearchKeywords = exports.remindUnconfirmedDelivery = exports.notifyNewReview = exports.notifyDelivererClaimed = exports.notifyLowStock = exports.notifyOrderStatusStep = exports.notifyOrderCancelled = exports.notifyNewOrder = exports.notifyNewProduct = exports.onUserTokenSync = exports.processEmailQueue = exports.whatsappWebhook = exports.agentcorpGateway = exports.getRegistrationMetrics = exports.checkRegistrationHealth = exports.resetPasswordVerifyOtp = exports.resetPasswordSendOtp = exports.loginVerifyOtp = exports.loginSendOtp = exports.completeOrangeRegistration = exports.registrationVerify = exports.registrationResend = exports.registrationStart = exports.startGuestCheckoutSession = exports.claimGuestOrderSession = exports.findGuestOrders = exports.getDeliveryCodeAdmin = exports.getDeliveryCode = exports.confirmDeliveryWithCode = exports.claimOrder = exports.submitReview = exports.updateOrderStatus = void 0;
 // ============================================================
 //   index.ts — FUSION du système de notifications avancé
 //   (idempotence, tokens FCM en sous-collection, digest hebdo,
@@ -152,6 +152,27 @@ Object.defineProperty(exports, "resetPasswordVerifyOtp", { enumerable: true, get
 var monitoring_1 = require("./monitoring");
 Object.defineProperty(exports, "checkRegistrationHealth", { enumerable: true, get: function () { return monitoring_1.checkRegistrationHealth; } });
 Object.defineProperty(exports, "getRegistrationMetrics", { enumerable: true, get: function () { return monitoring_1.getRegistrationMetrics; } });
+// ============================================================
+//   AGENTCORP — passerelle d'actions des agents IA (Saliou et
+//   l'équipe « Opérations SunuMenef »). Point d'entrée HTTP signé
+//   (HMAC + horodatage) : catalogue des actions + exécution.
+//   Risques définis dans agentcorpGateway.ts : lecture automatique,
+//   modification/sensible seulement avec approved_by='propriétaire',
+//   paiements, remboursements, rôles, comptes et statut « livré »
+//   INTERDITS. Aucune suppression définitive ; chaque action est
+//   journalisée dans `agentcorp_actions`.
+//   Secrets requis : AGENTCORP_GATEWAY_SECRET et WHATSAPP_ACCESS_TOKEN (envoi des réponses validées)
+//   Déploiement isolé : firebase deploy --only functions:agentcorpGateway
+// ============================================================
+var agentcorpGateway_1 = require("./agentcorpGateway");
+Object.defineProperty(exports, "agentcorpGateway", { enumerable: true, get: function () { return agentcorpGateway_1.agentcorpGateway; } });
+// AGENTCORP — support client WhatsApp : webhook Meta (signature vérifiée) → agents
+// AgentCorp → réponse au client selon le mode choisi par le propriétaire
+// (off | brouillons | automatique). Voir whatsappSupport.ts.
+// Secrets : WHATSAPP_APP_SECRET, WHATSAPP_VERIFY_TOKEN, AGENTCORP_SUPPORT_TOKEN, WHATSAPP_ACCESS_TOKEN
+// Déploiement isolé : firebase deploy --only functions:whatsappWebhook
+var whatsappSupport_1 = require("./whatsappSupport");
+Object.defineProperty(exports, "whatsappWebhook", { enumerable: true, get: function () { return whatsappSupport_1.whatsappWebhook; } });
 exports.processEmailQueue = functions.firestore.onDocumentCreated({
     document: 'email_queue/{docId}',
     secrets: ['RESEND_API_KEY'],

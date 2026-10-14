@@ -4,7 +4,8 @@ import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@/contexts/AuthContext';
 import { doc, setDoc, getDoc, Timestamp } from 'firebase/firestore';
-import { db } from '@/lib/firebase/firebase';
+import { db, auth } from '@/lib/firebase/firebase';
+import { apiUrl } from '@/lib/api-config';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTES
@@ -15,60 +16,7 @@ const TOKEN_LIMIT = 500_000;
 // ─────────────────────────────────────────────────────────────────────────────
 // FIRESTORE HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
-async function verifyCodeFirestore(
-  code: string,
-): Promise<{ valid: boolean; days: number; reason?: string }> {
-  if (!db) return { valid: false, days: 0, reason: 'db_unavailable' };
-  try {
-    const { doc: fsDoc, getDoc: fsGetDoc } = await import('firebase/firestore');
-    const snap = await fsGetDoc(fsDoc(db, 'accessCodes', code));
-    if (!snap.exists()) return { valid: false, days: 0, reason: 'not_found' };
-    const data = snap.data();
-    if (data.used) return { valid: false, days: 0, reason: 'already_used' };
-    if (data.expiresAt && data.expiresAt.toDate() < new Date())
-      return { valid: false, days: 0, reason: 'expired' };
-    return { valid: true, days: data.days ?? 30 };
-  } catch (e) {
-    console.error('verifyCodeFirestore:', e);
-    return { valid: false, days: 0, reason: 'error' };
-  }
-}
-
-async function markCodeUsed(code: string, userId: string) {
-  if (!db) return;
-  try {
-    const { doc: fsDoc, updateDoc, Timestamp: TS } = await import('firebase/firestore');
-    await updateDoc(fsDoc(db, 'accessCodes', code), {
-      used: true,
-      usedBy: userId,
-      usedAt: TS.now(),
-    });
-  } catch (e) {
-    console.error('markCodeUsed:', e);
-  }
-}
-
-async function grantAIAccess(userId: string, days: number) {
-  if (!db) return;
-  const expiry = new Date();
-  expiry.setDate(expiry.getDate() + days);
-  await setDoc(
-    doc(db, 'users', userId),
-    {
-      hasAIAccess: true,
-      aiExpiryDate: Timestamp.fromDate(expiry),
-      aiUnlockedAt: Timestamp.now(),
-      aiTokensUsed: 0,
-      aiTokensLimit: TOKEN_LIMIT,
-      aiAlertSent: false,
-      aiLastUsageAt: null,
-    },
-    { merge: true },
-  );
-  localStorage.setItem('ai_user_id', userId);
-  localStorage.setItem('ai_code_expiry', expiry.getTime().toString());
-  localStorage.setItem('ai_tokens_limit', TOKEN_LIMIT.toString());
-}
+// Vérification, marquage du code et octroi de l'accès : désormais côté serveur (/api/ai/redeem).
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TYPES & CONSTANTES UI
@@ -168,10 +116,16 @@ export default function UnlockIAPage() {
     setLoading(true);
     setError('');
     try {
-      const { valid, days, reason } = await verifyCodeFirestore(trimmed);
+      // Vérification + activation faites par le SERVEUR, en une seule transaction.
+      const idToken = await auth.currentUser?.getIdToken();
+      if (!idToken) { setError("Vous devez être connecté pour activer l'accès."); return; }
+      const resp = await fetch(apiUrl('/api/ai/redeem'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({ code: trimmed }),
+      });
+      const { valid, days, reason } = await resp.json().catch(() => ({ valid: false, reason: 'error' }));
       if (valid) {
-        await grantAIAccess(user.uid, days);
-        await markCodeUsed(trimmed, user.uid);
         setExpiryDays(days);
         setStep('success');
         return;
