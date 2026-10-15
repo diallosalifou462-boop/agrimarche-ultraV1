@@ -40,7 +40,14 @@ const now = () => admin.firestore.FieldValue.serverTimestamp();
 export type Deps = { fetch: typeof fetch; env: Record<string, string | undefined> };
 const defaultDeps = (): Deps => ({ fetch: (globalThis as any).fetch, env: process.env });
 
-export type Inbound = { phone: string; name: string; text: string; wamid: string; type: string };
+export type Inbound = { phone: string; name: string; text: string; wamid: string; type: string;
+                         mediaId?: string; mime?: string; mediaPath?: string };
+
+const MEDIA_TYPES = ['audio', 'voice', 'image', 'video', 'document', 'sticker'];
+const MAX_MEDIA_BYTES = 16 * 1024 * 1024;
+const EXT: Record<string, string> = { 'audio/ogg': 'ogg', 'audio/mpeg': 'mp3', 'audio/mp4': 'm4a', 'audio/amr': 'amr',
+  'audio/aac': 'aac', 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'video/mp4': 'mp4',
+  'application/pdf': 'pdf' };
 
 export function normalizePhone(raw: unknown): string | null {
   let d = String(raw ?? '').replace(/\D/g, '');
@@ -70,8 +77,11 @@ export function extractMessages(payload: any): Inbound[] {
         const text = type === 'text' ? String(m.text?.body ?? '')
           : type === 'button' ? String(m.button?.text ?? '')
           : type === 'interactive' ? String(m.interactive?.button_reply?.title ?? m.interactive?.list_reply?.title ?? '')
+          : MEDIA_TYPES.includes(type) ? String(m[type]?.caption ?? '')
           : '';
-        out.push({ phone, name: names[String(m.from)] ?? '', text: text.slice(0, 1500), wamid: String(m.id), type });
+        const media = MEDIA_TYPES.includes(type) ? m[type] : null;
+        out.push({ phone, name: names[String(m.from)] ?? '', text: text.slice(0, 1500), wamid: String(m.id), type,
+                   ...(media?.id ? { mediaId: String(media.id), mime: String(media.mime_type ?? '').split(';')[0] } : {}) });
       }
     }
   }
@@ -100,6 +110,28 @@ export async function withinCustomerWindow(phone: string): Promise<boolean> {
   return ms > 0 && Date.now() - ms < WINDOW_MS;
 }
 
+// Vocaux / photos : téléchargés depuis Meta (le lien Meta expire vite) et rangés dans Firebase Storage,
+// chemin whatsapp_media/<numéro>/<id du message>.<ext>. Lisibles seulement par le serveur (Admin SDK).
+export async function storeMedia(m: Inbound, deps: Deps): Promise<string | null> {
+  const token = deps.env.WHATSAPP_ACCESS_TOKEN;
+  if (!m.mediaId || !token) return null;
+  const meta = await deps.fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(m.mediaId)}`,
+                                { headers: { Authorization: `Bearer ${token}` } });
+  if (!meta.ok) throw new Error(`Média introuvable chez Meta (${meta.status})`);
+  const info: any = await meta.json();
+  if (Number(info.file_size) > MAX_MEDIA_BYTES) throw new Error('Média trop volumineux');
+  const url = String(info.url ?? '');
+  if (!/^https:\/\/[a-z0-9.-]+\.(fbsbx\.com|facebook\.com|whatsapp\.net)\//i.test(url)) throw new Error('URL de média inattendue');
+  const file = await deps.fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!file.ok) throw new Error(`Téléchargement du média refusé (${file.status})`);
+  const buf = Buffer.from(await file.arrayBuffer());
+  if (buf.length > MAX_MEDIA_BYTES) throw new Error('Média trop volumineux');
+  const mime = String(info.mime_type ?? m.mime ?? 'application/octet-stream').split(';')[0];
+  const path = `whatsapp_media/${m.phone}/${m.wamid.replace(/[^A-Za-z0-9._-]/g, '_')}.${EXT[mime] ?? 'bin'}`;
+  await admin.storage().bucket().file(path).save(buf, { contentType: mime, resumable: false });
+  return path;
+}
+
 async function logMessage(phone: string, data: Record<string, unknown>) {
   await fdb().collection('support_conversations').doc(phone).collection('messages').add({ ...data, at: now() });
 }
@@ -113,7 +145,8 @@ async function askAgentCorp(m: Inbound, deps: Deps): Promise<{ action: string; r
     const res = await deps.fetch(`${base.replace(/\/$/, '')}/api/support/whatsapp`, {
       method: 'POST', signal: ctrl.signal,
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phone: m.phone, name: m.name, text: m.text, message_id: m.wamid, type: m.type }),
+      body: JSON.stringify({ phone: m.phone, name: m.name, text: m.text, message_id: m.wamid, type: m.type,
+                             media_path: m.mediaPath ?? '', mime: m.mime ?? '' }),
     });
     if (!res.ok) { console.error('[whatsappSupport] AgentCorp HTTP', res.status); return null; }
     const out: any = await res.json();
@@ -136,7 +169,13 @@ async function handleOne(m: Inbound, deps: Deps) {
   const before: any = (await conv.get()).data() ?? {};
   await conv.set({ phone: m.phone, name: m.name || before.name || '', lastText: m.text.slice(0, 300),
                    lastInboundAt: admin.firestore.Timestamp.now(), updatedAt: now() }, { merge: true });
-  await logMessage(m.phone, { direction: 'in', author: 'client', text: m.text, type: m.type, wamid: m.wamid });
+  if (m.mediaId) {
+    try { m.mediaPath = (await storeMedia(m, deps)) ?? undefined; } catch (e: any) {
+      console.error('[whatsappSupport] média non récupéré :', e?.message ?? e);
+    }
+  }
+  await logMessage(m.phone, { direction: 'in', author: 'client', text: m.text, type: m.type, wamid: m.wamid,
+                              ...(m.mediaPath ? { mediaPath: m.mediaPath, mime: m.mime ?? '' } : {}) });
   // 3. Agents
   const answer = await askAgentCorp(m, deps);
   if (answer) {

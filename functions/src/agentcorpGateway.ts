@@ -456,6 +456,19 @@ export const ACTIONS: Record<string, Action> = {
       return { items };
     },
   },
+  support_get_media: {
+    risk: 'read', description: "Support : récupérer un vocal / une photo envoyé par un client (pour que le propriétaire l'écoute).",
+    params: { path: 'whatsapp_media/…' },
+    run: async (p) => {
+      const path = str(p.path, 'path', 300);
+      if (!/^whatsapp_media\/[0-9]{8,15}\/[A-Za-z0-9._-]+$/.test(path)) throw new InputError('Chemin de média invalide');
+      const file = admin.storage().bucket().file(path);
+      const [meta] = await file.getMetadata();
+      if (Number(meta.size) > 16 * 1024 * 1024) throw new InputError('Média trop volumineux');
+      const [buf] = await file.download();
+      return { mime: meta.contentType ?? 'application/octet-stream', size: buf.length, data_b64: buf.toString('base64') };
+    },
+  },
   support_send_whatsapp: {
     risk: 'write', description: "Envoyer un message WhatsApp à un client qui a écrit il y a moins de 24 h (règle de Meta).",
     params: { phone: '221XXXXXXXXX', text: 'texte ≤ 4000' },

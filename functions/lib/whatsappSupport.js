@@ -39,6 +39,7 @@ exports.verifyMetaSignature = verifyMetaSignature;
 exports.extractMessages = extractMessages;
 exports.sendWhatsAppText = sendWhatsAppText;
 exports.withinCustomerWindow = withinCustomerWindow;
+exports.storeMedia = storeMedia;
 exports.processWebhook = processWebhook;
 // ============================================================
 //   whatsappSupport.ts — Webhook WhatsApp Cloud API → agents AgentCorp
@@ -77,6 +78,11 @@ exports.FALLBACK_TEXT = 'Merci pour votre message 🙏 Un conseiller Sunu Mëñ�
 const fdb = () => admin.firestore();
 const now = () => admin.firestore.FieldValue.serverTimestamp();
 const defaultDeps = () => ({ fetch: globalThis.fetch, env: process.env });
+const MEDIA_TYPES = ['audio', 'voice', 'image', 'video', 'document', 'sticker'];
+const MAX_MEDIA_BYTES = 16 * 1024 * 1024;
+const EXT = { 'audio/ogg': 'ogg', 'audio/mpeg': 'mp3', 'audio/mp4': 'm4a', 'audio/amr': 'amr',
+    'audio/aac': 'aac', 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'video/mp4': 'mp4',
+    'application/pdf': 'pdf' };
 function normalizePhone(raw) {
     let d = String(raw !== null && raw !== void 0 ? raw : '').replace(/\D/g, '');
     if (d.length === 9 && /^[37]/.test(d))
@@ -92,7 +98,7 @@ function verifyMetaSignature(raw, header, appSecret) {
 }
 // Extrait les messages entrants (on ignore les accusés de lecture / statuts).
 function extractMessages(payload) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x;
     const out = [];
     for (const entry of (_a = payload === null || payload === void 0 ? void 0 : payload.entry) !== null && _a !== void 0 ? _a : []) {
         for (const change of (_b = entry === null || entry === void 0 ? void 0 : entry.changes) !== null && _b !== void 0 ? _b : []) {
@@ -108,8 +114,10 @@ function extractMessages(payload) {
                 const text = type === 'text' ? String((_k = (_j = m.text) === null || _j === void 0 ? void 0 : _j.body) !== null && _k !== void 0 ? _k : '')
                     : type === 'button' ? String((_m = (_l = m.button) === null || _l === void 0 ? void 0 : _l.text) !== null && _m !== void 0 ? _m : '')
                         : type === 'interactive' ? String((_t = (_q = (_p = (_o = m.interactive) === null || _o === void 0 ? void 0 : _o.button_reply) === null || _p === void 0 ? void 0 : _p.title) !== null && _q !== void 0 ? _q : (_s = (_r = m.interactive) === null || _r === void 0 ? void 0 : _r.list_reply) === null || _s === void 0 ? void 0 : _s.title) !== null && _t !== void 0 ? _t : '')
-                            : '';
-                out.push({ phone, name: (_u = names[String(m.from)]) !== null && _u !== void 0 ? _u : '', text: text.slice(0, 1500), wamid: String(m.id), type });
+                            : MEDIA_TYPES.includes(type) ? String((_v = (_u = m[type]) === null || _u === void 0 ? void 0 : _u.caption) !== null && _v !== void 0 ? _v : '')
+                                : '';
+                const media = MEDIA_TYPES.includes(type) ? m[type] : null;
+                out.push(Object.assign({ phone, name: (_w = names[String(m.from)]) !== null && _w !== void 0 ? _w : '', text: text.slice(0, 1500), wamid: String(m.id), type }, ((media === null || media === void 0 ? void 0 : media.id) ? { mediaId: String(media.id), mime: String((_x = media.mime_type) !== null && _x !== void 0 ? _x : '').split(';')[0] } : {})));
             }
         }
     }
@@ -139,11 +147,38 @@ async function withinCustomerWindow(phone) {
     const ms = (_c = (_b = last === null || last === void 0 ? void 0 : last.toMillis) === null || _b === void 0 ? void 0 : _b.call(last)) !== null && _c !== void 0 ? _c : 0;
     return ms > 0 && Date.now() - ms < WINDOW_MS;
 }
+// Vocaux / photos : téléchargés depuis Meta (le lien Meta expire vite) et rangés dans Firebase Storage,
+// chemin whatsapp_media/<numéro>/<id du message>.<ext>. Lisibles seulement par le serveur (Admin SDK).
+async function storeMedia(m, deps) {
+    var _a, _b, _c, _d;
+    const token = deps.env.WHATSAPP_ACCESS_TOKEN;
+    if (!m.mediaId || !token)
+        return null;
+    const meta = await deps.fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(m.mediaId)}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!meta.ok)
+        throw new Error(`Média introuvable chez Meta (${meta.status})`);
+    const info = await meta.json();
+    if (Number(info.file_size) > MAX_MEDIA_BYTES)
+        throw new Error('Média trop volumineux');
+    const url = String((_a = info.url) !== null && _a !== void 0 ? _a : '');
+    if (!/^https:\/\/[a-z0-9.-]+\.(fbsbx\.com|facebook\.com|whatsapp\.net)\//i.test(url))
+        throw new Error('URL de média inattendue');
+    const file = await deps.fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!file.ok)
+        throw new Error(`Téléchargement du média refusé (${file.status})`);
+    const buf = Buffer.from(await file.arrayBuffer());
+    if (buf.length > MAX_MEDIA_BYTES)
+        throw new Error('Média trop volumineux');
+    const mime = String((_c = (_b = info.mime_type) !== null && _b !== void 0 ? _b : m.mime) !== null && _c !== void 0 ? _c : 'application/octet-stream').split(';')[0];
+    const path = `whatsapp_media/${m.phone}/${m.wamid.replace(/[^A-Za-z0-9._-]/g, '_')}.${(_d = EXT[mime]) !== null && _d !== void 0 ? _d : 'bin'}`;
+    await admin.storage().bucket().file(path).save(buf, { contentType: mime, resumable: false });
+    return path;
+}
 async function logMessage(phone, data) {
     await fdb().collection('support_conversations').doc(phone).collection('messages').add(Object.assign(Object.assign({}, data), { at: now() }));
 }
 async function askAgentCorp(m, deps) {
-    var _a, _b, _c;
+    var _a, _b, _c, _d, _e;
     const base = deps.env.AGENTCORP_URL, token = deps.env.AGENTCORP_SUPPORT_TOKEN;
     if (!base || !token)
         return null;
@@ -153,17 +188,18 @@ async function askAgentCorp(m, deps) {
         const res = await deps.fetch(`${base.replace(/\/$/, '')}/api/support/whatsapp`, {
             method: 'POST', signal: ctrl.signal,
             headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phone: m.phone, name: m.name, text: m.text, message_id: m.wamid, type: m.type }),
+            body: JSON.stringify({ phone: m.phone, name: m.name, text: m.text, message_id: m.wamid, type: m.type,
+                media_path: (_a = m.mediaPath) !== null && _a !== void 0 ? _a : '', mime: (_b = m.mime) !== null && _b !== void 0 ? _b : '' }),
         });
         if (!res.ok) {
             console.error('[whatsappSupport] AgentCorp HTTP', res.status);
             return null;
         }
         const out = await res.json();
-        return { action: String((_a = out === null || out === void 0 ? void 0 : out.action) !== null && _a !== void 0 ? _a : 'none'), reply: String((_b = out === null || out === void 0 ? void 0 : out.reply) !== null && _b !== void 0 ? _b : '') };
+        return { action: String((_c = out === null || out === void 0 ? void 0 : out.action) !== null && _c !== void 0 ? _c : 'none'), reply: String((_d = out === null || out === void 0 ? void 0 : out.reply) !== null && _d !== void 0 ? _d : '') };
     }
     catch (e) {
-        console.error('[whatsappSupport] AgentCorp injoignable :', (_c = e === null || e === void 0 ? void 0 : e.message) !== null && _c !== void 0 ? _c : e);
+        console.error('[whatsappSupport] AgentCorp injoignable :', (_e = e === null || e === void 0 ? void 0 : e.message) !== null && _e !== void 0 ? _e : e);
         return null;
     }
     finally {
@@ -171,7 +207,7 @@ async function askAgentCorp(m, deps) {
     }
 }
 async function handleOne(m, deps) {
-    var _a, _b, _c, _d, _e, _f, _g;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
     // 1. Dédoublonnage
     const seen = fdb().collection('whatsapp_inbound').doc(m.wamid);
     if ((await seen.get()).exists)
@@ -182,7 +218,15 @@ async function handleOne(m, deps) {
     const before = (_a = (await conv.get()).data()) !== null && _a !== void 0 ? _a : {};
     await conv.set({ phone: m.phone, name: m.name || before.name || '', lastText: m.text.slice(0, 300),
         lastInboundAt: admin.firestore.Timestamp.now(), updatedAt: now() }, { merge: true });
-    await logMessage(m.phone, { direction: 'in', author: 'client', text: m.text, type: m.type, wamid: m.wamid });
+    if (m.mediaId) {
+        try {
+            m.mediaPath = (_b = (await storeMedia(m, deps))) !== null && _b !== void 0 ? _b : undefined;
+        }
+        catch (e) {
+            console.error('[whatsappSupport] média non récupéré :', (_c = e === null || e === void 0 ? void 0 : e.message) !== null && _c !== void 0 ? _c : e);
+        }
+    }
+    await logMessage(m.phone, Object.assign({ direction: 'in', author: 'client', text: m.text, type: m.type, wamid: m.wamid }, (m.mediaPath ? { mediaPath: m.mediaPath, mime: (_d = m.mime) !== null && _d !== void 0 ? _d : '' } : {})));
     // 3. Agents
     const answer = await askAgentCorp(m, deps);
     if (answer) {
@@ -193,15 +237,15 @@ async function handleOne(m, deps) {
                 return 'sent';
             }
             catch (e) {
-                await logMessage(m.phone, { direction: 'out', author: 'agent', text: answer.reply, error: String((_b = e === null || e === void 0 ? void 0 : e.message) !== null && _b !== void 0 ? _b : e) });
+                await logMessage(m.phone, { direction: 'out', author: 'agent', text: answer.reply, error: String((_e = e === null || e === void 0 ? void 0 : e.message) !== null && _e !== void 0 ? _e : e) });
                 return 'send_failed';
             }
         }
         return 'no_reply';
     }
     // 4. AgentCorp indisponible : message d'attente seulement si tu l'as activé
-    const cfg = (_c = (await fdb().collection('agentcorp_config').doc('whatsapp_support').get()).data()) !== null && _c !== void 0 ? _c : {};
-    const lastFallback = (_f = (_e = (_d = before.fallbackAt) === null || _d === void 0 ? void 0 : _d.toMillis) === null || _e === void 0 ? void 0 : _e.call(_d)) !== null && _f !== void 0 ? _f : 0;
+    const cfg = (_f = (await fdb().collection('agentcorp_config').doc('whatsapp_support').get()).data()) !== null && _f !== void 0 ? _f : {};
+    const lastFallback = (_j = (_h = (_g = before.fallbackAt) === null || _g === void 0 ? void 0 : _g.toMillis) === null || _h === void 0 ? void 0 : _h.call(_g)) !== null && _j !== void 0 ? _j : 0;
     if (cfg.fallbackEnabled === true && Date.now() - lastFallback > FALLBACK_EVERY_MS) {
         try {
             await sendWhatsAppText(m.phone, exports.FALLBACK_TEXT, deps);
@@ -210,7 +254,7 @@ async function handleOne(m, deps) {
             return 'fallback';
         }
         catch (e) {
-            console.error('[whatsappSupport] attente non envoyée :', (_g = e === null || e === void 0 ? void 0 : e.message) !== null && _g !== void 0 ? _g : e);
+            console.error('[whatsappSupport] attente non envoyée :', (_k = e === null || e === void 0 ? void 0 : e.message) !== null && _k !== void 0 ? _k : e);
         }
     }
     return 'agentcorp_unavailable';
