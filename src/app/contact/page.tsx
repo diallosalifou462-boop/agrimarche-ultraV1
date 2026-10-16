@@ -7,7 +7,7 @@ import type { Metadata } from 'next';
 
 const NOM_LEGAL = 'Salifou Diallo';                 // doit être identique au nom légal déclaré chez Meta
 const NOM_COMMERCIAL = 'SunuMëñëf';
-const ADRESSE = 'Tivaouane Diacksao, Dakar, Sénégal'; // identique à ta facture / ton relevé
+const ADRESSE = 'Tivaoune Diacksao, Thiès, Sénégal'; // identique à la facture Senelec et à Meta
 const TELEPHONE = '+221 70 110 43 38';
 const WHATSAPP = '221701104338';
 const EMAIL = '';                                    // À REMPLIR si tu veux afficher un e-mail (sinon laisse vide)
