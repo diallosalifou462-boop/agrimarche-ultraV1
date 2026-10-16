@@ -46,7 +46,7 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 type Risk = 'read' | 'write' | 'sensitive' | 'forbidden';
-type Ctx = { agentId: string; agentName: string; missionId: string | null; approvedBy: string };
+type Ctx = { agentId: string; agentName: string; missionId: string | null; approvedBy: string; actor: string };
 type Action = { risk: Risk; description: string; params: Record<string, string>; run: (p: any, ctx: Ctx) => Promise<unknown> };
 
 const fdb = () => admin.firestore();
@@ -208,6 +208,51 @@ export const ACTIONS: Record<string, Action> = {
         }
       });
       return out;
+    },
+  },
+  sales_report: {
+    risk: 'read', description: "Analyse des ventes sur N jours : par jour, par produit, par canal, jour de semaine et heure, comparée à la période précédente.",
+    params: { days: 'nombre (défaut 30, max 365)' },
+    run: async (p) => {
+      const days = Math.min(Math.max(Number(p.days) || 30, 1), 365);
+      const now = Date.now(), start = now - days * 86_400_000, prevStart = start - days * 86_400_000;
+      const snap = await fdb().collection('orders').where('createdAt', '>=', admin.firestore.Timestamp.fromMillis(prevStart)).get();
+      const blank = () => ({ orders: 0, delivered: 0, cancelled: 0, in_progress: 0, revenue_fcfa: 0, delivered_revenue_fcfa: 0, commission_fcfa: 0 });
+      const cur = blank(), prev = blank();
+      const byDay: Record<string, { orders: number; revenue_fcfa: number }> = {};
+      const byProduct: Record<string, { name: string; quantity: number; orders: number; revenue_fcfa: number }> = {};
+      const bySource: Record<string, { orders: number; revenue_fcfa: number }> = {};
+      const byWeekday = [0, 0, 0, 0, 0, 0, 0], byHour = new Array(24).fill(0);
+      snap.docs.forEach((d: any) => {
+        const o = d.data();
+        const ms = o.createdAt?.toMillis?.() ?? 0;
+        if (!ms) return;
+        const t = ms >= start ? cur : prev;
+        const total = Number(o.total ?? o.amount ?? 0);
+        const cancelled = o.status === 'annule';
+        t.orders++;
+        if (cancelled) t.cancelled++; else t.revenue_fcfa += total;
+        if (o.status === 'livre') { t.delivered++; t.delivered_revenue_fcfa += total; t.commission_fcfa += Number(o.commission ?? 0); }
+        else if (!cancelled) t.in_progress++;
+        if (ms < start || cancelled) return;
+        const day = new Date(ms).toISOString().slice(0, 10); // Dakar = UTC
+        byDay[day] = byDay[day] ?? { orders: 0, revenue_fcfa: 0 };
+        byDay[day].orders++; byDay[day].revenue_fcfa += total;
+        const src = String(o.source ?? 'app');
+        bySource[src] = bySource[src] ?? { orders: 0, revenue_fcfa: 0 };
+        bySource[src].orders++; bySource[src].revenue_fcfa += total;
+        byWeekday[new Date(ms).getUTCDay()]++; byHour[new Date(ms).getUTCHours()]++;
+        for (const i of o.items ?? []) {
+          const name = String(i.productName ?? i.name ?? 'Produit').slice(0, 80);
+          const qty = Number(i.quantity ?? 1);
+          const unit = Number(i.price ?? i.unitPrice ?? 0);
+          byProduct[name] = byProduct[name] ?? { name, quantity: 0, orders: 0, revenue_fcfa: 0 };
+          byProduct[name].quantity += qty; byProduct[name].orders++; byProduct[name].revenue_fcfa += unit * qty;
+        }
+      });
+      const top = Object.values(byProduct).sort((a, b) => b.revenue_fcfa - a.revenue_fcfa || b.quantity - a.quantity).slice(0, 10);
+      return { days, current: cur, previous: prev, by_day: byDay, top_products: top, by_source: bySource,
+               by_weekday: byWeekday, by_hour: byHour, scanned: snap.size };
     },
   },
   list_users: {
@@ -481,7 +526,7 @@ export const ACTIONS: Record<string, Action> = {
       }
       const r = await sendWhatsAppText(phone, text);
       await fdb().collection('support_conversations').doc(phone).collection('messages').add({
-        direction: 'out', author: ctx.approvedBy === 'propriétaire' ? 'owner' : 'agent', text, wamid: r.wamid, at: now() });
+        direction: 'out', author: ctx.actor.startsWith('saliou') || ctx.approvedBy !== 'propriétaire' ? 'agent' : 'owner', text, wamid: r.wamid, at: now() });
       return { sent: true, wamid: r.wamid };
     },
   },
@@ -517,7 +562,8 @@ export async function handle(method: string, path: string, raw: string, headers:
   const meta = req.meta ?? {};
   if (def.risk !== 'read' && meta.approved_by !== 'propriétaire') return { status: 403, body: { error: 'Approbation du propriétaire requise' } };
   const ctx: Ctx = { agentId: String(meta.agent_id ?? ''), agentName: String(meta.agent_name ?? ''),
-                     missionId: meta.mission_id ?? null, approvedBy: String(meta.approved_by ?? '') };
+                     missionId: meta.mission_id ?? null, approvedBy: String(meta.approved_by ?? ''),
+                     actor: String(meta.actor ?? '').slice(0, 40) };
   const log = fdb().collection('agentcorp_actions').doc();
   try {
     const result = await def.run(req.params ?? {}, ctx);
@@ -529,7 +575,10 @@ export async function handle(method: string, path: string, raw: string, headers:
   }
 }
 
-export const agentcorpGateway = onRequest({ region: 'us-central1', secrets: [SECRET_NAME, 'WHATSAPP_ACCESS_TOKEN'], cors: false, timeoutSeconds: 120 }, async (req: any, res: any) => {
+// Secret d'envoi WhatsApp selon le fournisseur choisi dans functions/.env (WHATSAPP_PROVIDER=infobip ou meta).
+const WHATSAPP_SEND_SECRET = (process.env.WHATSAPP_PROVIDER ?? '').toLowerCase() === 'infobip' ? 'INFOBIP_API_KEY' : 'WHATSAPP_ACCESS_TOKEN';
+
+export const agentcorpGateway = onRequest({ region: 'us-central1', secrets: [SECRET_NAME, WHATSAPP_SEND_SECRET], cors: false, timeoutSeconds: 120 }, async (req: any, res: any) => {
   const raw = req.method === 'POST' ? (req.rawBody ? req.rawBody.toString('utf8') : '') : '{}';
   const out = await handle(req.method, req.path, raw, {
     'x-agentcorp-timestamp': req.get('x-agentcorp-timestamp'), 'x-agentcorp-signature': req.get('x-agentcorp-signature'),

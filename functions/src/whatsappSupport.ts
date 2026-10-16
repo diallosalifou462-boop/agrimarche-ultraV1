@@ -41,7 +41,7 @@ export type Deps = { fetch: typeof fetch; env: Record<string, string | undefined
 const defaultDeps = (): Deps => ({ fetch: (globalThis as any).fetch, env: process.env });
 
 export type Inbound = { phone: string; name: string; text: string; wamid: string; type: string;
-                         mediaId?: string; mime?: string; mediaPath?: string };
+                         mediaId?: string; mediaUrl?: string; mime?: string; mediaPath?: string };
 
 const MEDIA_TYPES = ['audio', 'voice', 'image', 'video', 'document', 'sticker'];
 const MAX_MEDIA_BYTES = 16 * 1024 * 1024;
@@ -89,7 +89,31 @@ export function extractMessages(payload: any): Inbound[] {
 }
 
 // Envoi d'un message texte (réponse dans la fenêtre de 24 h ouverte par le client).
+// WHATSAPP_PROVIDER=infobip (functions/.env) → envoi par Infobip ; sinon → Graph API de Meta.
+export const usesInfobip = (env: Record<string, string | undefined>) => (env.WHATSAPP_PROVIDER ?? '').toLowerCase() === 'infobip';
+
+export function infobipBase(env: Record<string, string | undefined>): string {
+  const base = String(env.INFOBIP_BASE_URL ?? '').trim().replace(/\/$/, '');
+  const url = /^https?:\/\//i.test(base) ? base : `https://${base}`;
+  if (!/^https:\/\/[a-z0-9-]+\.api(-[a-z0-9]+)?\.infobip\.com$/i.test(url)) throw new Error('INFOBIP_BASE_URL invalide (ex. xxxxx.api.infobip.com)');
+  return url;
+}
+
+async function sendViaInfobip(to: string, text: string, deps: Deps) {
+  const key = deps.env.INFOBIP_API_KEY, from = normalizePhone(deps.env.INFOBIP_WHATSAPP_SENDER);
+  if (!key || !from) throw new Error('INFOBIP_API_KEY ou INFOBIP_WHATSAPP_SENDER manquant');
+  const res = await deps.fetch(`${infobipBase(deps.env)}/whatsapp/1/message/text`, {
+    method: 'POST',
+    headers: { Authorization: `App ${key}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ from, to, content: { text: text.slice(0, 4000) } }),
+  });
+  const body: any = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`Envoi Infobip refusé (${res.status}) : ${JSON.stringify(body?.requestError ?? body).slice(0, 300)}`);
+  return { wamid: body?.messageId ?? null };
+}
+
 export async function sendWhatsAppText(to: string, text: string, deps: Deps = defaultDeps()) {
+  if (usesInfobip(deps.env)) return sendViaInfobip(to, text, deps);
   const id = deps.env.WHATSAPP_PHONE_NUMBER_ID, token = deps.env.WHATSAPP_ACCESS_TOKEN;
   if (!id || !token) throw new Error('WHATSAPP_PHONE_NUMBER_ID ou WHATSAPP_ACCESS_TOKEN manquant');
   const res = await deps.fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${id}/messages`, {
@@ -112,7 +136,30 @@ export async function withinCustomerWindow(phone: string): Promise<boolean> {
 
 // Vocaux / photos : téléchargés depuis Meta (le lien Meta expire vite) et rangés dans Firebase Storage,
 // chemin whatsapp_media/<numéro>/<id du message>.<ext>. Lisibles seulement par le serveur (Admin SDK).
+async function saveMedia(m: Inbound, buf: Buffer, mimeRaw: string): Promise<string> {
+  if (buf.length > MAX_MEDIA_BYTES) throw new Error('Média trop volumineux');
+  const mime = String(mimeRaw || 'application/octet-stream').split(';')[0].trim().toLowerCase();
+  m.mime = mime;
+  const path = `whatsapp_media/${m.phone}/${m.wamid.replace(/[^A-Za-z0-9._-]/g, '_')}.${EXT[mime] ?? 'bin'}`;
+  await admin.storage().bucket().file(path).save(buf, { contentType: mime, resumable: false });
+  return path;
+}
+
+// Infobip : le lien du média pointe vers l'API Infobip et exige la clé (conservé 7 jours chez Infobip).
+async function storeInfobipMedia(m: Inbound, deps: Deps): Promise<string | null> {
+  const key = deps.env.INFOBIP_API_KEY;
+  if (!m.mediaUrl || !key) return null;
+  if (!/^https:\/\/[a-z0-9-]+\.api(-[a-z0-9]+)?\.infobip\.com\//i.test(m.mediaUrl)) throw new Error('URL de média inattendue');
+  const file = await deps.fetch(m.mediaUrl, { headers: { Authorization: `App ${key}` } });
+  if (!file.ok) throw new Error(`Téléchargement du média refusé (${file.status})`);
+  const size = Number(file.headers?.get?.('content-length') ?? 0);
+  if (size > MAX_MEDIA_BYTES) throw new Error('Média trop volumineux');
+  const buf = Buffer.from(await file.arrayBuffer());
+  return saveMedia(m, buf, file.headers?.get?.('content-type') ?? m.mime ?? '');
+}
+
 export async function storeMedia(m: Inbound, deps: Deps): Promise<string | null> {
+  if (m.mediaUrl) return storeInfobipMedia(m, deps);
   const token = deps.env.WHATSAPP_ACCESS_TOKEN;
   if (!m.mediaId || !token) return null;
   const meta = await deps.fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(m.mediaId)}`,
@@ -136,7 +183,7 @@ async function logMessage(phone: string, data: Record<string, unknown>) {
   await fdb().collection('support_conversations').doc(phone).collection('messages').add({ ...data, at: now() });
 }
 
-async function askAgentCorp(m: Inbound, deps: Deps): Promise<{ action: string; reply: string } | null> {
+export async function askAgentCorp(m: Inbound, deps: Deps): Promise<{ action: string; reply: string } | null> {
   const base = deps.env.AGENTCORP_URL, token = deps.env.AGENTCORP_SUPPORT_TOKEN;
   if (!base || !token) return null;
   const ctrl = new AbortController();
@@ -159,7 +206,7 @@ async function askAgentCorp(m: Inbound, deps: Deps): Promise<{ action: string; r
   }
 }
 
-async function handleOne(m: Inbound, deps: Deps) {
+export async function handleOne(m: Inbound, deps: Deps) {
   // 1. Dédoublonnage
   const seen = fdb().collection('whatsapp_inbound').doc(m.wamid);
   if ((await seen.get()).exists) return 'duplicate';
@@ -169,7 +216,7 @@ async function handleOne(m: Inbound, deps: Deps) {
   const before: any = (await conv.get()).data() ?? {};
   await conv.set({ phone: m.phone, name: m.name || before.name || '', lastText: m.text.slice(0, 300),
                    lastInboundAt: admin.firestore.Timestamp.now(), updatedAt: now() }, { merge: true });
-  if (m.mediaId) {
+  if (m.mediaId || m.mediaUrl) {
     try { m.mediaPath = (await storeMedia(m, deps)) ?? undefined; } catch (e: any) {
       console.error('[whatsappSupport] média non récupéré :', e?.message ?? e);
     }
